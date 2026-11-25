@@ -1562,6 +1562,32 @@ proc essentialInHoldSet*(units, requirers, triggers: openArray[string];
     names.add(unitIds(host, triggers))
   essentialHeld(names)
 
+when defined(posix):
+  proc essentialRequirementRefusal*(p: SystemProfile; dir, root: string;
+                                    host: LiveHost): seq[string] =
+    ## §13 decision 192 (the owner's "refuse such applies", 2026-11-25): while
+    ## carried state is installed, an apply whose restore-requirement set
+    ## (``carriedRequirementRoutes``) would include an essential unit
+    ## (``EssentialUnits``, decision 177) is refused before it writes
+    ## anything. A requirement on an essential unit would keep remote access
+    ## down at every boot whose restore fails, and waiting at every boot
+    ## whose restore hangs. Each unit is matched by its systemd ``Id=``
+    ## (``unitId``: an alias is the unit it names, a template is read through
+    ## its observation instance, and an instance through its template, as
+    ## decision 177 resolves them). One message per essential unit, naming it
+    ## and the route that gives it the requirement; empty when none.
+    when ApplyMutation == "essential-restore-requirement-allowed":
+      # FALSIFYING MUTATION: the requirement is written on an essential unit.
+      return
+    for r in carriedRequirementRoutes(p, dir, root):
+      let id = unitId(host, r.unit)
+      if not (isEssentialUnit(r.unit) or isEssentialUnit(id)): continue
+      let named = if id != r.unit: r.unit & " (" & id & ")" else: r.unit
+      result.add("ECarriedStatePending: " & named & " is essential and would " &
+        "require the carried-state restore: " & r.route & "; while carried " &
+        "state is installed such an apply is refused, so that remote access " &
+        "never waits on the restore (§13 decision 192)")
+
 proc postReloadRequirers*(refused, held: openArray[string]; host: LiveHost):
     tuple[hold, essential: seq[string]] =
   ## After the drivers' reload: the units systemd's effective dependencies
@@ -2304,6 +2330,22 @@ proc runInfraApply*(profileText: string; opts: ApplyOptions): ApplyResult =
             raise newException(ECarriedStatePending, refused.join("; "))
       let ess = essentialRefusalBeforeWrites(essText, essDir, essRoot)
       if ess.len > 0: raise essentialRefusal(ess)
+  # Before anything at all, too, while carried state is installed: an
+  # essential unit the generation would make require the restore refuses
+  # the apply (§13 decision 192). After the two refusals above, which
+  # name a more specific reason when they apply.
+  when defined(posix):
+    if not opts.carriedStateChecked:
+      let reqDir = if opts.carriedStateDir.len > 0: opts.carriedStateDir
+                   else: CarriedStateDir
+      let reqRoot = if opts.carriedStateRoot.len > 0: opts.carriedStateRoot
+                    else: "/"
+      if carriedStateInstalled(reqDir):
+        let host = if reqRoot == "/": liveHost() else: LiveHost()
+        let refused = essentialRequirementRefusal(
+          parseSystemProfile(profileText), reqDir, reqRoot, host)
+        if refused.len > 0:
+          raise newException(ECarriedStatePending, refused.join("; "))
   # Before any mutation: an add-on switch interrupted on this host (its
   # pending marker present, its owner gone) is recovered first, under the
   # lock this apply already holds, and the apply refuses if it cannot be.

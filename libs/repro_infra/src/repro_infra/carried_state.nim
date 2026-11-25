@@ -1843,14 +1843,17 @@ proc bootClosure(p: SystemProfile; root: string): HashSet[string] =
     unitClosure(@["default.target"], p, root, defined, none,
                 profileLeftOut = true)
 
-proc carriedRequirementUnits*(p: SystemProfile; dir = CarriedStateDir;
-                              root = "/"): seq[string] =
-  ## The units of ``p`` that must require the first-boot restore: while
-  ## carried state is installed at ``dir`` (``install-unit`` left its marker
-  ## and the manifest is there), every unit whose reach includes a carried
-  ## directory -- by path or because it reaches everything -- whatever its
-  ## name and whether or not the manifest names it (A13 review round 4,
-  ## finding 4). Sorted; empty when no carried state is installed.
+proc carriedRequirementRoutes*(p: SystemProfile; dir = CarriedStateDir;
+                               root = "/"): seq[tuple[unit, route: string]] =
+  ## The units of ``p`` that must require the first-boot restore, each with
+  ## the route that gives it the requirement (§13 decision 192 names it in
+  ## its refusal): while carried state is installed at ``dir``
+  ## (``install-unit`` left its marker and the manifest is there), every
+  ## unit whose reach includes a carried directory -- by path or because it
+  ## reaches everything -- whatever its name and whether or not the
+  ## manifest names it (A13 review round 4, finding 4); a unit a profile
+  ## unit starts; and the onward closure of decision 60. Sorted by unit;
+  ## empty when no carried state is installed.
   when CarriedMutation == "restore-requirement-by-manifest-only":
     return
   if not carriedStateInstalled(dir):
@@ -1858,6 +1861,10 @@ proc carriedRequirementUnits*(p: SystemProfile; dir = CarriedStateDir;
   let m = readStateManifest(dir)
   let lookup = hostAccountLookup(root, p)
   var units = initHashSet[string]()
+  var routes = initTable[string, string]()
+  proc via(u, why: string) =
+    units.incl(u)
+    if u notin routes: routes[u] = why
   var dropInTargets: seq[string]
   for r in p.resources:
     let u = case r.kind
@@ -1877,8 +1884,12 @@ proc carriedRequirementUnits*(p: SystemProfile; dir = CarriedStateDir;
       for q in reach.paths:
         if reaches(q, e.path): hit = true
       if hit:
-        units.incl(u)
-        if r.kind == srkSystemdSystemDropIn: dropInTargets.add(u)
+        if r.kind == srkSystemdSystemDropIn:
+          via(u, "a profile drop-in over it (" & r.diName & ") makes it " &
+            "reach the carried state")
+          dropInTargets.add(u)
+        else:
+          via(u, "the profile defines it, and it reaches the carried state")
   # What a profile unit starts that the profile does not define reaches
   # everything (``triggersOutside``), and a requirement on the starting
   # unit does not hold it back: ``Wants=`` and the rest -- written in its
@@ -1908,7 +1919,7 @@ proc carriedRequirementUnits*(p: SystemProfile; dir = CarriedStateDir;
       for a in activatedUnits(name, suffix, texts, normalRoot(root)):
         if a notin defined and not a.endsWith(".slice") and
             a != CarriedRestoreUnit and not a.startsWith("<unparsed"):
-          units.incl(a)
+          via(a, "the profile's " & name & " starts it")
           direct.add(a)
   # And what those start in turn (§13 decision 60): the closure through
   # the host's unit files and drop-ins, as decision 53 reads them, of every
@@ -1939,9 +1950,18 @@ proc carriedRequirementUnits*(p: SystemProfile; dir = CarriedStateDir;
             a notin stop:
           next.add(a)
     for u in unitClosure(next, p, root, stop, uncertain):
-      units.incl(u)
-  for u in units: result.add(u)
-  result.sort()
+      via(u, "a unit the profile starts starts it in turn, and the host's " &
+        "boot does not (decision 60's onward closure)")
+  var names: seq[string]
+  for u in units: names.add(u)
+  names.sort()
+  for u in names: result.add((unit: u, route: routes.getOrDefault(u)))
+
+proc carriedRequirementUnits*(p: SystemProfile; dir = CarriedStateDir;
+                              root = "/"): seq[string] =
+  ## The units of ``p`` that must require the first-boot restore
+  ## (``carriedRequirementRoutes`` without the routes). Sorted.
+  for r in carriedRequirementRoutes(p, dir, root): result.add(r.unit)
 
 proc carriedRequirementText*(p: SystemProfile; dir = CarriedStateDir;
                              root = "/"): string =

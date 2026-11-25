@@ -638,6 +638,16 @@
 ##                                           hold (decisions 171 and 177)
 ## ``restart-success-by-exit-code``        a restart's exit code is taken as
 ##                                           its outcome (round 11, H1)
+## ``secret-put-unjudged``
+##     a secret put restarts its consumers on what systemd loaded, unjudged (round 15, decision 190)
+## ``restore-holds-sysinit``
+##     the restore unit is ordered Before=sysinit.target again (round 15, decision 191)
+## ``restore-removes-filled-placeholder``
+##     the restore removes its target recursively before the rename (round 15, decision 191)
+## ``restore-unbounded``
+##     the restore unit has no TimeoutStartSec= (round 15, decision 191)
+## ``essential-restore-requirement-allowed``
+##     an apply that gives an essential unit the restore requirement is not refused (round 15, decision 192)
 ## ``dropin-refusal-before-writes-skipped``
 ##     the refusal of a prefix or template drop-in that re-points triggers is not called before writes (round 15)
 ## ``interrupted-apply-unrecorded``
@@ -2274,6 +2284,11 @@ const
                           "restart-success-by-exit-code",
                           # A13 review round 15.
                           "dropin-refusal-before-writes-skipped",
+                          "secret-put-unjudged",
+                          "restore-holds-sysinit",
+                          "restore-removes-filled-placeholder",
+                          "restore-unbounded",
+                          "essential-restore-requirement-allowed",
                           # A13 review round 14.
                           "interrupted-apply-unrecorded",
                           "trigger-targets-by-name",
