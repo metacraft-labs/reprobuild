@@ -12556,6 +12556,37 @@ proc runProviderCompileEdge(plan: ProviderCompilePlan;
       interfacePath, artifactPath, helperCliPath, workDir, scratchDir)]),
       config)
 
+proc runVerifiedProviderCompileEdge(plan: ProviderCompilePlan;
+    modulePath, interfacePath, artifactPath, helperCliPath, workDir,
+    scratchDir, providerRoot: string; config: BuildEngineConfig;
+    observe: proc (run: BuildRunResult) {.closure.} = nil):
+    tuple[run: BuildRunResult, consistency: ProviderCompileConsistency] =
+  ## `runProviderCompileEdge`, then the post-execution check of what it left
+  ## (`verifyProviderCompileEdge`): an artifact that was SERVED and describes
+  ## some other compile is recompiled without the cache rather than failing
+  ## the build. A failed edge, or one that wrote no artifact, raises.
+  ## `observe` sees every run (one, or two when a recompile was needed);
+  ## `run` is the last. The caller acts on `consistency`.
+  var lastRun: BuildRunResult
+  let runEdge = proc (forceRebuild: bool): ProviderCompileEdgeRun =
+    var edgeConfig = config
+    edgeConfig.forceRebuild = edgeConfig.forceRebuild or forceRebuild
+    let run = runProviderCompileEdge(plan, modulePath, interfacePath,
+      artifactPath, helperCliPath, workDir, scratchDir, providerRoot,
+      edgeConfig)
+    lastRun = run
+    if observe != nil:
+      observe(run)
+    if run.hasFailedActions():
+      raise newException(OSError, providerCompileFailureWithLog(run,
+        artifactPath))
+    if not fileExists(extendedPath(artifactPath)):
+      raise newException(IOError,
+        "provider compile edge did not write artifact: " & artifactPath)
+    providerCompileEdgeRunOf(run)
+  let consistency = verifyProviderCompileEdge(plan, artifactPath, runEdge)
+  (run: lastRun, consistency: consistency)
+
 var interfaceEdgeSessionResults: Table[string, ProjectInterfaceArtifact]
   ## Per-PROCESS memo of extraction edges already materialized in this run,
   ## keyed by the edge's own identity (its argv hash).
@@ -15376,42 +15407,39 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       # stale daemon) is visibly attributed to the launch path rather
       # than the cache-freshness check above.
       progressRenderer.renderPhase("running provider compile")
-      providerCompileResult = runProviderCompileEdge(providerPlan,
+      let observeProviderCompile = proc (run: BuildRunResult) =
+        buildStats.mergeStats(run.stats)
+        warnRunQuotaBypassIfUsed(run, enabled = fallbackToRunQuotaBypass)
+        noteProviderCompileConsultation(run)
+        for item in run.results:
+          # `status`/`launched`/`cache` describe THIS consultation only.
+          # `consultations`/`compiled` describe the whole invocation, which
+          # is what a reader of this line is actually asking about — see
+          # `providerCompileLaunchedInThisProcess`.
+          logAction("providerCompileAction: " & item.id & " status=" &
+            $item.status & " launched=" & $item.launched & " cache=" &
+            $item.cacheDecision & " wouldLaunch=" & $item.wouldLaunch &
+            (if item.reason.len > 0: " reason=" & item.reason else: "") &
+            providerCompileInvocationSummary())
+        if run.hasFailedActions():
+          # The edge's action is built inside ``runProviderCompileEdge``, so
+          # the failure report carries its result without the declaration.
+          # The run raises right after this callback returns.
+          persistPreparationFailure("provider-compile", run,
+            newSeq[BuildAction]())
+      let verified = runVerifiedProviderCompileEdge(providerPlan,
         modulePath, interfacePath, providerArtifactPath,
         graphHelperCliPath(publicCliPath, ProviderCompileActionId), compileWorkDir,
-        compileScratchDir, result.projectRoot, providerCompileConfig)
-      buildStats.mergeStats(providerCompileResult.stats)
-      warnRunQuotaBypassIfUsed(providerCompileResult,
-        enabled = fallbackToRunQuotaBypass)
-      noteProviderCompileConsultation(providerCompileResult)
-      for item in providerCompileResult.results:
-        # `status`/`launched`/`cache` describe THIS consultation only.
-        # `consultations`/`compiled` describe the whole invocation, which
-        # is what a reader of this line is actually asking about — see
-        # `providerCompileLaunchedInThisProcess`.
-        logAction("providerCompileAction: " & item.id & " status=" &
-          $item.status & " launched=" & $item.launched & " cache=" &
-          $item.cacheDecision & " wouldLaunch=" & $item.wouldLaunch &
-          (if item.reason.len > 0: " reason=" & item.reason else: "") &
-          providerCompileInvocationSummary())
-      if providerCompileResult.hasFailedActions():
-        # The edge's action is built inside ``runProviderCompileEdge``, so
-        # the failure report carries its result without the declaration.
-        persistPreparationFailure("provider-compile", providerCompileResult,
-          newSeq[BuildAction]())
-        raise newException(OSError, providerCompileFailureWithLog(providerCompileResult,
-          providerArtifactPath))
-      if not fileExists(extendedPath(providerArtifactPath)):
-        raise newException(IOError,
-          "provider compile edge did not write artifact: " & providerArtifactPath)
-      provider = readProviderCompileArtifact(providerArtifactPath)
-      let providerConsistency = providerCompileConsistencyAfterExecution(
-        providerPlan, providerArtifactPath)
+        compileScratchDir, result.projectRoot, providerCompileConfig,
+        observeProviderCompile)
+      providerCompileResult = verified.run
+      let providerConsistency = verified.consistency
       if not providerConsistency.fresh:
         raise newException(IOError,
           "provider compile artifact is stale after edge execution: " &
             providerArtifactPath & "\n" & providerConsistency.detail)
-      if providerConsistency.reconciled:
+      provider = readProviderCompileArtifact(providerArtifactPath)
+      if providerConsistency.reconciled or providerConsistency.recompiled:
         logSummary("providerCompile: " & providerConsistency.detail)
       publishProviderCompileIfRequested(providerPlan,
         artifact.projectInterface.projectName, providerArtifactPath,
@@ -34587,18 +34615,16 @@ proc prepareBuildGraphInspection(target: string; mode: ToolProvisioningMode;
     # ANCESTOR of its working directory, so without the classification its
     # key carries the immediate membership of `/` and of the user's home.
     wireFilesystemRoots(providerCompileConfig, projectRoot, outDir)
-    let providerCompileResult = runProviderCompileEdge(providerPlan,
-      modulePath, interfacePath, providerArtifactPath,
-      graphHelperCliPath(publicCliPath, ProviderCompileActionId), compileWorkDir,
-      compileScratchDir, projectRoot, providerCompileConfig)
     # This pass logs nothing of its own, and it is the pass that most
     # often does the actual compiling. Record it so the ONE line that IS
     # logged (in `executeBuildTarget`) can report the invocation rather
     # than just its own last consultation.
-    noteProviderCompileConsultation(providerCompileResult)
-    if providerCompileResult.hasFailedActions():
-      raise newException(OSError, providerCompileFailureWithLog(providerCompileResult,
-          providerArtifactPath))
+    let verified = runVerifiedProviderCompileEdge(providerPlan,
+      modulePath, interfacePath, providerArtifactPath,
+      graphHelperCliPath(publicCliPath, ProviderCompileActionId), compileWorkDir,
+      compileScratchDir, projectRoot, providerCompileConfig,
+      proc (run: BuildRunResult) = noteProviderCompileConsultation(run))
+    let providerCompileResult = verified.run
     # Re-derived from the engine's own decision now that the hand-written
     # freshness gate is gone: the edge was scheduled, and the engine either
     # restored its outputs from the CAS (``asCacheHit``) or accepted the
@@ -34607,12 +34633,8 @@ proc prepareBuildGraphInspection(target: string; mode: ToolProvisioningMode;
     for item in providerCompileResult.results:
       if item.id == ProviderCompileActionId:
         result.providerCompileCacheHit = item.status in {asCacheHit, asUpToDate}
-    if not fileExists(extendedPath(providerArtifactPath)):
-      raise newException(IOError,
-        "provider compile edge did not write artifact: " & providerArtifactPath)
     provider = readProviderCompileArtifact(providerArtifactPath)
-    let providerConsistency = providerCompileConsistencyAfterExecution(
-      providerPlan, providerArtifactPath)
+    let providerConsistency = verified.consistency
     if not providerConsistency.fresh:
       raise newException(IOError,
         "provider compile artifact is stale after edge execution: " &
@@ -34817,21 +34839,20 @@ proc refreshRecipeProviderSnapshot(target: string;
     # ANCESTOR of its working directory, so without the classification its
     # key carries the immediate membership of `/` and of the user's home.
     wireFilesystemRoots(providerCompileConfig, projectRoot, outDir)
-    let providerCompileResult = runProviderCompileEdge(providerPlan,
-      modulePath, interfacePath, providerArtifactPath,
-      graphHelperCliPath(publicCliPath, ProviderCompileActionId), compileWorkDir,
-      compileScratchDir, projectRoot, providerCompileConfig)
     # This pass logs nothing of its own, and it is the pass that most
     # often does the actual compiling. Record it so the ONE line that IS
     # logged (in `executeBuildTarget`) can report the invocation rather
     # than just its own last consultation.
-    noteProviderCompileConsultation(providerCompileResult)
-    if providerCompileResult.hasFailedActions():
-      raise newException(OSError, providerCompileFailureWithLog(providerCompileResult,
-          providerArtifactPath))
-    if not fileExists(extendedPath(providerArtifactPath)):
+    let providerConsistency = runVerifiedProviderCompileEdge(providerPlan,
+      modulePath, interfacePath, providerArtifactPath,
+      graphHelperCliPath(publicCliPath, ProviderCompileActionId), compileWorkDir,
+      compileScratchDir, projectRoot, providerCompileConfig,
+      proc (run: BuildRunResult) = noteProviderCompileConsultation(run)).
+      consistency
+    if not providerConsistency.fresh:
       raise newException(IOError,
-        "provider compile edge did not write artifact: " & providerArtifactPath)
+        "provider compile artifact is stale after edge execution: " &
+          providerArtifactPath & "\n" & providerConsistency.detail)
     provider = readProviderCompileArtifact(providerArtifactPath)
 
   let providerArtifactId = digestHex(provider.providerFingerprint)
@@ -98775,7 +98796,7 @@ proc solverInputsFromCompiledProvider(projectDir: string;
         # The provider runs below with its cwd at the project directory.
         let providerRoot =
           if projectDir.len > 0: absolutePath(projectDir) else: getCurrentDir()
-        let compiled = runProviderCompileEdge(plan,
+        let lockProviderConsistency = runVerifiedProviderCompileEdge(plan,
           modulePath, interfacePath, providerArtifactPath,
           graphHelperCliPath(publicCliPath, ProviderCompileActionId), compileWorkDir, scratchDir,
           providerRoot, BuildEngineConfig(
@@ -98792,12 +98813,7 @@ proc solverInputsFromCompiledProvider(projectDir: string;
           bypassRunQuota: runQuotaBypassedByEnv(),
           inlineRunQuota: true,
           suppressTrace: true,
-          skipCacheHitEvidence: true))
-        if compiled.hasFailedActions():
-          raise newException(OSError, providerCompileFailureWithLog(compiled,
-          providerArtifactPath))
-        let lockProviderConsistency = providerCompileConsistencyAfterExecution(
-          plan, providerArtifactPath)
+          skipCacheHitEvidence: true)).consistency
         if not lockProviderConsistency.fresh:
           raise newException(IOError,
             "lock metadata provider artifact is stale after edge execution: " &
