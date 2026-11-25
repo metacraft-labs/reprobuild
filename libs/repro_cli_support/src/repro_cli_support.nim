@@ -12556,6 +12556,37 @@ proc runProviderCompileEdge(plan: ProviderCompilePlan;
       interfacePath, artifactPath, helperCliPath, workDir, scratchDir)]),
       config)
 
+proc runVerifiedProviderCompileEdge(plan: ProviderCompilePlan;
+    modulePath, interfacePath, artifactPath, helperCliPath, workDir,
+    scratchDir, providerRoot: string; config: BuildEngineConfig;
+    observe: proc (run: BuildRunResult) {.closure.} = nil):
+    tuple[run: BuildRunResult, consistency: ProviderCompileConsistency] =
+  ## `runProviderCompileEdge`, then the post-execution check of what it left
+  ## (`verifyProviderCompileEdge`): an artifact that was SERVED and describes
+  ## some other compile is recompiled without the cache rather than failing
+  ## the build. A failed edge, or one that wrote no artifact, raises.
+  ## `observe` sees every run (one, or two when a recompile was needed);
+  ## `run` is the last. The caller acts on `consistency`.
+  var lastRun: BuildRunResult
+  let runEdge = proc (forceRebuild: bool): ProviderCompileEdgeRun =
+    var edgeConfig = config
+    edgeConfig.forceRebuild = edgeConfig.forceRebuild or forceRebuild
+    let run = runProviderCompileEdge(plan, modulePath, interfacePath,
+      artifactPath, helperCliPath, workDir, scratchDir, providerRoot,
+      edgeConfig)
+    lastRun = run
+    if observe != nil:
+      observe(run)
+    if run.hasFailedActions():
+      raise newException(OSError, providerCompileFailureWithLog(run,
+        artifactPath))
+    if not fileExists(extendedPath(artifactPath)):
+      raise newException(IOError,
+        "provider compile edge did not write artifact: " & artifactPath)
+    providerCompileEdgeRunOf(run)
+  let consistency = verifyProviderCompileEdge(plan, artifactPath, runEdge)
+  (run: lastRun, consistency: consistency)
+
 var interfaceEdgeSessionResults: Table[string, ProjectInterfaceArtifact]
   ## Per-PROCESS memo of extraction edges already materialized in this run,
   ## keyed by the edge's own identity (its argv hash).
@@ -15376,42 +15407,39 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       # stale daemon) is visibly attributed to the launch path rather
       # than the cache-freshness check above.
       progressRenderer.renderPhase("running provider compile")
-      providerCompileResult = runProviderCompileEdge(providerPlan,
+      let observeProviderCompile = proc (run: BuildRunResult) =
+        buildStats.mergeStats(run.stats)
+        warnRunQuotaBypassIfUsed(run, enabled = fallbackToRunQuotaBypass)
+        noteProviderCompileConsultation(run)
+        for item in run.results:
+          # `status`/`launched`/`cache` describe THIS consultation only.
+          # `consultations`/`compiled` describe the whole invocation, which
+          # is what a reader of this line is actually asking about — see
+          # `providerCompileLaunchedInThisProcess`.
+          logAction("providerCompileAction: " & item.id & " status=" &
+            $item.status & " launched=" & $item.launched & " cache=" &
+            $item.cacheDecision & " wouldLaunch=" & $item.wouldLaunch &
+            (if item.reason.len > 0: " reason=" & item.reason else: "") &
+            providerCompileInvocationSummary())
+        if run.hasFailedActions():
+          # The edge's action is built inside ``runProviderCompileEdge``, so
+          # the failure report carries its result without the declaration.
+          # The run raises right after this callback returns.
+          persistPreparationFailure("provider-compile", run,
+            newSeq[BuildAction]())
+      let verified = runVerifiedProviderCompileEdge(providerPlan,
         modulePath, interfacePath, providerArtifactPath,
         graphHelperCliPath(publicCliPath, ProviderCompileActionId), compileWorkDir,
-        compileScratchDir, result.projectRoot, providerCompileConfig)
-      buildStats.mergeStats(providerCompileResult.stats)
-      warnRunQuotaBypassIfUsed(providerCompileResult,
-        enabled = fallbackToRunQuotaBypass)
-      noteProviderCompileConsultation(providerCompileResult)
-      for item in providerCompileResult.results:
-        # `status`/`launched`/`cache` describe THIS consultation only.
-        # `consultations`/`compiled` describe the whole invocation, which
-        # is what a reader of this line is actually asking about — see
-        # `providerCompileLaunchedInThisProcess`.
-        logAction("providerCompileAction: " & item.id & " status=" &
-          $item.status & " launched=" & $item.launched & " cache=" &
-          $item.cacheDecision & " wouldLaunch=" & $item.wouldLaunch &
-          (if item.reason.len > 0: " reason=" & item.reason else: "") &
-          providerCompileInvocationSummary())
-      if providerCompileResult.hasFailedActions():
-        # The edge's action is built inside ``runProviderCompileEdge``, so
-        # the failure report carries its result without the declaration.
-        persistPreparationFailure("provider-compile", providerCompileResult,
-          newSeq[BuildAction]())
-        raise newException(OSError, providerCompileFailureWithLog(providerCompileResult,
-          providerArtifactPath))
-      if not fileExists(extendedPath(providerArtifactPath)):
-        raise newException(IOError,
-          "provider compile edge did not write artifact: " & providerArtifactPath)
-      provider = readProviderCompileArtifact(providerArtifactPath)
-      let providerConsistency = providerCompileConsistencyAfterExecution(
-        providerPlan, providerArtifactPath)
+        compileScratchDir, result.projectRoot, providerCompileConfig,
+        observeProviderCompile)
+      providerCompileResult = verified.run
+      let providerConsistency = verified.consistency
       if not providerConsistency.fresh:
         raise newException(IOError,
           "provider compile artifact is stale after edge execution: " &
             providerArtifactPath & "\n" & providerConsistency.detail)
-      if providerConsistency.reconciled:
+      provider = readProviderCompileArtifact(providerArtifactPath)
+      if providerConsistency.reconciled or providerConsistency.recompiled:
         logSummary("providerCompile: " & providerConsistency.detail)
       publishProviderCompileIfRequested(providerPlan,
         artifact.projectInterface.projectName, providerArtifactPath,
@@ -34587,18 +34615,16 @@ proc prepareBuildGraphInspection(target: string; mode: ToolProvisioningMode;
     # ANCESTOR of its working directory, so without the classification its
     # key carries the immediate membership of `/` and of the user's home.
     wireFilesystemRoots(providerCompileConfig, projectRoot, outDir)
-    let providerCompileResult = runProviderCompileEdge(providerPlan,
-      modulePath, interfacePath, providerArtifactPath,
-      graphHelperCliPath(publicCliPath, ProviderCompileActionId), compileWorkDir,
-      compileScratchDir, projectRoot, providerCompileConfig)
     # This pass logs nothing of its own, and it is the pass that most
     # often does the actual compiling. Record it so the ONE line that IS
     # logged (in `executeBuildTarget`) can report the invocation rather
     # than just its own last consultation.
-    noteProviderCompileConsultation(providerCompileResult)
-    if providerCompileResult.hasFailedActions():
-      raise newException(OSError, providerCompileFailureWithLog(providerCompileResult,
-          providerArtifactPath))
+    let verified = runVerifiedProviderCompileEdge(providerPlan,
+      modulePath, interfacePath, providerArtifactPath,
+      graphHelperCliPath(publicCliPath, ProviderCompileActionId), compileWorkDir,
+      compileScratchDir, projectRoot, providerCompileConfig,
+      proc (run: BuildRunResult) = noteProviderCompileConsultation(run))
+    let providerCompileResult = verified.run
     # Re-derived from the engine's own decision now that the hand-written
     # freshness gate is gone: the edge was scheduled, and the engine either
     # restored its outputs from the CAS (``asCacheHit``) or accepted the
@@ -34607,12 +34633,8 @@ proc prepareBuildGraphInspection(target: string; mode: ToolProvisioningMode;
     for item in providerCompileResult.results:
       if item.id == ProviderCompileActionId:
         result.providerCompileCacheHit = item.status in {asCacheHit, asUpToDate}
-    if not fileExists(extendedPath(providerArtifactPath)):
-      raise newException(IOError,
-        "provider compile edge did not write artifact: " & providerArtifactPath)
     provider = readProviderCompileArtifact(providerArtifactPath)
-    let providerConsistency = providerCompileConsistencyAfterExecution(
-      providerPlan, providerArtifactPath)
+    let providerConsistency = verified.consistency
     if not providerConsistency.fresh:
       raise newException(IOError,
         "provider compile artifact is stale after edge execution: " &
@@ -34817,21 +34839,20 @@ proc refreshRecipeProviderSnapshot(target: string;
     # ANCESTOR of its working directory, so without the classification its
     # key carries the immediate membership of `/` and of the user's home.
     wireFilesystemRoots(providerCompileConfig, projectRoot, outDir)
-    let providerCompileResult = runProviderCompileEdge(providerPlan,
-      modulePath, interfacePath, providerArtifactPath,
-      graphHelperCliPath(publicCliPath, ProviderCompileActionId), compileWorkDir,
-      compileScratchDir, projectRoot, providerCompileConfig)
     # This pass logs nothing of its own, and it is the pass that most
     # often does the actual compiling. Record it so the ONE line that IS
     # logged (in `executeBuildTarget`) can report the invocation rather
     # than just its own last consultation.
-    noteProviderCompileConsultation(providerCompileResult)
-    if providerCompileResult.hasFailedActions():
-      raise newException(OSError, providerCompileFailureWithLog(providerCompileResult,
-          providerArtifactPath))
-    if not fileExists(extendedPath(providerArtifactPath)):
+    let providerConsistency = runVerifiedProviderCompileEdge(providerPlan,
+      modulePath, interfacePath, providerArtifactPath,
+      graphHelperCliPath(publicCliPath, ProviderCompileActionId), compileWorkDir,
+      compileScratchDir, projectRoot, providerCompileConfig,
+      proc (run: BuildRunResult) = noteProviderCompileConsultation(run)).
+      consistency
+    if not providerConsistency.fresh:
       raise newException(IOError,
-        "provider compile edge did not write artifact: " & providerArtifactPath)
+        "provider compile artifact is stale after edge execution: " &
+          providerArtifactPath & "\n" & providerConsistency.detail)
     provider = readProviderCompileArtifact(providerArtifactPath)
 
   let providerArtifactId = digestHex(provider.providerFingerprint)
@@ -44943,6 +44964,12 @@ type
       ## document that ``--write-report`` persists).
     report: ReportSpec
       ## Opt-in ``--write-report[=PATH]`` artifact.
+    excludedRepos: seq[string]
+      ## Internal, no command-line flag: member repos this materialization
+      ## leaves uncloned, matched by ``repoNamedIn``. Set only by the fork form
+      ## of ``repro branch`` from its ``--except`` (CLI/branch.md §"--except"),
+      ## whose excluded repos stay members of the new workspace but must get no
+      ## checkout there. The membership this init records is unaffected.
 
   WorkspaceInitResolution = object
     project: ResolvedProject
@@ -46610,6 +46637,37 @@ proc alignWorkspaceRemotes*(workspaceRoot: string; repos: seq[ResolvedRepo]; ide
 # nested) checkout paths so discovery is not reimplemented here.
 proc refreshWorkspaceSiblingIgnoresBestEffort(workspaceRoot: string)
 
+proc repoNamedIn(repo: ResolvedRepo; names: openArray[string]): bool =
+  ## Whether ``names`` names ``repo`` EXACTLY: by its name, or by a name it
+  ## declares it was previously known under (``[extensions] previously``).
+  ##
+  ## This is the identity ``repro branch --except`` matches on
+  ## (CLI/branch.md §"--except"). The ``previously`` arm is what keeps an
+  ## exclusion written against the SOURCE workspace's names applying to a repo
+  ## the target's manifests have renamed under ``--from=<role>``; the same
+  ## identities correlate source and target checkouts there
+  ## (``matchSourceState``).
+  if repo.name in names:
+    return true
+  for prior in repo.previously:
+    if prior.name.len > 0 and prior.name in names:
+      return true
+  false
+
+proc namesMatchingNoRepo(repos: openArray[ResolvedRepo];
+                         names: openArray[string]): seq[string] =
+  ## The entries of ``names`` that ``repoNamedIn`` matches against NO repo of
+  ## ``repos``, in the order given. Every one is returned, not just the first,
+  ## so a refusal can name all the typos at once.
+  for name in names:
+    var matched = false
+    for repo in repos:
+      if repoNamedIn(repo, [name]):
+        matched = true
+        break
+    if not matched and name notin result:
+      result.add(name)
+
 proc executeWorkspaceInit(argsIn: WorkspaceInitArgs): WorkspaceInitOutcome =
   ## End-to-end driver. Resolves the named project / variant, classifies
   ## each declared repo against the on-disk workspace, schedules a
@@ -46706,6 +46764,10 @@ proc executeWorkspaceInit(argsIn: WorkspaceInitArgs): WorkspaceInitOutcome =
   var cloneActions: seq[BuildAction]
   var cloneEntries: seq[WorkspaceInitClonedEntry]
   for idx, repo in resolved.repos:
+    # A repo the caller excluded is neither classified nor cloned: the fork
+    # that asked for it promises the repo is not touched at all.
+    if repoNamedIn(repo, args.excludedRepos):
+      continue
     let absPath = args.workspaceRoot / repo.path
     if dirExists(absPath):
       classifyExistingRepo(identity, args.workspaceRoot, repo,
@@ -87024,9 +87086,13 @@ proc branchOutcomeCreatedBranch*(outcome: string): bool =
   ## definition for the two decisions that hinge on it: how a failure summary
   ## is worded (a partial advance is not a refusal), and whether a failed fork
   ## may remove what it materialized (only when no repo reached the branch).
+  ##
+  ## ``already`` is a repo an earlier run of a resumed fork put on the branch
+  ## (CLI/branch.md, resumability): the branch exists there too, so it counts
+  ## for both decisions.
   outcome in ["branched", "branched_with_changes",
               "branched_from_declared_baseline", "branched_from_mainline",
-              branchOutcomeTag(broCreated)]
+              "already", branchOutcomeTag(broCreated)]
 
 proc toJsonNode*(report: BranchReport): JsonNode =
   result = newJObject()
@@ -87108,9 +87174,16 @@ proc renderBranchTextLines*(report: BranchReport): seq[string] =
       line.add(" (" & entry.diagnostic & ")")
     result.add(line)
   if report.exitCode == 0:
+    # An `--except`ed repo has no branch (CLI/branch.md §"--except"), so it is
+    # counted apart rather than among the repos the branch spans.
+    var excluded = 0
+    for entry in report.repos:
+      if entry.outcome == "excluded":
+        inc excluded
     result.add("workspace branch: '" & report.branch &
-      "' created across " & $report.repos.len & " repos; metadata=" &
-      report.recordedBranch)
+      "' created across " & $(report.repos.len - excluded) & " repos" &
+      (if excluded > 0: " (" & $excluded & " excluded)" else: "") &
+      "; metadata=" & report.recordedBranch)
     # M27 fork form: the operator's next step is in a DIFFERENT directory than
     # the one they ran from, so say where it is (communicate-before-execute's
     # closing half) and point at the readiness check.
@@ -87137,10 +87210,17 @@ proc renderBranchTextLines*(report: BranchReport): seq[string] =
     var blockers: seq[string]
     var created: seq[string]
     for entry in report.repos:
+      # `already` is a repo a previous run of this resumed fork put on the
+      # branch: the branch exists there, so it counts toward "created in N
+      # repo(s)" (``branchOutcomeCreatedBranch`` says so) — otherwise a re-run
+      # that fails in one repo would claim no branch exists anywhere while the
+      # earlier run's branches are on disk.
       if branchOutcomeCreatedBranch(entry.outcome):
         created.add(entry.path)
-      elif entry.outcome != "ready" and
-          entry.outcome != branchOutcomeTag(broAlreadyAtHead):
+      elif entry.outcome notin ["ready", "excluded",
+                                 branchOutcomeTag(broAlreadyAtHead)]:
+        # `excluded` (left out by `--except`) is a requested outcome, never a
+        # blocker.
         blockers.add(entry.path & "=" & entry.outcome)
     # The fork form also says what is at the destination, from
     # ``destinationState`` rather than from a guess: a fork that created no
@@ -87236,6 +87316,12 @@ type
       ## inherited rather than re-derived. A non-empty value REPLACES the
       ## inherited set, which is how a developer forks a narrower (or wider)
       ## slice than they currently have checked out.
+    exceptRepos: seq[string]
+      ## ``--except=a,b`` (CLI/branch.md §"--except") — member repos the fork
+      ## leaves out: not probed, fetched, cloned or branched, and reported
+      ## ``excluded``. Applied AFTER ``projects``: that chooses the membership,
+      ## this chooses which members get a checkout. Membership itself is not
+      ## edited, so a later fork without the flag brings an excluded repo in.
     fromRole: RoleChoice
       ## ``--from=<role>`` (Workspace-Branch-Roles.md §4.2) or a shorthand —
       ## take the repo SET from this
@@ -87369,6 +87455,10 @@ proc branchArgsOf*[T](c: T; verb = "repro branch";
     let trimmed = name.strip()
     if trimmed.len > 0 and trimmed notin result.projects:
       result.projects.add(trimmed)
+  for name in c.exceptRepos:
+    let trimmed = name.strip()
+    if trimmed.len > 0 and trimmed notin result.exceptRepos:
+      result.exceptRepos.add(trimmed)
   result.json = c.json
   result.report = reportSpecOf(c)
   result.forkPath = c.path
@@ -87383,10 +87473,11 @@ proc branchArgsOf*[T](c: T; verb = "repro branch";
     # destination, so accepting them here would silently do nothing.
     if explicitBranch.len > 0 or result.existingBranch or
         result.includeChanges or result.projects.len > 0 or
+        result.exceptRepos.len > 0 or
         result.unpublished != upRefuse or result.cutsFromRole or fetchGiven:
       raise newException(ValueError,
         "`--branch` / `--existing-branch` / `--include-changes` / " &
-          "`--unpublished` / `--projects` / `--from=<role>` (or a " &
+          "`--unpublished` / `--projects` / `--except` / `--from=<role>` (or a " &
           "shorthand) / `--fetch` require a " &
           "destination path (`" & verb & " <path>`); with no path " &
           "`repro branch` only reports the current workspace branch")
@@ -90614,6 +90705,35 @@ proc roleBranchLabel(r: Option[ResolvedRole]; branch: string): string =
   if r.isSome: "branch '" & branch & "' (role " & roleChainText(r.get()) & ")"
   else: "branch '" & branch & "'"
 
+proc projectsFlagNameListing(workspaceRoot: string):
+    tuple[names: seq[string]; listing: string] =
+  ## Every name ``--projects`` accepts in this workspace — the manifests
+  ## root's ``projects/``, then ``variants/``, then ``repo-sets/`` (the
+  ## resolution ladder's order) — and the same names rendered for a
+  ## diagnostic, grouped by kind (``projects: a, b; variants: c``).
+  ##
+  ## A directory listing rather than a resolve, like ``definedProjectNames``:
+  ## a set whose manifest is malformed still exists. ``names`` is empty when
+  ## the root holds none of the three directories, which is how a caller tells
+  ## "not a defined name" from "nothing to compare against".
+  let source = newDirectorySource(manifestsRoot(workspaceRoot))
+  var parts: seq[string]
+  for (dir, label) in [("projects", "projects"), ("variants", "variants"),
+                       (repoSetsDirName, "repo sets")]:
+    var names: seq[string]
+    for relPath in source.listTomlFiles(dir):
+      let name = relPath.splitFile.name
+      if name notin names:
+        names.add(name)
+    if names.len == 0:
+      continue
+    names.sort()
+    parts.add(label & ": " & names.join(", "))
+    for name in names:
+      if name notin result.names:
+        result.names.add(name)
+  result.listing = parts.join("; ")
+
 type
   ForkDestinationKind = enum
     ## What was at a fork's destination when the command started. Recorded
@@ -90815,12 +90935,28 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
       resolved = resolveProjectSet(parsed.workspaceRoot, forkProjects)
     except CatchableError as err:
       # Refused before anything is created, like every other fork guard.
+      #
+      # When a given name is not one the workspace defines at all — usually a
+      # repo's directory name — the remedy is a name from a list the operator
+      # has not seen yet, so the list is part of the diagnostic. A conflict
+      # between two real projects gets no list: every name there is valid.
+      var diagnostic = "`--projects=" & forkProjects.join(",") &
+        "` does not resolve against '" & parsed.workspaceRoot & "': " &
+        err.msg
+      let accepted = projectsFlagNameListing(parsed.workspaceRoot)
+      if accepted.names.len > 0:
+        var undefined: seq[string]
+        for name in forkProjects:
+          if name notin accepted.names:
+            undefined.add("'" & name & "'")
+        if undefined.len > 0:
+          diagnostic.add(". " & undefined.join(", ") & " is not a project, " &
+            "variant or repo set of this workspace (`--projects` selects " &
+            "whole projects; `--except` leaves out single repos). " &
+            "`--projects` accepts " & accepted.listing)
       result.exitCode = 2
       result.repos.add(BranchRepoEntry(
-        outcome: "projects_unresolved",
-        diagnostic: "`--projects=" & forkProjects.join(",") &
-          "` does not resolve against '" & parsed.workspaceRoot & "': " &
-          err.msg))
+        outcome: "projects_unresolved", diagnostic: diagnostic))
       return
   else:
     let parsedSwitch = SwitchArgs(
@@ -90837,6 +90973,46 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
     forkProjects = @[resolved.projectName]
   result.project = resolved.projectName
   result.projects = forkProjects
+
+  # ---- --except: members that get no checkout here ------------------------
+  # CLI/branch.md §"--except". Applied after the membership above: the set is
+  # not narrowed (it is recorded unchanged at the end), only which of its repos
+  # this run touches. An excluded repo is dropped BEFORE the observation pass,
+  # so it is never probed, fetched, collision-checked, cloned, branched or
+  # carried for — a probe that cannot run is never asked to — and each one is
+  # still reported, so the report names everything the new workspace lacks.
+  #
+  # An unknown name is refused before anything is created: an exclusion that
+  # silently matched nothing reads exactly like a fork with nothing to leave
+  # out. Names are checked against the set resolved from the SOURCE's
+  # manifests, the only ones there are before the target exists.
+  if parsed.exceptRepos.len > 0:
+    let unknown = namesMatchingNoRepo(resolved.repos, parsed.exceptRepos)
+    if unknown.len > 0:
+      var quoted: seq[string]
+      for name in unknown:
+        quoted.add("'" & name & "'")
+      result.exitCode = 2
+      result.repos.add(BranchRepoEntry(
+        outcome: "except_unresolved",
+        diagnostic: "`--except` names no repo of the new workspace's set: " &
+          quoted.join(", ") & " (names are matched EXACTLY against the " &
+          "repo names; `repro workspace repos list` shows them)"))
+      return
+  var memberRepos: seq[ResolvedRepo]
+  var excludedEntries: seq[BranchRepoEntry]
+  for repo in resolved.repos:
+    if repoNamedIn(repo, parsed.exceptRepos):
+      # Nothing was probed or resolved, so no baseline is asserted.
+      excludedEntries.add(BranchRepoEntry(
+        name: repo.name, path: repo.path, outcome: "excluded"))
+    else:
+      memberRepos.add(repo)
+  defer:
+    # Every exit from here on — success, refusal or partial advance — reports
+    # the excluded repos after the ones the run did act on.
+    for entry in excludedEntries:
+      result.repos.add(entry)
 
   let identity = ensureGitToolResolvable(
     parsed.toolProvisioning, getEnv("PATH"))
@@ -90957,7 +91133,7 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
   # before a 100+-repo workspace starts any network probe, while an ABSENT
   # checkout is a valid state: target init will materialize it under the normal
   # manifest/lock rules and its target HEAD becomes the branch baseline.
-  for repo in resolved.repos:
+  for repo in memberRepos:
     var state: ForkSourceState
     state.repo = repo
     state.srcPath = parsed.workspaceRoot / repo.path
@@ -91561,6 +91737,9 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
     initArgs.additionalProjects = forkProjects[1 .. ^1]
   initArgs.toolProvisioning = parsed.toolProvisioning
   initArgs.cloneObjects = parsed.cloneObjects
+  # `--except`: the excluded repos stay members (init records the whole set)
+  # but get no checkout.
+  initArgs.excludedRepos = parsed.exceptRepos
   var initOutcome: WorkspaceInitOutcome
   try:
     initOutcome = executeWorkspaceInit(initArgs)
@@ -91616,6 +91795,10 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
     let targetRoleSettings = workspaceRoleSettings(parsed.forkPath)
     var usedSource = initHashSet[int]()
     for targetRepo in targetResolved.repos:
+      # Excluded by its target name or a name it was previously known under,
+      # so an exclusion survives a rename in the role's manifests.
+      if repoNamedIn(targetRepo, parsed.exceptRepos):
+        continue
       var ts: TargetBranchState
       ts.repo = targetRepo
       ts.srcIdx = matchSourceState(targetRepo, states, usedSource)
@@ -91708,6 +91891,32 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
   createDir(receiptDir)
   var actions: seq[BuildAction]
   var actionRepoIndex = initTable[string, int]()
+  # Resumability (CLI/branch.md §"Resumability & partial-failure reporting"):
+  # a checkout a previous run of this same fork already put on the branch, at
+  # the commit this run would cut, is reported `already` rather than as newly
+  # branched. Its fork action still runs (it is a no-op there), but the report
+  # must tell the operator which repos the re-run actually did something to —
+  # after an `--except` it is exactly the formerly excluded ones.
+  var alreadyActions = initHashSet[string]()
+  proc alreadyOnBranch(repoPath, sha: string): bool =
+    ## HEAD is attached to ``refs/heads/<branch>`` and, when ``sha`` is given,
+    ## the branch is at it. ``sha`` is empty under ``--existing-branch``,
+    ## where the branch point is the existing branch itself. Only a resumed
+    ## fork asks: in a fresh destination every checkout was just cloned, and
+    ## its branch pass is the one doing the work.
+    if not resuming or not dirExists(repoPath / ".git"):
+      return false
+    let head = gitRunPlainQuery(identity,
+      ["-C", repoPath, "symbolic-ref", "--quiet", "HEAD"])
+    if head.code != 0 or
+        head.output.strip() != "refs/heads/" & parsed.branchName:
+      return false
+    if sha.len == 0:
+      return true
+    let tip = gitRunPlainQuery(identity,
+      ["-C", repoPath, "rev-parse", "--verify", "--quiet",
+       "refs/heads/" & parsed.branchName])
+    tip.code == 0 and tip.output.strip() == sha
 
   const RootEntryIndex = -1
   let rootActionId = "workspace-start-fork-root"
@@ -91753,6 +91962,11 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
           receiptPath = ".repro" / "workspace" / "receipts" /
             "start-fork-root.receipt")
     rootAction.cwd = parsed.forkPath
+    if alreadyOnBranch(parsed.forkPath,
+        (if parsed.existingBranch: ""
+         elif parsed.cutsFromRole: rootRoleTip
+         else: rootHead.headSha)):
+      alreadyActions.incl(rootActionId)
     actions.add(rootAction)
     actionRepoIndex[rootActionId] = RootEntryIndex
 
@@ -91777,6 +91991,8 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
       action.cwd = parsed.forkPath
       action.pool = "vcs/fetch"
       action.poolUnits = 1'u32
+      if alreadyOnBranch(parsed.forkPath / ts.repo.path, ts.targetTip):
+        alreadyActions.incl(actionId)
       actions.add(action)
       actionRepoIndex[actionId] = idx
   else:
@@ -91809,6 +92025,9 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
       action.cwd = parsed.forkPath
       action.pool = "vcs/fetch"
       action.poolUnits = 1'u32
+      if alreadyOnBranch(parsed.forkPath / state.repo.path,
+          (if parsed.existingBranch: "" else: state.headSha)):
+        alreadyActions.incl(actionId)
       actions.add(action)
       actionRepoIndex[actionId] = idx
 
@@ -91862,7 +92081,8 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
           resolvedRole: (if parsed.cutsFromRole: rootRole
                          else: none(ResolvedRole)),
           outcome:
-            (if parsed.cutsFromRole: "branched_from_mainline"
+            (if action.id in alreadyActions: "already"
+             elif parsed.cutsFromRole: "branched_from_mainline"
              else: "branched")))
       continue
     if parsed.cutsFromRole:
@@ -91882,7 +92102,9 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
         entry.diagnostic = "status=" & $outcome.status & " reason=" &
           outcome.reason & " " & outcome.stderr
       else:
-        entry.outcome = "branched_from_mainline"
+        entry.outcome =
+          if action.id in alreadyActions: "already"
+          else: "branched_from_mainline"
         # ---- optional WIP carry-over ------------------------------------
         if parsed.includeChanges and ts.srcIdx >= 0 and not states[ts.srcIdx].isClean:
           let copied = copyWorkingTreeChanges(identity, states[ts.srcIdx].srcPath,
@@ -91914,7 +92136,9 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
           outcome.reason & " " & outcome.stderr
       else:
         entry.outcome =
-          if state.baselineSource == "mainline_head":
+          if action.id in alreadyActions:
+            "already"
+          elif state.baselineSource == "mainline_head":
             "branched_from_mainline"
           elif state.baselineSource == "declared_checkout":
             "branched_from_declared_baseline"
@@ -98775,7 +98999,7 @@ proc solverInputsFromCompiledProvider(projectDir: string;
         # The provider runs below with its cwd at the project directory.
         let providerRoot =
           if projectDir.len > 0: absolutePath(projectDir) else: getCurrentDir()
-        let compiled = runProviderCompileEdge(plan,
+        let lockProviderConsistency = runVerifiedProviderCompileEdge(plan,
           modulePath, interfacePath, providerArtifactPath,
           graphHelperCliPath(publicCliPath, ProviderCompileActionId), compileWorkDir, scratchDir,
           providerRoot, BuildEngineConfig(
@@ -98792,12 +99016,7 @@ proc solverInputsFromCompiledProvider(projectDir: string;
           bypassRunQuota: runQuotaBypassedByEnv(),
           inlineRunQuota: true,
           suppressTrace: true,
-          skipCacheHitEvidence: true))
-        if compiled.hasFailedActions():
-          raise newException(OSError, providerCompileFailureWithLog(compiled,
-          providerArtifactPath))
-        let lockProviderConsistency = providerCompileConsistencyAfterExecution(
-          plan, providerArtifactPath)
+          skipCacheHitEvidence: true)).consistency
         if not lockProviderConsistency.fresh:
           raise newException(IOError,
             "lock metadata provider artifact is stale after edge execution: " &
