@@ -22477,6 +22477,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_tests_integration_g01",
     singleReason: ""),
   TestSpec(
+    source: "tests/integration/t_a_grant_behind_a_denial_in_one_batch_is_not_dropped.nim",
+    binary: "build/test-bin/t_a_grant_behind_a_denial_in_one_batch_is_not_dropped",
+    defines: @[],
+    requiresReproBinary: true,
+    requiresMonitorShim: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "",
+    singleReason: "self-spawn marker isMainModule"),
+  TestSpec(
     source: "tests/integration/t_a_hand_run_gate_judges_the_repo_the_hook_judges.nim",
     binary: "build/test-bin/t_a_hand_run_gate_judges_the_repo_the_hook_judges",
     defines: @[],

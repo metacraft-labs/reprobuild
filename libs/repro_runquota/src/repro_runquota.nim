@@ -2970,6 +2970,16 @@ proc cancelQueued*(queued: var ReproRunQuotaQueuedProcess) =
     queued.lease.release()
   queued.active = false
 
+proc releaseUnclaimedGrant*(grant: var ReproRunQuotaGrant) =
+  ## Give back a lease the daemon granted that no queued process will start.
+  ##
+  ## The daemon delivers each grant exactly once (it marks the row delivered
+  ## when it answers the GrantNext), so a grant the caller does not consume
+  ## stays GRANTED, child 0, until the session closes, and the close is then
+  ## refused with "session still owns leases".
+  if grant.active and not grant.queued and grant.lease.active:
+    grant.lease.release()
+
 proc pollCompletion*(running: var ReproRunQuotaRunningProcess): bool =
   if running.completed:
     return true
