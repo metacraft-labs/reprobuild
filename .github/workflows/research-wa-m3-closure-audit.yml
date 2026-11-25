@@ -1,0 +1,183 @@
+# RESEARCH ONLY -- never merged. The windows-aarch64 closure audit run on
+# the fleet's native Windows-ARM class (eph-win-arm64) from this branch, so
+# that the audit runs over a native build before the ci.yml windows-arm64
+# leg exists. Follow-up: delete this branch once that leg runs the same
+# steps. Nothing here runs x64 code under emulation for coverage: every
+# toolchain image is checked to be ARM64 before the build uses it.
+name: research-wa-m3-closure-audit
+
+on:
+  push:
+    branches: [research/wa-m3-closure-audit]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: research-wa-m3-closure-audit
+  cancel-in-progress: true
+
+jobs:
+  audit:
+    runs-on: [self-hosted, windows, arm64]
+    timeout-minutes: 360
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Host
+        run: |
+          "runner: $env:RUNNER_NAME"
+          "PROCESSOR_ARCHITECTURE: $env:PROCESSOR_ARCHITECTURE"
+          (Get-CimInstance Win32_ComputerSystem).SystemType
+          (Get-CimInstance Win32_OperatingSystem) | Format-List Caption, Version, OSArchitecture
+          "commit: $env:GITHUB_SHA"
+      - name: Windows PowerShell 5.1 gates (syntax, pins, closure audit tests)
+        shell: powershell -NoLogo -NoProfile -NonInteractive -ExecutionPolicy RemoteSigned -File {0}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          .\scripts\check_windows_bootstrap_syntax.ps1
+          .\windows\tests\test-toolchain-arch-pins.ps1
+      - name: Mint installation token
+        id: ci_token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.CI_TOKEN_PROVIDER_APP_ID }}
+          private-key: ${{ secrets.CI_TOKEN_PROVIDER_PRIVATE_KEY }}
+          owner: metacraft-labs
+      # The real cold start: setup-dev-env's windows-diy flavour clones the
+      # siblings and sources env.ps1, which downloads, verifies and installs
+      # every pinned arm64 input.
+      - name: Setup dev environment
+        uses: metacraft-labs/metacraft-github-actions/setup-dev-env@dev
+        with:
+          env-flavor: windows-diy
+          gh-token: ${{ steps.ci_token.outputs.token }}
+      - name: Qualification 1 - the toolchain is ARM64
+        run: |
+          $ErrorActionPreference = 'Stop'
+          . ./windows/toolchain-utils.ps1
+          foreach ($exe in @('nim', 'gcc', 'clang')) {
+            $p = (Get-Command $exe).Source
+            "{0,-6} {1}  machine 0x{2:X4}" -f $exe, $p, (Get-PeMachine $p)
+            Assert-PeMachine -Path $p -Arch arm64 -Consumer qualification-1
+          }
+          nim -v | Select-Object -First 1
+          if (-not ((nim -v | Select-Object -First 1) -match '\[Windows: arm64\]')) { throw 'nim -v does not report [Windows: arm64]' }
+          foreach ($dir in @($env:REPRO_WINDOWS_CLINGO_DIR, $env:REPRO_WINDOWS_OPENSSL_DIR, $env:REPRO_WINDOWS_RUNTIME_DLL_DIR)) {
+            Get-ChildItem -LiteralPath $dir -Recurse -File -Include *.dll, *.exe | ForEach-Object {
+              "{0,-70} 0x{1:X4}" -f $_.FullName, (Get-PeMachine $_.FullName)
+              Assert-PeMachine -Path $_.FullName -Arch arm64 -Consumer qualification-1
+            }
+          }
+      - name: Qualification 2 - build reprobuild natively
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          New-Item -ItemType Directory -Force evidence | Out-Null
+          bash ./scripts/build_apps.sh 2>&1 | Tee-Object evidence/build.log | Select-Object -Last 120
+          $rc = $LASTEXITCODE
+          . ./windows/toolchain-utils.ps1
+          Get-ChildItem build/bin -File | Where-Object Extension -in '.exe', '.dll' | ForEach-Object {
+            "{0,-40} 0x{1:X4}" -f $_.Name, (Get-PeMachine $_.FullName)
+          }
+          if ($rc) { throw "build_apps.sh exit $rc" }
+          $missing = @()
+          foreach ($e in @('repro', 'reprobuild', 'reprobuild-helper') + @(Get-Content apps/entrypoints.txt | Where-Object { $_ -and -not $_.StartsWith('#') } | ForEach-Object { ($_ -split '\s+')[0] })) {
+            $exe = "build/bin/$e.exe"
+            if (-not (Test-Path -LiteralPath $exe)) { $missing += $e; continue }
+            Assert-PeMachine -Path $exe -Arch arm64 -Consumer qualification-2
+          }
+          if ($missing.Count) { "not built under that name: $($missing -join ', ')" }
+      - name: Stage release DLLs (closure audit over build\bin)
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & ./windows/stage-release-dlls.ps1
+      - name: Qualification 3 - package, then verify_release.sh (closure audit over the archive, PATH scrubbed)
+        id: package
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          $out = @(./scripts/release/package_windows_release.ps1 -Zip -Platform windows -Arch aarch64)
+          $out
+          "ZIP=$($out[1])" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          bash ./scripts/verify_release.sh $out[1] 2>&1 | Tee-Object evidence/verify_release.log | Select-Object -Last 80
+          if ($LASTEXITCODE) { throw "verify_release.sh exit $LASTEXITCODE" }
+      - name: Evidence - every PE image in the archive, its imports and where each resolves
+        if: always() && steps.package.outcome != 'skipped'
+        run: |
+          $ErrorActionPreference = 'Stop'
+          . ./windows/toolchain-utils.ps1
+          $x = Join-Path $env:RUNNER_TEMP 'wam3-inventory'
+          Remove-Item -LiteralPath $x -Recurse -Force -ErrorAction SilentlyContinue
+          Expand-Archive -LiteralPath $env:ZIP -DestinationPath $x
+          $pkg = @(Get-ChildItem -LiteralPath $x -Directory)[0].FullName
+          $sys = Join-Path $env:SystemRoot 'System32'
+          $report = New-Object System.Collections.Generic.List[string]
+          Get-ChildItem -LiteralPath $pkg -Recurse -File | ForEach-Object {
+            $m = $null
+            try { $m = Get-PeMachine $_.FullName } catch { return }
+            $rel = $_.FullName.Substring($pkg.Length + 1)
+            $report.Add(("IMAGE {0}  machine 0x{1:X4}" -f $rel, $m))
+            foreach ($kind in @('import', 'delay')) {
+              $names = if ($kind -eq 'import') { @(Get-PeImportNames $_.FullName) } else { @(Get-PeDelayImportNames $_.FullName) }
+              foreach ($n in $names) {
+                $where = if ($n -match '^(?i)(api|ext)-ms-win-') { 'apiset' }
+                  elseif (Test-Path -LiteralPath (Join-Path $_.DirectoryName $n)) { 'beside' }
+                  elseif (Test-Path -LiteralPath (Join-Path $sys $n)) {
+                    $vi = (Get-Item -LiteralPath (Join-Path $sys $n)).VersionInfo
+                    "system32 [$($vi.CompanyName) / $($vi.ProductName)]"
+                  } else { 'UNRESOLVED' }
+                $report.Add("  $kind $n -> $where")
+              }
+            }
+          }
+          $report | Tee-Object -FilePath evidence/archive-pe-inventory.txt
+      - name: Negative controls - the audit refuses an open or foreign closure, natively
+        if: always() && steps.package.outcome == 'success'
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          $winps = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+          $x86 = Join-Path $env:SystemRoot 'SysWOW64\version.dll'
+          $base = Join-Path $env:RUNNER_TEMP 'wam3-neg'
+          Remove-Item -LiteralPath $base -Recurse -Force -ErrorAction SilentlyContinue
+          Expand-Archive -LiteralPath $env:ZIP -DestinationPath $base
+          $pkg = @(Get-ChildItem -LiteralPath $base -Directory)[0].FullName
+          $bin = Join-Path $pkg 'bin'
+          $failures = @()
+          function Invoke-Audit { & $winps -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File ./windows/audit-release-dll-closure.ps1 -BinDir $bin -Arch arm64 2>&1 }
+          # (a) An imported DLL removed: libcrypto-3-arm64.dll is in libssl-3-arm64.dll's import table.
+          Move-Item -LiteralPath (Join-Path $bin 'libcrypto-3-arm64.dll') -Destination (Join-Path $base 'held.dll')
+          $o = Invoke-Audit; $rc = $LASTEXITCODE; $o
+          if ($rc -ne 1 -or -not (($o -join "`n") -match 'imports libcrypto-3-arm64\.dll')) { $failures += "(a) exit $rc" }
+          Move-Item -LiteralPath (Join-Path $base 'held.dll') -Destination (Join-Path $bin 'libcrypto-3-arm64.dll')
+          # (b) A foreign-machine DLL in bin/ (an x86 system DLL).
+          Copy-Item -LiteralPath $x86 -Destination (Join-Path $bin 'foreign.dll')
+          $o = Invoke-Audit; $rc = $LASTEXITCODE; $o
+          if ($rc -ne 1 -or -not (($o -join "`n") -match 'foreign\.dll is a PE image for machine 0x014C')) { $failures += "(b) exit $rc" }
+          # (c) verify_release.sh itself refuses that archive: the manifest is
+          # complete, so only the closure audit can catch it.
+          $negZipDir = Join-Path $base 'zip'
+          New-Item -ItemType Directory -Path $negZipDir | Out-Null
+          $negZip = Join-Path $negZipDir (Split-Path -Leaf $env:ZIP)
+          Compress-Archive -Path $pkg -DestinationPath $negZip
+          $o = bash ./scripts/verify_release.sh $negZip 2>&1; $rc = $LASTEXITCODE
+          $o | Select-Object -Last 15
+          if ($rc -eq 0 -or -not (($o -join "`n") -match 'failed the DLL closure audit')) { $failures += "(c) verify_release.sh exit $rc" }
+          # (d) The unmodified archive tree passes the same entry point.
+          Remove-Item -LiteralPath (Join-Path $bin 'foreign.dll')
+          $o = Invoke-Audit; $rc = $LASTEXITCODE; $o
+          if ($rc -ne 0) { $failures += "(d) exit $rc" }
+          if ($failures.Count) { throw "negative controls failed: $($failures -join '; ')" }
+          'negative controls: all four behaved as expected'
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: wa-m3-closure-audit-evidence
+          path: evidence/
+          if-no-files-found: warn
+          retention-days: 30
