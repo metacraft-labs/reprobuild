@@ -1,0 +1,114 @@
+# RESEARCH ONLY -- never merged. One x64 build that verifies the import-walk
+# staging of the windows-x86_64 bundle: build, stage, package, verify_release.sh
+# (whose closure audit covers every image in the archive), then record each
+# image's audit result and which DLLs the old best-effort lists staged that
+# this build no longer ships. Follow-up: delete this branch once the change is
+# on agents and the next release's x64 leg has run it.
+name: research-wa-m3-x64-staging
+
+on:
+  push:
+    branches: [research/wa-m3-x64-staging]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: research-wa-m3-x64-staging
+  cancel-in-progress: true
+
+jobs:
+  x64-build:
+    runs-on: [self-hosted, windows, x64, dev-env-ready]
+    timeout-minutes: 360
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Host
+        run: |
+          "runner: $env:RUNNER_NAME  PROCESSOR_ARCHITECTURE: $env:PROCESSOR_ARCHITECTURE  commit: $env:GITHUB_SHA"
+      - name: Windows PowerShell 5.1 gates (syntax, pins, closure and staging tests)
+        shell: powershell -NoLogo -NoProfile -NonInteractive -ExecutionPolicy RemoteSigned -File {0}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          .\scripts\check_windows_bootstrap_syntax.ps1
+          .\windows\tests\test-toolchain-arch-pins.ps1
+      - name: Mint installation token
+        id: ci_token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.CI_TOKEN_PROVIDER_APP_ID }}
+          private-key: ${{ secrets.CI_TOKEN_PROVIDER_PRIVATE_KEY }}
+          owner: metacraft-labs
+      - name: Setup dev environment
+        uses: metacraft-labs/metacraft-github-actions/setup-dev-env@dev
+        with:
+          env-flavor: windows-diy
+          gh-token: ${{ steps.ci_token.outputs.token }}
+      - name: Build reprobuild
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          New-Item -ItemType Directory -Force evidence | Out-Null
+          bash ./scripts/build_apps.sh 2>&1 | Tee-Object evidence/build.log | Select-Object -Last 80
+          if ($LASTEXITCODE) { throw "build_apps.sh exit $LASTEXITCODE" }
+      - name: Stage release DLLs (import walk)
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & ./windows/stage-release-dlls.ps1 2>&1 | Tee-Object evidence/stage.log
+      - name: Package, then verify_release.sh (archive audit, PATH scrubbed)
+        id: package
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          $out = @(./scripts/release/package_windows_release.ps1 -Zip -Platform windows -Arch x86_64)
+          $out
+          "ZIP=$($out[1])" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          bash ./scripts/verify_release.sh $out[1] 2>&1 | Tee-Object evidence/verify_release.log | Select-Object -Last 60
+          if ($LASTEXITCODE) { throw "verify_release.sh exit $LASTEXITCODE" }
+      - name: Evidence - per-image audit and the DLLs that dropped out
+        if: always() && steps.package.outcome == 'success'
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ProgressPreference = 'SilentlyContinue'
+          . ./windows/toolchain-utils.ps1
+          $x = Join-Path $env:RUNNER_TEMP 'wam3-x64-new'
+          if (Test-Path -LiteralPath $x) { Remove-Item -LiteralPath $x -Recurse -Force }
+          Expand-Archive -LiteralPath $env:ZIP -DestinationPath $x
+          $pkg = @(Get-ChildItem -LiteralPath $x -Directory)[0].FullName
+          $report = New-Object System.Collections.Generic.List[string]
+          # One audit per image, so each image has its own result line.
+          $imgs = @(Get-ChildItem -LiteralPath $pkg -Recurse -File | Where-Object { Test-PeImageHeader -Path $_.FullName })
+          foreach ($img in $imgs) {
+            $rel = $img.FullName.Substring($pkg.Length + 1)
+            $r = Get-WindowsClosureViolations -Images @($img) -Root $pkg -BinDir (Join-Path $pkg 'bin') -Arch x64
+            $verdict = if ($r.Violations.Count) { "FAIL: " + ($r.Violations -join '; ') } else { "ok" }
+            $report.Add(("{0,-50} 0x{1:X4}  {2}" -f $rel, (Get-PeMachine $img.FullName), $verdict))
+          }
+          # The published v0.2.35 x64 archive, staged by the old lists.
+          $old = Join-Path $env:RUNNER_TEMP 'wam3-x64-old'
+          if (Test-Path -LiteralPath $old) { Remove-Item -LiteralPath $old -Recurse -Force }
+          New-Item -ItemType Directory -Path $old | Out-Null
+          Invoke-WebRequest -Uri 'https://github.com/metacraft-labs/reprobuild/releases/download/v0.2.35/reprobuild-0.2.35-windows-x86_64.zip' -OutFile (Join-Path $old 'old.zip')
+          Expand-Archive -LiteralPath (Join-Path $old 'old.zip') -DestinationPath (Join-Path $old 'x')
+          $oldPkg = @(Get-ChildItem -LiteralPath (Join-Path $old 'x') -Directory)[0].FullName
+          $oldDlls = @(Get-ChildItem -LiteralPath (Join-Path $oldPkg 'bin') -Filter *.dll | ForEach-Object Name | Sort-Object)
+          $newDlls = @(Get-ChildItem -LiteralPath (Join-Path $pkg 'bin') -Filter *.dll | ForEach-Object Name | Sort-Object)
+          $report.Add("")
+          $report.Add("bin/*.dll in v0.2.35: $($oldDlls -join ', ')")
+          $report.Add("bin/*.dll now:        $($newDlls -join ', ')")
+          $report.Add("dropped out:          $((@($oldDlls | Where-Object { $_ -notin $newDlls })) -join ', ')")
+          $report.Add("new:                  $((@($newDlls | Where-Object { $_ -notin $oldDlls })) -join ', ')")
+          $report | Tee-Object -FilePath evidence/x64-audit-and-drop.txt
+          if (@($report | Where-Object { $_ -match '  FAIL: ' }).Count) { throw 'an image failed its audit' }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: wa-m3-x64-staging-evidence
+          path: evidence/
+          if-no-files-found: warn
+          retention-days: 30
