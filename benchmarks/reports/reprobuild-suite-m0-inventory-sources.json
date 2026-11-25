@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 36,
-    "nimTestBinaries": 3264,
+    "nimTestBinaries": 3265,
     "pureUnitConsolidationGroups": 96,
     "pureUnitTests": 853,
     "staticallyDetectedRuntimeCompilerFlowTests": 164,
-    "testEntries": 3323
+    "testEntries": 3324
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1860,7 +1860,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 29,
-      "integration": 1838,
+      "integration": 1839,
       "platform/destructive": 206,
       "pure unit": 853,
       "unclassified": 397
@@ -2083,9 +2083,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 3264,
+    "nimTestBinaryCount": 3265,
     "pythonTestFileCount": 59,
-    "testEntryCount": 3323
+    "testEntryCount": 3324
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -10822,7 +10822,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_addon/tests/t_addon_floor_round21.nim",
       "sourceSuiteCount": 5,
-      "staticCaseCount": 22,
+      "staticCaseCount": 23,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -10840,6 +10840,23 @@
       "source": "libs/repro_addon/tests/t_addon_floor_round22.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_addon_floor_round23",
+      "class": "integration",
+      "classificationReason": "subprocess or repro CLI invocation in test body",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_addon"
+      ],
+      "owner": "libs/repro_addon",
+      "requiresReproBinary": false,
+      "source": "libs/repro_addon/tests/t_addon_floor_round23.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
