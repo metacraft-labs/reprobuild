@@ -859,6 +859,46 @@ proc runBase(m: SnapshotMirror; b: BaseImage; record: JsonNode): seq[string] =
          c2Out & "\ntokens: " & cTokens2 & "\nsecret " & secretBefore & " -> " &
          secretAfter & "\nunit files:\n" & unitFilesBefore & "\n->\n" &
          unitFilesAfter)
+    # --- 2e, secret put (§13 decision 190, the owner's "treat as a switch",
+    # 2026-11-25): the same premise -- the operator leaves systemd a root
+    # definition of the running probe -- then a `secret put` for its
+    # credential. With carried state on the host the put holds the probe,
+    # reloads and judges it as systemd loaded it, and refuses
+    # (ECarriedStatePending) without restarting it: the probe never runs as
+    # uid 0. Falsifier: the engine build secret-put-unjudged, under which
+    # the put restarts the probe as root.
+    let pInv1 = g.invocation(credUnit)
+    let pUidsBefore = g.run("cat " & credDir & "/uids 2>/dev/null || true").strip()
+    discard g.run("mkdir -p /etc/systemd/system/" & credUnit & ".d && printf " &
+      "'[Service]\\nUser=root\\n' > /etc/systemd/system/" & credUnit &
+      ".d/10-root.conf && systemctl daemon-reload && rm -rf " &
+      "/etc/systemd/system/" & credUnit & ".d")
+    let pLoadedUser = g.run("systemctl show -P User " & credUnit).strip()
+    let token3 = "a13r15-put-" & $epochTime().int64
+    let put3 = g.exec("printf '%s' '" & token3 & "' | " & repro &
+      " system addon secret put --service " & credSvc & " --name token")
+    let put3Out = put3.stdout & put3.stderr
+    let pUids = g.run("cat " & credDir & "/uids 2>/dev/null || true").strip()
+    let pInv2 = g.invocation(credUnit)
+    let pRoot = "0" in pUids.splitLines()
+    let pRefused = put3.exitCode != 0 and "ECarriedStatePending" in put3Out
+    record["secretPutJudged"] = %*{"exit": put3.exitCode,
+      "loadedUserBefore": pLoadedUser, "refused": pRefused,
+      "uids": pUids, "uidsBefore": pUidsBefore, "ranAsRoot": pRoot,
+      "invocationBefore": pInv1, "invocationAfter": pInv2,
+      "restarted": pInv1 != pInv2, "output": put3Out,
+      "ok": pLoadedUser == "root" and pRefused and not pRoot and pInv1 == pInv2}
+    step("decision 190: with carried state on the host a secret put judges " &
+         "its consumer as systemd loaded it and refuses rather than restart " &
+         "it as root",
+         pLoadedUser == "root" and pRefused and not pRoot and pInv1 == pInv2,
+         put3Out & "\nloaded user: " & pLoadedUser & "\nuids: " & pUids &
+         "\ninvocation " & pInv1 & " -> " & pInv2)
+    # The refused put kept its start hold (as a refused switch keeps its
+    # holds); the operator's reload is undone for the switch back.
+    discard g.run("rm -f /run/systemd/system/" & credUnit & ".d/" &
+      "zz-repro-addon-floor-hold.conf; rmdir /run/systemd/system/" & credUnit &
+      ".d 2>/dev/null; systemctl daemon-reload; true")
     discard g.run("rm -f /var/lib/repro/system/carried/state-set.json && " &
       "rmdir /var/lib/repro/system/carried 2>/dev/null; systemctl daemon-reload")
     let after3 = g.applyProfile(repro, "skeleton2c", skeleton2)

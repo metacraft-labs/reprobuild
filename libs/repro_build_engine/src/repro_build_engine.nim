@@ -16458,6 +16458,26 @@ proc msvcInheritedSearchLists(action: BuildAction;
   else:
     discard
 
+proc withheldSeededSourceRoots*(): seq[string] =
+  ## ``NAME=`` for every source root this process seeded for its own nested
+  ## compiles (``repro_core/source_root.seededSourceRootNames``): an empty
+  ## value, because an action's environment is layered over this process's
+  ## and a layer can replace a variable but not remove it. Empty reads as
+  ## unset to every consumer, an inner ``repro`` included, which seeds its
+  ## own roots again.
+  ##
+  ## WHY. An action inherited them, and to a project's ``config.nims`` a set
+  ## ``IO_MON_SRC`` or ``CODETRACER_TRACE_FORMAT_NIM_SRC`` is a pinned tree
+  ## the caller chose: codetracer's takes it ahead of the workspace sibling.
+  ## So a project built by a packaged ``repro`` compiled against the copies
+  ## REPROBUILD was built against, whenever its caller had left the variable
+  ## unset (reprobuild-specs issue 2026-11-25-a-daemon-hosted-codetracer-
+  ## build-compiles-print-trace-against-a-trace-format-copy-without-
+  ## formarkerevent). A caller's own value is not a seed and still reaches
+  ## the action; a value the action declares is appended later and wins.
+  for name in seededSourceRootNames():
+    result.add(name & "=")
+
 proc launchChildEnv(action: BuildAction;
                     config: BuildEngineConfig): seq[string] =
   ## Nested-build resource model: an action's child process tree may itself
@@ -16491,6 +16511,9 @@ proc launchChildEnv(action: BuildAction;
   ## never invoke ``repro``. Any explicit ``action.env`` entry wins (appended
   ## after).
   result = @["REPROBUILD_NO_RUNQUOTA=1", "IO_MON_MUTE=1"]
+  # The engine's OWN source roots stay out of the action
+  # (``withheldSeededSourceRoots``).
+  result.add(withheldSeededSourceRoots())
   # In-Process-Monitor-Hosting P6 — **``PWD`` is the action's working
   # directory, on every launch path**, because otherwise the LAUNCHER's
   # working directory leaks into the ACTION's dependency evidence.
@@ -19863,6 +19886,15 @@ when not defined(windows):
     ## The variables that decide where the helper's ``nix`` reads its
     ## configuration and keeps its caches and temporary files.
 
+  proc nixHelperMountNamespace*(): string =
+    ## The mount namespace of this process, as ``mnt:[<inode>]`` (Linux), or
+    ## ``""`` where it cannot be read (other platforms, a hidden ``/proc``).
+    ## It names the filesystem view the caller's paths are resolved in.
+    try:
+      expandSymlink("/proc/self/ns/mnt")
+    except OSError, IOError:
+      ""
+
   proc nixDaemonHelperKey*(daemonExe: string): string =
     ## The identity of the helper this process would START: a digest of the
     ## resolved helper file's bytes, or ``""`` when only a bare name (a PATH
@@ -19888,12 +19920,21 @@ when not defined(windows):
     ## helper every other process then shared; once that caller deleted its
     ## directory, every fetch through the helper failed with ``could not find
     ## repository at '<deleted>/nix/tarball-cache-v2'`` until it idled out.
+    ##
+    ## THE FILESYSTEM VIEW IS PART OF THE IDENTITY. The caller sends paths
+    ## (workspace roots, recipe directories) that the helper must open, and
+    ## the helper sees only the mount namespace it was started in. A sandbox
+    ## shares ``/tmp`` -- so the socket -- with the host but has its own view
+    ## of ``$HOME``: a helper started in one answered the other with ``No
+    ## such file or directory`` for a directory that exists for the caller.
+    ## One helper per mount namespace keeps the sharing that is valid.
     if daemonExe.len == 0 or not fileExists(daemonExe):
       return ""
     try:
       var identity = readFile(daemonExe)
       for name in NixHelperEnvironment:
         identity.add("\0" & name & "=" & getEnv(name))
+      identity.add("\0mnt=" & nixHelperMountNamespace())
       toHex(weakFingerprintFromText(identity).bytes)[0 ..< 16]
     except IOError, OSError:
       ""
