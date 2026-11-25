@@ -31,10 +31,11 @@
 ## ``boot-hold-cycle-effective-unchecked``, ``deps-empty-resets``,
 ## ``revert-stopped-not-restarted``, ``timespan-units-partial``.
 ## ``revert-stopped-instances-unrecorded`` and ``revert-stopped-cleared-early``
-## act inside the switch, at a template's running instances and at the end
-## of step 7; no test here or in a VM gate discriminates them yet (the
-## record's selection of instances is ``revertStoppedToStart``, tested
-## below).
+## act in the procedures the switch calls at a template's running instances
+## and around step 7 (``revertUnitsToStop``, ``planRevertStoppedStarts``,
+## ``finishRevertStopped``), and are red in ``t_addon_floor_round22`` (A9
+## review round 22); the record's selection of instances is
+## ``revertStoppedToStart``, tested below.
 ##
 ## *Mocking.* The re-point's file-system probe and the committed ledger's
 ## digests are closures, so a revert's disk state can be stated exactly;
@@ -245,7 +246,15 @@ suite "§13 decision 172: the boot-hold unit is required by sysinit.target":
     check "ExecStart=-" notin u
     check "TimeoutStartSec=60\n" in u
     let sc = bootHoldScript()
-    for c in 1 .. 9:
+    # One non-zero exit only, and it ends the subshell that writes the
+    # conservative list, not the script (round 22): the list that cannot
+    # be written then takes the fail-closed path.
+    check sc.count("exit 1") == 1
+    check "echo $u.d || exit 1;;" in sc
+    let listing = sc.find("( if [ $src = c ]; then ")
+    check listing >= 0 and sc.find("exit 1") > listing and
+      sc.find("exit 1") < sc.find(") > $l")
+    for c in 2 .. 9:
       check ("exit " & $c) notin sc
     # Its last word is the fail-closed wait for TimeoutStartSec= (round 20).
     check sc.endsWith("exec /usr/bin/sleep 120")

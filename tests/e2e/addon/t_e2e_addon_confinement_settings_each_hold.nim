@@ -52,14 +52,8 @@ import ./evidence_e2e_support
 
 const
   Gate = "e2e_addon_confinement_settings_each_hold"
-  Units = ["repro-agent-apply.service", "repro-addon-reassert.service",
-           "repro-addon-boot-confirm.service", "repro-addon-secrets.service",
-           "repro-addon-store-verify.service", "repro-addon-boot-hold.service",
-           "repro-agent-fetch.service", "repro-addon-evidence.service"]
-  PrivilegedUnits = ["repro-agent-apply.service", "repro-addon-reassert.service",
-           "repro-addon-boot-confirm.service", "repro-addon-secrets.service",
-           "repro-addon-store-verify.service"]
-    ## The units ``generation0.privilegedConfinement`` confines.
+  Units = GateUnits
+    ## ``confinement_rows.GateUnits``: one list, read by the unit tests too.
 
 proc buildProbe(dest, debArch: string) =
   let src = reproRoot() / "tests" / "e2e" / "addon" / "fixtures" /
@@ -167,7 +161,10 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
   var byKey = initTable[string, (Outcome, Outcome, string, string)]()
   for r in runs:
     let g0 = got.getOrDefault(r.name, ("", "", ""))
-    let o = parseOutcome(g0.line, g0.result, g0.status)
+    var probe = ""
+    for row in ProbeRows:
+      if row.name == r.row: probe = row.probe
+    let o = parseOutcome(g0.line, probe, g0.result, g0.status)
     let k = r.unit & " " & r.row
     let shown = g0.line & " (" & g0.result & ", status " & g0.status & ")"
     var cur = byKey.getOrDefault(k)

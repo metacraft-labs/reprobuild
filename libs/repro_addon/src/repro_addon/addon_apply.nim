@@ -89,6 +89,7 @@ import repro_local_store/store
 
 import ./agent_record
 import ./collision
+import ./egress_converge
 import ./own_profile
 import ./boot_holds
 import ./contain_marker
@@ -307,6 +308,9 @@ type
       ## the host's namespaces after step 6.
     retentionDropped*: seq[string] ## generations whose store roots the
                                    ## retention policy released
+    egressConverged*: seq[string]  ## what the apply did about a missing
+                                   ## egress table (§13 decision 187,
+                                   ## ``egress_converge``)
     planId*: string                ## the add-on plan id (spec §7.1): the
                                    ## digest of everything the plan was
                                    ## computed from (``planIdOf``)
@@ -3243,6 +3247,49 @@ proc unitInvocation*(unit: string): tuple[id: string; start: int64] =
   ## (``unitRun``).
   let r = unitRun(unit)
   (r.id, r.start)
+
+proc revertUnitsToStop*(held: openArray[string];
+                        isActive: proc (u: string): bool;
+                        runningInstances: proc (tmpl: string): seq[string]): seq[string] =
+  ## What a revert records as stopping (§13 decision 155; A9 review rounds
+  ## 16 and 17, findings 5 and 7): every held unit that is active, and for
+  ## a held template each of its running instances by name, so the switch
+  ## that clears the holds starts exactly these again. ``isActive`` and
+  ## ``runningInstances`` are ``unitIsActive`` and ``hostRunningInstances``
+  ## in the switch.
+  for u in held:
+    if '@' notin u:
+      if isActive(u) and u notin result: result.add(u)
+    else:
+      when not mutated("revert-stopped-instances-unrecorded"):
+        for i in runningInstances(u):
+          if i notin result: result.add(i)
+
+proc planRevertStoppedStarts*(stateDir: string; generationUnits: HashSet[string];
+                              planned: openArray[string];
+                              isActive: proc (u: string): bool;
+                              socketActivated: proc (u: string): bool = nil):
+    tuple[starts, problems: seq[string]] =
+  ## The units the passing switch starts again from the revert's record
+  ## (``revertStoppedToStart``). The record stays: it is cleared only once
+  ## step 7's starts have succeeded (``finishRevertStopped``), so a crash or
+  ## a failed start before then leaves it, and the next switch starts them
+  ## (A9 review round 17, finding 7).
+  result.starts = revertStoppedToStart(readRevertStopped(stateDir), generationUnits,
+                                       planned, isActive, socketActivated)
+  when mutated("revert-stopped-cleared-early"):
+    # FALSIFYING MUTATION: cleared before the starts.
+    try: writeRevertStopped(stateDir, [])
+    except CatchableError as ex: result.problems.add(ex.msg)
+
+proc finishRevertStopped*(stateDir: string; planned, startsSucceeded: bool): seq[string] =
+  ## After step 7: the revert's record goes once every start it planned
+  ## succeeded (``planned``, ``startsSucceeded``), and stays otherwise.
+  ## Returns the problem of a record that cannot be removed.
+  if planned and startsSucceeded:
+    when not mutated("revert-stopped-cleared-early"):
+      try: writeRevertStopped(stateDir, [])
+      except CatchableError as ex: result.add(ex.msg)
 
 proc hostRunningInstances*(tmpl: string): seq[string] =
   ## The instances of the template ``tmpl`` (``a@.service``) systemd reports
@@ -8439,14 +8486,8 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
               # exactly these again (A9 review round 16, finding 5).
               # A template's running instances are recorded by name (A9
               # review round 17, finding 7), so the enabled ones come back.
-              var stopping: seq[string]
-              for u in held:
-                if '@' notin u:
-                  if unitIsActive(u): stopping.add(u)
-                else:
-                  when not mutated("revert-stopped-instances-unrecorded"):
-                    for i in hostRunningInstances(u):
-                      if i notin stopping: stopping.add(i)
+              let stopping = revertUnitsToStop(held, unitIsActive,
+                                               hostRunningInstances)
               if stopping.len > 0:
                 try: writeRevertStopped(stateDir, readRevertStopped(stateDir) & stopping)
                 except CatchableError as ex:
@@ -8535,7 +8576,7 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
               let acceptTemplates = acceptSocketTemplates(composed,
                 proc (sk: string): bool =
                   runSystemctl(["show", "-p", "Accept", "--value", "--", sk]).output.strip() == "yes")
-              for u in revertStoppedToStart(readRevertStopped(stateDir), genUnits,
+              let rplan = planRevertStoppedStarts(stateDir, genUnits,
                                             plannedUnits, unitIsActive,
                                             proc (v: string): bool =
                                               instanceSocketActivated(v, acceptTemplates,
@@ -8543,17 +8584,12 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
                                                   try:
                                                     runSystemctl(["show", "-p", "TriggeredBy",
                                                       "--value", "--", w]).output.splitWhitespace()
-                                                  except CatchableError: @[])):
+                                                  except CatchableError: @[]))
+              for u in rplan.starts:
                 stepTransitions.add(Transition(unit: u, verb: tvStart,
                   reason: "a revert stopped it while it held it; its hold is cleared"))
+              for pr in rplan.problems: problems.add(pr)
               revertStoppedPlanned = true
-              # The record is cleared once step 7's starts succeed, not
-              # here: a crash or a failed start before then leaves it, and
-              # the next switch starts them (A9 review round 17, finding 7).
-              when mutated("revert-stopped-cleared-early"):
-                # FALSIFYING MUTATION: cleared before the starts.
-                try: writeRevertStopped(stateDir, [])
-                except CatchableError as ex: problems.add(ex.msg)
             if startHolds.len > 0 or stale.len > 0 or revertStale.len > 0:
               try: daemonReload()
               except CatchableError as ex: problems.add(ex.msg)
@@ -8659,10 +8695,9 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
       # What a revert stopped is off the record once step 7 started it
       # (A9 review round 17, finding 7): not before, so a crash or a failed
       # start leaves the record for the next switch.
-      if revertStoppedPlanned and clean and problems.len == 0:
-        when not mutated("revert-stopped-cleared-early"):
-          try: writeRevertStopped(stateDir, [])
-          except CatchableError as ex: problems.add(ex.msg)
+      for pr in finishRevertStopped(stateDir, revertStoppedPlanned,
+                                    clean and problems.len == 0):
+        problems.add(pr)
       marker.step = ssStart
       writePendingMarker(stateDir, marker)
       seamPause(stateDir, seamPrefix & "step-7")
@@ -9345,12 +9380,29 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
   ## nothing and record nothing.
   inc applyDepth
   defer: dec applyDepth
-  if applyDepth > 1 or opts.planOnly or opts.recordOnly:
-    return applyGenerationUnrecorded(opts)
   let stateDir = if opts.stateDir.len > 0: opts.stateDir else: DefaultStateDir
+  if applyDepth > 1 or opts.planOnly or opts.recordOnly:
+    result = applyGenerationUnrecorded(opts)
+    if opts.planOnly and applyDepth == 1:
+      # A plan is read-only: a missing egress table is reported, never
+      # reloaded (§13 decision 187).
+      try:
+        result.egressConverged =
+          readOnlyMustNotReload(readLedger(ledgerCopyPath(stateDir)))
+      except CatchableError: discard
+    return
   try:
     result = applyGenerationUnrecorded(opts)
   except CatchableError as e:
     recordApplyEvidence(opts, stateDir, AddonApplyResult(), e)
     raise
   recordApplyEvidence(opts, stateDir, result, nil)
+  # §13 decision 187: an apply converges a live lcNftTable "missing" drift
+  # (a start of nftables.service, or any flush, while the observer is
+  # active) by reloading the observer unit; PID 1 does the load.
+  when not mutated("apply-skips-egress-reload"):
+    try:
+      result.egressConverged =
+        convergeEgressTable(readLedger(ledgerCopyPath(stateDir)))
+    except CatchableError as e:
+      result.egressConverged.add("the egress table was not checked: " & e.msg)

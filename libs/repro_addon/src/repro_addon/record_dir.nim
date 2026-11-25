@@ -24,7 +24,7 @@
 ## https://pubs.opengroup.org/onlinepubs/9799919799/functions/renameat.html,
 ## https://pubs.opengroup.org/onlinepubs/9799919799/functions/unlinkat.html.
 
-import std/[os, posix, strutils, tables]
+import std/[algorithm, os, posix, strutils, tables]
 
 import ./mutations
 
@@ -736,3 +736,97 @@ proc writeDelegatedEntry*(dir, name, bytes: string; staging = "";
     discard unlinkatC(tmpDir, tmp.cstring, 0)
     raiseOSError(e, "rename into " & dir / name)
   if fsync(dfd) != 0: raiseOSError(osLastError(), "fsync " & dir)
+
+# ---------------------------------------------------------------------------
+# A root drop directory a confined root writer fills, emptied by a
+# privileged step into a delegated directory (§13 decision 188: the egress
+# check's entries, moved into the shipping unit's outbox).
+# ---------------------------------------------------------------------------
+
+type DropEntry* = tuple[name: string; bytes: string]
+
+proc takeDropEntries*(dir: string; maxBytes: int; suffix = ".evr";
+                      take: proc (e: DropEntry) {.closure.}): seq[string] =
+  ## Each regular ``*<suffix>`` file of ``dir`` handed to ``take`` and then
+  ## unlinked, oldest name first. ``dir`` is opened ``O_NOFOLLOW`` (a link
+  ## in its place is refused), each entry is judged without following a link
+  ## and opened ``O_NOFOLLOW|O_NONBLOCK``, and read up to ``maxBytes``. An
+  ## entry that is not a regular file (a planted link, a FIFO) or is larger
+  ## is unlinked without being read, and named in the result with why; so
+  ## is a name that does not end in ``suffix``. An entry ``take`` raised for
+  ## stays for the next run. Absent ``dir``: nothing.
+  let dfd = posix.open(dir.cstring, O_RDONLY or ODirectory or ONoFollow or
+                       O_CLOEXEC)
+  if dfd < 0:
+    if errno == ENOENT: return
+    raiseOSError(osLastError(), "open " & dir)
+  defer: discard posix.close(dfd)
+  var names: seq[string]
+  let lfd = dup(dfd)
+  if lfd < 0: raiseOSError(osLastError(), "dup " & dir)
+  let d = fdopendirC(lfd)
+  if d == nil:
+    discard posix.close(lfd)
+    raiseOSError(osLastError(), "fdopendir " & dir)
+  while true:
+    let ent = readdir(d)
+    if ent == nil: break
+    let name = $cast[cstring](addr ent.d_name)
+    if name == "." or name == "..": continue
+    names.add(name)
+  discard closedir(d)
+  names.sort()
+  for name in names:
+    var st: Stat
+    let statFlags = when mutated("egress-drop-follows-links"): 0.cint
+                    else: AtSymlinkNoFollow
+    if fstatatC(dfd, name.cstring, st, statFlags) != 0: continue
+    if S_ISDIR(st.st_mode): continue
+    var why = ""
+    if not name.endsWith(suffix): why = "not a " & suffix & " entry"
+    elif not S_ISREG(st.st_mode): why = "not a regular file"
+    elif st.st_size > maxBytes: why = "larger than " & $maxBytes & " bytes"
+    if why.len > 0:
+      discard unlinkatC(dfd, name.cstring, 0)
+      result.add(name & ": " & why & "; removed unread")
+      continue
+    var bytes = ""
+    when mutated("egress-drop-follows-links"):
+      # FALSIFYING BUILD: read by path, so a link planted in the
+      # directory's place or under an entry's name is followed.
+      try: bytes = readFile(dir / name)
+      except IOError, OSError: continue
+    else:
+      let fd = openatC(dfd, name.cstring, O_RDONLY or O_CLOEXEC or ONoFollow or
+                       ONonBlock)
+      if fd < 0: continue
+      var fst: Stat
+      if fstat(fd, fst) != 0 or not S_ISREG(fst.st_mode) or
+          fst.st_size > maxBytes:
+        discard posix.close(fd)
+        discard unlinkatC(dfd, name.cstring, 0)
+        result.add(name & ": changed while read; removed unread")
+        continue
+      var buf = newString(4096)
+      var ok = true
+      while true:
+        let n = posix.read(fd, addr buf[0], buf.len)
+        if n < 0:
+          ok = false
+          break
+        if n == 0: break
+        bytes.add(buf[0 ..< n])
+        if bytes.len > maxBytes:
+          ok = false
+          break
+      discard posix.close(fd)
+      if not ok:
+        discard unlinkatC(dfd, name.cstring, 0)
+        result.add(name & ": unreadable or grew past " & $maxBytes &
+          " bytes; removed")
+        continue
+    try:
+      take((name, bytes))
+    except CatchableError:
+      continue
+    discard unlinkatC(dfd, name.cstring, 0)
