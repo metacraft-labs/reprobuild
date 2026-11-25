@@ -3188,6 +3188,7 @@ tests/unit/t_path_only_readers_find_a_prefix_an_older_build_named.nim	nim	4
 tests/unit/t_prefix_env_ops.nim	nim	4
 tests/unit/t_provider_compile_cache_entry_is_content_addressed.nim	nim	7
 tests/unit/t_provider_compile_failure_says_how_the_action_ended.nim	nim	6
+tests/unit/t_provider_compile_foreign_fingerprint_recompiles.nim	nim	5
 tests/unit/t_provider_graph_snapshot_version_skew.nim	nim	11
 tests/unit/t_provider_response_resolves_shared_resolution_paths.nim	nim	3
 tests/unit/t_provider_snapshot_binary_binding.nim	nim	4
