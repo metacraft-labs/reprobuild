@@ -125,6 +125,7 @@ libs/repro_addon/tests/t_addon_system_file_with_mode_or_group_is_a_private_copy.
 libs/repro_addon/tests/t_addon_tmpfiles_scope.nim	nim	7
 libs/repro_addon/tests/t_addon_trace_attribution.nim	nim	6
 libs/repro_addon/tests/t_addon_uninstall_keeps_pre_bootstrap_inputs.nim	nim	73
+libs/repro_addon/tests/t_addon_uninstall_refuses_pending_switch.nim	nim	5
 libs/repro_addon/tests/t_addon_uninstall_rerun_removes_ship_state.nim	nim	5
 libs/repro_addon/tests/t_addon_units_meet_confinement_floor.nim	nim	3
 libs/repro_addon/tests/t_full_host_secrets_materialise_from_the_latest_envelope.nim	nim	9
@@ -1569,6 +1570,7 @@ tests/e2e/addon/t_e2e_addon_tick_observes_a_fresh_cycle.nim	nim	1
 tests/e2e/addon/t_e2e_addon_to_reproos_conversion_keeps_state.nim	nim	1
 tests/e2e/addon/t_e2e_addon_ubuntu_24_04_to_26_04_release_upgrade.nim	nim	1
 tests/e2e/addon/t_e2e_addon_unattended_upgrades_week.nim	nim	1
+tests/e2e/addon/t_e2e_addon_uninstall_refuses_pending_switch.nim	nim	1
 tests/e2e/addon/t_e2e_addon_uninstall_removes_revert_holds.nim	nim	3
 tests/e2e/addon/t_e2e_addon_unit_syscall_filters_cover_their_traces.nim	nim	1
 tests/e2e/addon/t_e2e_addon_validator_never_double_signs.nim	nim	1

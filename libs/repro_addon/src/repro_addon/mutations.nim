@@ -1460,6 +1460,9 @@
 ##                                            however old it is
 ##                                            (``repro_test_support/
 ##                                            fresh_binary``; round 4)
+## ``uninstall-skips-pending-check``          uninstall does not refuse over
+##                                            a pending switch marker (spec
+##                                            §6.4 step 0)
 ## ``egress-control-not-sent``                the fetch sends no DET-AO-3
 ##                                            control datagram (DET-4)
 ## ``manifest-control-skipped``               the tick never runs DET-AO-1's
@@ -2558,6 +2561,9 @@ const
                           "discard-completion-failure-discards-key",
                           "discard-completion-sync-error-swallowed",
                           "fresh-ignores-listings",
+                          # Uninstall's step 0 (spec §6.4; §13 decision
+                          # 122): no uninstall over a pending marker.
+                          "uninstall-skips-pending-check",
                           "fresh-accepts-user-config",
                           "fresh-accepts-nimble-path",
                           # An agent apply may weaken a unit's confinement
