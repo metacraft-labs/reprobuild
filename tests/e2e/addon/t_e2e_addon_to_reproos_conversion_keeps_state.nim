@@ -665,6 +665,14 @@ const
       systemdSystemDropIn(unit = "ssh.socket", name = "a13-repoint",
         content = "[Socket]\nService=eth-r10-path.service\n",
         address = "r13Ssh")"""
+  R15PrefixResource = """
+      # A13 review round 15: a drop-in on a dashed prefix that keeps an
+      # instance, a13r15x-@a.socket (it applies to every a13r15x-*@a.socket;
+      # no unit of any base has that prefix), setting Service= on a judged
+      # unit: refused before anything is written (decision 177, 2026-11-18).
+      systemdSystemDropIn(unit = "a13r15x-@a.socket", name = "a13-prefix",
+        content = "[Socket]\nService=eth-r10-path.service\n",
+        address = "r15Prefix")"""
   R5Plan = r5Unit("eth-r5-plan.service", "ProtectSystem=strict\n" &
     "NoNewPrivileges=yes\nUser=eth-validator\nGroup=eth-validator\n" &
     "ReadWritePaths=/var/lib/ethereum/validator\n", "r5Plan")
@@ -1098,8 +1106,11 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     writeFile(work / "system_ssh.nim", src0.replace(anchor, anchor &
       ShadowResource & R5Resources & R6Resources & R7Resources & R9Resources &
       R10Resources & R11Resources & R13SshResource))
+    writeFile(work / "system_prefix.nim", src0.replace(anchor, anchor &
+      ShadowResource & R5Resources & R6Resources & R7Resources & R9Resources &
+      R10Resources & R11Resources & R15PrefixResource))
     for f in ["system.nim", "system_next.nim", "system_ess.nim", "system_ssh.nim",
-              PinsModule, "home.nim"]:
+              "system_prefix.nim", PinsModule, "home.nim"]:
       nw.copyTo(work / f, RefDir / f)
     let env = ReidentifyPrefix
     putReferenceSecrets(nw, env & eng & " system secret put", jwt, adminToken,
@@ -2137,6 +2148,27 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
            "stopped nor held", sshOk, o & "\nwritten: " & written &
            "\nheld: " & heldAnywhere & "\nbefore: " & sshBefore &
            " after: " & sshAfter)
+    # A13 review round 15: the refusal of a drop-in that re-points triggers
+    # the check cannot list runs before the apply does anything -- its only
+    # call site. Falsifier: the engine build
+    # dropin-refusal-before-writes-skipped (the drop-in is written and the
+    # apply passes).
+    block:
+      let r = nw.exec(env & eng & " infra apply --profile " & RefDir &
+        "/system_prefix.nim --host " & AgentTarget & " --no-preview",
+        timeoutSec = 3600)
+      let o = r.stdout & r.stderr
+      let pxRefused = r.exitCode != 0 and
+        "a13r15x-@a.socket sets Service=" in o
+      let pxWritten = nw.exec("test -e /etc/systemd/system/" &
+        "a13r15x-@a.socket.d && echo written; true").stdout.strip() == "written"
+      discard nw.run("rm -rf /etc/systemd/system/a13r15x-@a.socket.d; " &
+        "systemctl daemon-reload; true")
+      let pxOk = pxRefused and not pxWritten
+      record["prefixDropInRefused"] = %*{"exit": r.exitCode,
+        "refused": pxRefused, "written": pxWritten, "ok": pxOk}
+      step("round 15: a drop-in on a dashed prefix keeping an instance that " &
+           "sets Service= is refused before anything is written", pxOk, o)
     # A13 review round 14 (the owner decision "fail the apply", 2026-11-18,
     # decision 177(c)): an essential trigger that systemd links to a judged
     # unit only at the apply's own reload. A dummy sshd.socket -- an
@@ -2149,7 +2181,7 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     # late-essential-report-dropped (the apply passes).
     block:
       let leLoad = nw.exec("systemctl show -p LoadState --value sshd.socket").stdout.strip()
-      var leOut, leHeld, leActive = ""
+      var leOut, leHeld, leActive, leBefore = ""
       var leExit = -1
       if leLoad == "not-found":
         discard nw.run("printf '[Unit]\\nDescription=A13 round-14 probe: an " &
@@ -2163,6 +2195,10 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
           "\\\\n\" > \"$1/sshd.socket.d/10-a13-late.conf\"\\n' > " &
           "/etc/systemd/system-generators/a13r14-late && chmod 755 " &
           "/etc/systemd/system-generators/a13r14-late")
+        # Running before the apply (A13 review round 15), so "not stopped"
+        # can be seen: the generator has not run yet, so it is not linked.
+        leBefore = nw.exec("systemctl start sshd.socket; systemctl " &
+          "is-active sshd.socket").stdout.strip()
         let r = nw.exec(env & eng & " infra apply --profile " & RefDir &
           "/system_next.nim --host " & AgentTarget & " --no-preview",
           timeoutSec = 3600)
@@ -2172,21 +2208,23 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
           "zz-repro-carried-check-hold.conf /run/systemd/system/sshd.socket.d/" &
           "zz-repro-carried-check-hold.conf 2>/dev/null").stdout.strip()
         leActive = nw.exec("systemctl is-active sshd.socket").stdout.strip()
-        discard nw.run("rm -f /etc/systemd/system-generators/a13r14-late " &
+        discard nw.run("systemctl stop sshd.socket 2>/dev/null; " &
+          "rm -f /etc/systemd/system-generators/a13r14-late " &
           "/etc/systemd/system/sockets.target.wants/sshd.socket " &
           "/etc/systemd/system/sshd.socket; rm -rf /etc/systemd/system/" &
           "sshd.socket.d /run/systemd/system/sshd.socket.d; systemctl " &
-          "daemon-reload; systemctl reset-failed sshd.socket 2>/dev/null; true")
+          "daemon-reload; systemctl stop sshd.socket 2>/dev/null; systemctl " &
+          "reset-failed sshd.socket 2>/dev/null; true")
       let leNamed = "sshd.socket is essential and triggers " & R10PathSvc in leOut
-      let leOk = leLoad == "not-found" and leExit != 0 and leNamed and
-        leHeld.len == 0 and leActive != "active"
+      let leOk = leLoad == "not-found" and leBefore == "active" and
+        leExit != 0 and leNamed and leHeld.len == 0 and leActive == "active"
       record["lateEssentialTrigger"] = %*{"sshdSocketBefore": leLoad,
-        "exit": leExit, "named": leNamed, "held": leHeld,
-        "active": leActive, "ok": leOk}
+        "activeBefore": leBefore, "exit": leExit, "named": leNamed,
+        "held": leHeld, "active": leActive, "ok": leOk}
       step("decision 177(c): an essential trigger systemd links to a judged " &
            "unit only at the apply's reload fails the apply, named, and is " &
            "neither stopped nor held", leOk,
-           "sshd.socket before: " & leLoad & "\n" & leOut & "\nheld: " &
+           "sshd.socket before: " & leLoad & " " & leBefore & "\n" & leOut & "\nheld: " &
            leHeld & " active: " & leActive)
     # Decision 177 (A13 review round 11): with carried state restored, an
     # apply of the next generation plus a drop-in that makes a console getty

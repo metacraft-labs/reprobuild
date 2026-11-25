@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 36,
-    "nimTestBinaries": 3254,
+    "nimTestBinaries": 3257,
     "pureUnitConsolidationGroups": 96,
     "pureUnitTests": 852,
     "staticallyDetectedRuntimeCompilerFlowTests": 163,
-    "testEntries": 3313
+    "testEntries": 3316
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1859,8 +1859,8 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 29,
-      "integration": 1832,
-      "platform/destructive": 205,
+      "integration": 1834,
+      "platform/destructive": 206,
       "pure unit": 852,
       "unclassified": 395
     },
@@ -2082,9 +2082,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 3254,
+    "nimTestBinaryCount": 3257,
     "pythonTestFileCount": 59,
-    "testEntryCount": 3313
+    "testEntryCount": 3316
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -6183,7 +6183,7 @@
             "workRoot",
             "wrapped"
           ],
-          "line": 1445,
+          "line": 1448,
           "path": "tests/integration/t_every_launch_path_is_monitored.nim",
           "patterns": [
             "cc"
@@ -10095,8 +10095,8 @@
       "owner": "libs/repro_addon",
       "requiresReproBinary": false,
       "source": "libs/repro_addon/tests/t_addon_carried_state_fails_closed.nim",
-      "sourceSuiteCount": 33,
-      "staticCaseCount": 183,
+      "sourceSuiteCount": 34,
+      "staticCaseCount": 192,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -10278,6 +10278,25 @@
       "source": "libs/repro_addon/tests/t_addon_egress_observer.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 15,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_addon_egress_round25",
+      "class": "platform/destructive",
+      "classificationReason": "platform path, target OS, VM, privileged, or host mutation signal",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_addon",
+        "repro_core",
+        "repro_peer_cache"
+      ],
+      "owner": "libs/repro_addon",
+      "requiresReproBinary": false,
+      "source": "libs/repro_addon/tests/t_addon_egress_round25.nim",
+      "sourceSuiteCount": 3,
+      "staticCaseCount": 9,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -33208,6 +33227,21 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_published_detached_sibling_at_ancestor",
+      "class": "integration",
+      "classificationReason": "subprocess or repro CLI invocation in test body",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [],
+      "owner": "libs/repro_workspace_vcs",
+      "requiresReproBinary": false,
+      "source": "libs/repro_workspace_vcs/tests/t_published_detached_sibling_at_ancestor.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_shared_bare_refresh_advances_refs_and_wiring_compares_paths",
       "class": "integration",
       "classificationReason": "subprocess or repro CLI invocation in test body",
@@ -43903,6 +43937,27 @@
       "owner": "tests/integration",
       "requiresReproBinary": true,
       "source": "tests/integration/t_a_gate_refusal_over_an_unpublished_sibling_names_the_push_first.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_a_grant_behind_a_denial_in_one_batch_is_not_dropped",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_build_engine",
+        "repro_core",
+        "repro_depfile",
+        "repro_runquota",
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_a_grant_behind_a_denial_in_one_batch_is_not_dropped.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
       "staticallyDetectedRuntimeCompilerFlow": false,

@@ -23943,9 +23943,25 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       buildPressure.takeReport(now))
 
   proc failRunningAction(index: int; message: string) =
+    # A QUEUED ACTION THAT FAILS GIVES ITS LEASE BACK. Nothing else would:
+    # the teardown skips a failed entry, and the daemon would later grant the
+    # still-queued lease to nobody, leaving it GRANTED with no child until the
+    # session close is refused ("session still owns leases", reprobuild-specs
+    # issue 2026-11-04-repro-build-fails-with-session-still-owns-leases-after-
+    # every-action-executed). A lease the daemon already removed (a denial)
+    # is not active, and a release that fails changes nothing about the
+    # failure this entry reports.
+    var withdrawal = ""
+    if running[index].processKind == rpkInlineRunQuotaPending:
+      try:
+        var queued = running[index].queuedRunQuotaProcess
+        cancelQueued(queued)
+        running[index].queuedRunQuotaProcess = queued
+      except CatchableError as err:
+        withdrawal = "; withdrawing its queued lease also failed: " & err.msg
     buildPressure.noteWithdrawn(running[index].id, pressureNowMicros())
     running[index].inlineFailure = inlineRunQuotaFailureResult(
-      running[index].id, message)
+      running[index].id, message & withdrawal)
     running[index].processKind = rpkInlineRunQuotaFailed
 
   # RunQuota queue-wait observability and bounds. See ``tickRunQuotaQueue``.
@@ -23983,16 +23999,26 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       # and with it ``repro exec`` -- with nothing on screen. A short window
       # keeps the loop turning; ``tickRunQuotaQueue`` owns the clock that
       # tells a quiet daemon from a wedged one.
-      let polled = pollRunQuotaGrantsBounded(inlineRunQuotaSession, 20)
+      var polled = pollRunQuotaGrantsBounded(inlineRunQuotaSession, 20)
       if polled.frameReceived:
         runQuotaLastAliveMs = engineNowMs()
-      for grant in polled.grants:
+      # EVERY DECISION OF THE BATCH IS CONSUMED. The daemon delivers each
+      # grant once and puts a reload's denials ahead of it in the same batch,
+      # so returning at the first failed entry dropped the grant behind it:
+      # its action waited forever for a grant already sent, and its lease
+      # stayed granted to nobody. The first failed entry is returned after
+      # the loop; a grant no pending action claims is released.
+      for grant in polled.grants.mitems:
+        var claimed = false
         for j in 0 ..< running.len:
           if running[j].processKind != rpkInlineRunQuotaPending:
             continue
           if running[j].queuedRunQuotaProcess.candidateId != grant.candidateId:
             continue
+          claimed = true
           if not grant.active or grant.queued:
+            # The daemon removed a denied lease from its table already.
+            running[j].queuedRunQuotaProcess.active = false
             # FOLLOWUP per docs/runquota-policy.md: a late denial on an
             # already-queued lease MUST delay-and-retry, not surface as
             # an asFailed ActionResult.  The proper fix is to re-offer
@@ -24004,7 +24030,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             # explicitly calls this out as a known gap.
             failRunningAction(j, "runquota denied queued lease: " &
               grant.diagnostic)
-            return j
+            if result < 0: result = j
+            break
           frontier.noteQueuedGrant(engineNowMs() - running[j].queuedAtMs)
           buildPressure.noteGranted(running[j].id, pressureNowMicros())
           try:
@@ -24015,9 +24042,19 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             running[j].processKind = rpkInlineRunQuota
             runResult.trace(running[j].id, "launched", "runquota-grant")
           except CatchableError as err:
+            # `startGrantedWithRunQuota` resolved the lease before raising
+            # (finished and released); nothing is left to withdraw.
+            running[j].queuedRunQuotaProcess.active = false
             failRunningAction(j, "runquota inline process failed: " & err.msg)
-            return j
+            if result < 0: result = j
           break
+        if not claimed:
+          try:
+            releaseUnclaimedGrant(grant)
+          except CatchableError:
+            # The lease is the session's; the close names it if it is still
+            # held then.
+            discard
     except CatchableError as err:
       for j in 0 ..< running.len:
         if running[j].processKind == rpkInlineRunQuotaPending:
