@@ -230,7 +230,9 @@ curl -fsSLO "${BASE}/SHA256SUMS"
 
 :::tabs
 @tab Linux
-Use `PLATFORM=linux-x86_64`.
+Use `PLATFORM=linux-x86_64`, or `PLATFORM=linux-aarch64` on 64-bit Arm.
+Releases after v0.2.35 carry the `linux-aarch64` archive; v0.2.35 and
+earlier do not.
 
 @tab macOS
 Use `PLATFORM=darwin-aarch64`.

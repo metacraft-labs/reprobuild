@@ -51,12 +51,29 @@ pkgutil, ruby (macOS ships one), sha256sum and a shell; it is skipped, which
 counts as not passed, anywhere else. brew itself is not used: running a real
 `brew install` writes to the machine's Homebrew prefix.
 
+test_cs_m8e_pkg_payload_carries_both_bash_files runs on any host: it stages
+the .pkg's payload root (REPRO_PKG_STAGE_ONLY=1, everything build_pkg puts in
+the package before pkgbuild runs) from a darwin fixture archive and checks the
+completion files in it, the second Bash file
+/usr/local/etc/bash_completion.d/repro included. That pkgbuild packs exactly
+that root is the macOS case above.
+
 test_cs_m8c_windows_packages_carry_completion is the Windows counterpart. From
 a fixture .zip of the Windows archive's shape it generates the MSI authoring
-(.wxs) with repro-build-packages.sh --ecosystem msi, builds the MSI with
-msitools' wixl and reads it back with msiinfo and msiextract, and generates the
-Scoop manifest with repro-publish-repos.sh. It needs wixl, msiinfo and
-msiextract and is skipped, which counts as not passed, without them:
+(.wxs) with repro-build-packages.sh --ecosystem msi, builds the MSI and reads
+it back with msiinfo and msiextract, and generates the Scoop manifest with
+repro-publish-repos.sh. The MSI's custom actions are WiX's quiet exec
+(WixQuietExec64 in WixUtilExtension's WixCA DLL), which only WiX v3 on Windows
+links, so the packager builds the MSI with WiX v3 only. Here WiX v3 is a
+STAND-IN (wix_standin below, justified there): candle.exe and light.exe
+scripts that hand the authoring, unchanged but for one Binary row standing in
+for the WixCA DLL, to msitools' wixl. So the package's tables (files, custom
+actions, their types, command lines and sequencing) are real msitools output
+of the packager's own authoring and are checked here; that real WiX accepts
+the authoring, and that the real quiet-exec DLL runs repro.exe, is checked
+only on Windows by m8c_windows_packages_carry_completion.ps1. It needs wixl,
+msiinfo and msiextract and is skipped, which counts as not passed, without
+them:
   nix shell nixpkgs#msitools nixpkgs#python3 -c \
     python3 -m unittest tests.unit.test_release_native_packages
 The MSI read-back cases and the Scoop hooks case also need pwsh: the
@@ -249,13 +266,13 @@ class PackagerFixture(unittest.TestCase):
         with tarfile.open(self.tarball, "w:gz") as tf:
             tf.add(self.archive_root, arcname=self.archive_top)
 
-    def build(self, ecosystem, packager=None):
+    def build(self, ecosystem, packager=None, env=None):
         return subprocess.run(
             ["sh", str(packager or PACKAGER), "--version", VERSION,
              "--tarball", str(self.tarball),
              "--out", str(self.out), "--ecosystem", ecosystem,
              "--platform", self.PLATFORM, "--asset-arch", self.ASSET_ARCH],
-            capture_output=True, text=True, check=False,
+            capture_output=True, text=True, check=False, env=env,
         )
 
 
@@ -528,6 +545,10 @@ PUBLISHER = REPO_ROOT / "scripts" / "release" / "repro-publish-repos.sh"
 # macOS's /usr is read-only.
 MACOS_PKG_COMPLETIONS = {
     "usr/local/share/bash-completion/completions/repro": "repro.bash",
+    # A bash-completion installed under /usr/local (Homebrew on Intel Macs)
+    # reads its etc/bash_completion.d at start-up, whatever XDG_DATA_DIRS
+    # says.
+    "usr/local/etc/bash_completion.d/repro": "repro.bash",
     "usr/local/share/zsh/site-functions/_repro": "_repro",
     "usr/local/share/fish/vendor_completions.d/repro.fish": "repro.fish",
 }
@@ -594,6 +615,82 @@ Reprobuild.new.install
 _MACOS_TOOLS = ("pkgbuild", "pkgutil", "ruby", "sha256sum", "sh")
 
 
+def completion_files(payload):
+    """{path: (mode, bytes)} of every regular file under the payload's
+    usr/local/share and usr/local/etc, paths relative to the payload root."""
+    found = {}
+    for top in ("share", "etc"):
+        for path in payload.joinpath("usr", "local", top).rglob("*"):
+            if path.is_file() and not path.is_symlink():
+                found[str(path.relative_to(payload))] = (
+                    stat.S_IMODE(path.stat().st_mode), path.read_bytes())
+    return found
+
+
+def assert_macos_pkg_completions(case, archive_bytes, paths, shared):
+    """The .pkg's completion files: exactly MACOS_PKG_COMPLETIONS under
+    /usr/local/share and /usr/local/etc, each byte-identical to the archive's
+    script, mode 0644 and listed in `paths`; nothing outside /usr/local
+    (macOS's /usr is read-only)."""
+    case.assertEqual(sorted(MACOS_PKG_COMPLETIONS), sorted(shared))
+    for path, source in MACOS_PKG_COMPLETIONS.items():
+        mode, data = shared[path]
+        case.assertEqual(archive_bytes(source), data,
+                         f"pkg: {path} differs from the archive's {source}")
+        case.assertIn(b"__complete", data, f"pkg: {path}")
+        case.assertEqual(0o644, mode, f"pkg: {path} mode {oct(mode)}")
+        case.assertIn(path, paths, f"the payload lists no {path}")
+    for path in paths:
+        case.assertTrue(path == "usr" or path.startswith("usr/local"),
+                        f"the package installs {path} outside /usr/local")
+
+
+class MacosPkgStagingTests(PackagerFixture):
+    """The .pkg's payload, staged on any host (REPRO_PKG_STAGE_ONLY=1): the
+    tree build_pkg hands pkgbuild, with every completion file in it. Needs
+    only sh, tar and cp."""
+
+    PLATFORM = "darwin"
+    ASSET_ARCH = "aarch64"
+
+    def archive_bytes(self, name):
+        return (self.archive_root / "share" / "repro" / "completions" / name).read_bytes()
+
+    def staged(self, packager=None):
+        run = self.build("pkg", packager=packager,
+                         env=dict(os.environ, REPRO_PKG_STAGE_ONLY="1"))
+        self.assertEqual(0, run.returncode, run.stderr)
+        root = self.out / f"reprobuild-{VERSION}-{self.PLATFORM}-{self.ASSET_ARCH}.pkgroot"
+        self.assertTrue(root.is_dir(), sorted(os.listdir(self.out)))
+        self.assertEqual([], list(self.out.glob("*.pkg")), "a .pkg was built under STAGE_ONLY")
+        paths = sorted(str(p.relative_to(root)) for p in root.rglob("*"))
+        return root, paths
+
+    def test_cs_m8e_pkg_payload_carries_both_bash_files(self):
+        root, paths = self.staged()
+        shared = completion_files(root)
+        assert_macos_pkg_completions(self, self.archive_bytes, paths, shared)
+        self.assertIn("usr/local/etc/bash_completion.d/repro", shared)
+        self.assertIn("usr/local/bin/repro", paths)
+        self.assertIn("usr/local/lib/reprobuild/lib/marker", paths)
+        # Negative control: a packager without the second Bash file stages a
+        # payload the assertion rejects.
+        text = PACKAGER.read_text(encoding="utf-8")
+        line = "  [ \"$_fmt\" = pkg ] && _extra='repro.bash:usr/local/etc/bash_completion.d/repro'\n"
+        self.assertEqual(1, text.count(line), "the packager's extra .pkg line changed")
+        mutant = self.work / "packager-without-etc-bash.sh"
+        mutant.write_text(text.replace(line, ""), encoding="utf-8")
+        self.out = self.work / "out-no-etc-bash"
+        root, paths = self.staged(packager=mutant)
+        with self.assertRaises(AssertionError):
+            assert_macos_pkg_completions(self, self.archive_bytes, paths,
+                                         completion_files(root))
+        # The Linux packages are unchanged: one Bash file each (the deb's
+        # payload is checked by test_cs_m8a_packages_carry_completion_files).
+        self.assertNotIn("usr/local/etc/bash_completion.d/repro",
+                         "".join(EXPECTED_COMPLETIONS["deb"]))
+
+
 @unittest.skipUnless(all(shutil.which(t) for t in _MACOS_TOOLS),
                      "needs " + ", ".join(_MACOS_TOOLS) + " (macOS)")
 class MacosCompletionFilesTests(PackagerFixture):
@@ -624,32 +721,15 @@ class MacosCompletionFilesTests(PackagerFixture):
         expanded = self.work / f"pkg-expanded-{tag}"
         subprocess.run(["pkgutil", "--expand-full", str(pkg), str(expanded)], check=True)
         payload = expanded / "Payload"
-        shared = {}
-        for path in payload.joinpath("usr", "local", "share").rglob("*"):
-            if path.is_file() and not path.is_symlink():
-                shared[str(path.relative_to(payload))] = (
-                    stat.S_IMODE(path.stat().st_mode), path.read_bytes())
-        return paths, shared, expanded
+        return paths, completion_files(payload), expanded
 
     def assert_pkg_completions(self, paths, shared):
-        # Exactly the three files under /usr/local/share, none elsewhere under
-        # /usr (macOS's /usr is read-only) outside /usr/local.
-        self.assertEqual(sorted(MACOS_PKG_COMPLETIONS), sorted(shared))
-        for path, source in MACOS_PKG_COMPLETIONS.items():
-            mode, data = shared[path]
-            self.assertEqual(self.archive_bytes(source), data,
-                             f"pkg: {path} differs from the archive's {source}")
-            self.assertIn(b"__complete", data, f"pkg: {path}")
-            self.assertEqual(0o644, mode, f"pkg: {path} mode {oct(mode)}")
-            self.assertIn(path, paths, f"pkgutil --payload-files lists no {path}")
-        for path in paths:
-            self.assertTrue(path == "usr" or path.startswith("usr/local"),
-                            f"the package installs {path} outside /usr/local")
+        assert_macos_pkg_completions(self, self.archive_bytes, paths, shared)
 
     def test_cs_m8b_macos_packages_carry_completion_files(self):
         # (1) The .pkg: its payload holds, under /usr/local, the archive tree
-        # intact, the command's wrapper, and the three completion files
-        # byte-identical to the archive's, mode 0644.
+        # intact, the command's wrapper, and the completion files (the Bash
+        # script twice) byte-identical to the archive's, mode 0644.
         with self.subTest(package="pkg"):
             run = self.build("pkg")
             self.assertEqual(0, run.returncode, f"pkg: {run.stderr}")
@@ -778,10 +858,17 @@ MSI_CUSTOM_ACTIONS = {
     "ReproCompletionEnsure": "hooks ensure --shell-autocomplete --system",
     "ReproCompletionRemove": "hooks uninstall --shell-autocomplete --system",
 }
-# msidbCustomActionTypeExe + SourceFile (18), ContinueOnError (64),
-# InScript (1024), NoImpersonate (2048):
+# Each action runs through WiX's quiet exec, whose command line is the
+# property named after the action, set by an immediate action before it; the
+# executable is named through the bin\ directory's property, which keeps its
+# value during removal.
+MSI_QUIET_EXEC_COMMAND = '"[BINDIR]repro.exe" '
+# msidbCustomActionTypeDll + BinaryData (1), ContinueOnError (64),
+# InScript (1024), NoImpersonate (2048); the setter is
+# msidbCustomActionTypeProperty + TextData (51):
 # https://learn.microsoft.com/windows/win32/msi/custom-action-types
-MSI_CUSTOM_ACTION_TYPE = 18 + 64 + 1024 + 2048
+MSI_CUSTOM_ACTION_TYPE = 1 + 64 + 1024 + 2048
+MSI_SETTER_TYPE = 51
 SCOOP_ENSURE = '& "$dir\\bin\\repro.exe" hooks ensure --shell-autocomplete --profile'
 SCOOP_UNINSTALL = '& "$dir\\bin\\repro.exe" hooks uninstall --shell-autocomplete --profile'
 
@@ -816,9 +903,79 @@ class WindowsCompletionTests(PackagerFixture):
     def archive_ps1(self):
         return (self.archive_root / "share" / "repro" / "completions" / "repro.ps1").read_bytes()
 
-    def build_msi(self, packager=None, source_only=False):
+    # A stand-in for WiX v3's candle.exe and light.exe, which exist on
+    # Windows only. It is justified because what this file tests is the
+    # packager's authoring and the package's tables, not WiX: candle's
+    # stand-in keeps the authoring as it is (and the SourceDir it was given),
+    # and light's adds one row, a Binary named WixCA whose data is a
+    # placeholder file, the row WixUtilExtension's library contributes, and
+    # hands the result to msitools' wixl, which writes the real tables. Like
+    # light, it refuses to link without -ext WixUtilExtension (light reports
+    # the unresolved Binary:WixCA reference). The real WiX and the real
+    # quiet-exec DLL are m8c_windows_packages_carry_completion.ps1's, on
+    # Windows.
+    CANDLE_STANDIN = r"""#!/bin/sh
+out=''; src=''; wxs=''
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -out) out="$2"; shift ;;
+    -dSourceDir=*) src="${1#-dSourceDir=}" ;;
+    -*) ;;
+    *) wxs="$1" ;;
+  esac
+  shift
+done
+cp "$wxs" "$out" && printf '%s\n' "$src" > "$out.sourcedir"
+"""
+    LIGHT_STANDIN = r"""#!/bin/sh
+out=''; obj=''; ext=0; prev=''
+for a in "$@"; do
+  case "$prev:$a" in
+    -out:*) out="$a" ;;
+    -ext:WixUtilExtension) ext=1 ;;
+    *:-*) ;;
+    *) [ "$prev" = -out ] || [ "$prev" = -ext ] || obj="$a" ;;
+  esac
+  prev="$a"
+done
+[ "$ext" = 1 ] || { echo "light.exe: error LGHT0094 : Unresolved reference to symbol 'Binary:WixCA'" >&2; exit 1; }
+sed "s#<Media #<Binary Id=\"WixCA\" SourceFile=\"$WIX_STANDIN_DLL\" />\n    <Media #" "$obj" > "$obj.wxs"
+exec "$WIX_STANDIN_WIXL" -a x64 -D "SourceDir=$(cat "$obj.sourcedir")" -o "$out" "$obj.wxs"
+"""
+
+    def wix_standin(self):
+        """The environment entries that make the packager build with the
+        WiX v3 stand-in above."""
+        d = self.work / "wix-standin"
+        if not d.is_dir():
+            d.mkdir()
+            for name, text in (("candle.exe", self.CANDLE_STANDIN),
+                               ("light.exe", self.LIGHT_STANDIN)):
+                (d / name).write_text(text, encoding="utf-8")
+                (d / name).chmod(0o755)
+            (d / "wixca.dll").write_bytes(b"MZ placeholder for WixCA\n")
+        return {"REPRO_MSI_TOOLSET": "wix3", "REPRO_WIX3_BIN": str(d),
+                "WIX_STANDIN_DLL": str(d / "wixca.dll"),
+                "WIX_STANDIN_WIXL": shutil.which("wixl")}
+
+    def build_with_standin(self, wxs, msi, src):
+        """Build `wxs` (an authoring of the packager's shape) with the
+        stand-in, as the packager would, from the tree unpacked at `src`."""
+        env = dict(os.environ, **self.wix_standin())
+        d = Path(env["REPRO_WIX3_BIN"])
+        obj = self.work / (msi.stem + ".wixobj")
+        subprocess.run([str(d / "candle.exe"), "-nologo", "-arch", "x64", "-ext",
+                        "WixUtilExtension", f"-dSourceDir={src}", "-out", str(obj), str(wxs)],
+                       check=True, env=env, capture_output=True, text=True)
+        subprocess.run([str(d / "light.exe"), "-nologo", "-sval", "-ext", "WixUtilExtension",
+                        "-out", str(msi), str(obj)],
+                       check=True, env=env, capture_output=True, text=True, cwd=str(src))
+
+    def build_msi(self, packager=None, source_only=False, toolset_env=None):
         env = dict(os.environ)
         env.pop("REPRO_MSI_TOOLSET", None)
+        env.pop("REPRO_WIX3_BIN", None)
+        env.update(self.wix_standin() if toolset_env is None else toolset_env)
         if source_only:
             env["REPRO_MSI_SOURCE_ONLY"] = "1"
         return subprocess.run(
@@ -830,7 +987,9 @@ class WindowsCompletionTests(PackagerFixture):
 
     # ------------------------------------------------------------ the .msi
     def msi_rows(self, msi, table):
-        text = subprocess.run(["msiinfo", "export", str(msi), table],
+        # In the scratch directory: exporting a table with a binary column
+        # (Binary) writes each stream to <table>/<row> under the cwd.
+        text = subprocess.run(["msiinfo", "export", str(msi), table], cwd=str(self.work),
                               capture_output=True, text=True, check=True).stdout
         return [line.rstrip("\r").split("\t") for line in text.splitlines()[3:] if line.strip()]
 
@@ -864,24 +1023,35 @@ class WindowsCompletionTests(PackagerFixture):
             files[path] = on_disk.read_bytes() if on_disk.is_file() else None
         actions = {row[0]: (int(row[1]), row[2], row[3])
                    for row in self.msi_rows(msi, "CustomAction")}
-        sequence = {row[0]: row[1] for row in self.msi_rows(msi, "InstallExecuteSequence")}
-        return files, actions, sequence
+        sequence = {row[0]: (row[1], int(row[2]))
+                    for row in self.msi_rows(msi, "InstallExecuteSequence")}
+        binaries = [row[0] for row in self.msi_rows(msi, "Binary")]
+        return files, actions, sequence, binaries
 
-    def assert_msi_completion(self, files, actions, sequence):
+    def assert_msi_completion(self, files, actions, sequence, binaries):
         self.assertIn(MSI_COMPLETION_PATH, files, sorted(files))
         self.assertEqual(self.archive_ps1(), files[MSI_COMPLETION_PATH],
                          "msi: the completion script differs from the archive's")
         self.assertIn(b"__complete", files[MSI_COMPLETION_PATH])
         self.assertIn(MSI_REPRO_PATH, files)
+        self.assertIn("WixCA", binaries)
         for action, command in MSI_CUSTOM_ACTIONS.items():
+            # The quiet-exec action ...
             self.assertIn(action, actions)
-            kind, source, target = actions[action]
-            self.assertEqual(MSI_CUSTOM_ACTION_TYPE, kind, action)
-            self.assertEqual("fil_repro_exe", source, action)
-            self.assertEqual(command, target, action)
+            self.assertEqual((MSI_CUSTOM_ACTION_TYPE, "WixCA", "WixQuietExec64"),
+                             actions[action], action)
+            # ... and the immediate action that sets its command line, run
+            # before it under the same condition.
+            setter = "Set" + action
+            self.assertIn(setter, actions)
+            self.assertEqual((MSI_SETTER_TYPE, action, MSI_QUIET_EXEC_COMMAND + command),
+                             actions[setter], setter)
             self.assertIn(action, sequence)
-        self.assertEqual('REMOVE~="ALL"', sequence["ReproCompletionRemove"])
-        self.assertEqual('NOT (REMOVE~="ALL")', sequence["ReproCompletionEnsure"])
+            self.assertIn(setter, sequence)
+            self.assertEqual(sequence[action][0], sequence[setter][0], setter)
+            self.assertLess(sequence[setter][1], sequence[action][1], setter)
+        self.assertEqual('REMOVE~="ALL"', sequence["ReproCompletionRemove"][0])
+        self.assertEqual('NOT (REMOVE~="ALL")', sequence["ReproCompletionEnsure"][0])
 
     # ------------------------------------------------------ the Scoop manifest
     def generate_scoop_manifest(self):
@@ -946,19 +1116,45 @@ class WindowsCompletionTests(PackagerFixture):
             self.assertEqual("repro.ps1", element.get("Name"))
             self.assertEqual(f"$(var.SourceDir)/{self.archive_top}/share/repro/completions/repro.ps1",
                              element.get("Source"))
-            commands = {ca.get("Id"): (ca.get("FileKey"), ca.get("ExeCommand"), ca.get("Execute"),
-                                       ca.get("Impersonate"), ca.get("Return"))
-                        for ca in tree.getroot().iterfind(".//w:CustomAction", ns)}
+            actions = {ca.get("Id"): dict(ca.attrib)
+                       for ca in tree.getroot().iterfind(".//w:CustomAction", ns)}
             for action, command in MSI_CUSTOM_ACTIONS.items():
-                self.assertEqual(("fil_repro_exe", command, "deferred", "no", "ignore"),
-                                 commands.get(action), action)
+                # WiX's quiet exec, deferred, as LocalSystem, failure ignored
+                # (https://wixtoolset.org/docs/v3/customactions/qtexec/) ...
+                self.assertEqual({"Id": action, "BinaryKey": "WixCA",
+                                  "DllEntry": "WixQuietExec64", "Execute": "deferred",
+                                  "Impersonate": "no", "Return": "ignore"},
+                                 actions.get(action), action)
+                # ... whose command line its CustomActionData, the property
+                # of its name, holds: set by an immediate action.
+                self.assertEqual({"Id": "Set" + action, "Property": action,
+                                  "Value": MSI_QUIET_EXEC_COMMAND + command,
+                                  "Execute": "immediate"},
+                                 actions.get("Set" + action), action)
+            # No plain executable action is left (it would flash a console).
+            for ca in actions.values():
+                self.assertNotIn("FileKey", ca)
+                self.assertNotIn("ExeCommand", ca)
+            # [BINDIR] is the directory that holds repro.exe.
+            bindir = tree.getroot().find(".//w:Directory[@Id='BINDIR']", ns)
+            self.assertEqual("bin", bindir.get("Name"))
+            self.assertIsNotNone(bindir.find("w:Component/w:File[@Id='fil_repro_exe']", ns))
+            customs = [(c.get("Action"), c.get("Before"), (c.text or "").strip())
+                       for c in tree.getroot().iterfind(".//w:InstallExecuteSequence/w:Custom", ns)]
+            self.assertEqual([
+                ("SetReproCompletionRemove", "ReproCompletionRemove", 'REMOVE~="ALL"'),
+                ("ReproCompletionRemove", "RemoveFiles", 'REMOVE~="ALL"'),
+                ("SetReproCompletionEnsure", "ReproCompletionEnsure", 'NOT (REMOVE~="ALL")'),
+                ("ReproCompletionEnsure", "InstallFinalize", 'NOT (REMOVE~="ALL")')], customs)
             env = tree.getroot().find(".//w:Environment", ns)
             self.assertEqual(("PATH", "[BINDIR]", "yes"),
                              (env.get("Name"), env.get("Value"), env.get("System")))
 
-        # (2) The built MSI, read back: the script is installed at
+        # (2) The built MSI (WiX v3 stand-in, see wix_standin), read back:
+        # the script is installed at
         # %ProgramFiles%\Reprobuild\share\repro\completions\repro.ps1,
-        # byte-identical to the archive's, and both actions are sequenced.
+        # byte-identical to the archive's, and both quiet-exec actions and
+        # their setters are in its tables and sequenced.
         with self.subTest(package="msi"):
             self.out = self.work / "out-msi"
             run = self.build_msi()
@@ -987,11 +1183,28 @@ class WindowsCompletionTests(PackagerFixture):
             mutant_wxs = self.work / "mutant.wxs"
             mutant_wxs.write_text(mutant, encoding="utf-8")
             mutant_msi = self.work / "mutant.msi"
-            subprocess.run(["wixl", "-a", "x64", "-D", f"SourceDir={src}", "-o",
-                            str(mutant_msi), str(mutant_wxs)],
-                           capture_output=True, text=True, check=True, cwd=str(src))
+            self.build_with_standin(mutant_wxs, mutant_msi, src)
             with self.assertRaises(AssertionError):
                 self.assert_msi_completion(*self.msi_contents(mutant_msi, "mutant"))
+
+        # (3b) Negative control for the quiet exec: the same authoring with
+        # the earlier plain executable actions (type 18, which flash a console)
+        # builds a package the assertion rejects.
+        with self.subTest(package="msi with plain executable actions"):
+            plain = wxs_text
+            for action, command in MSI_CUSTOM_ACTIONS.items():
+                quiet = (f'<CustomAction Id="{action}" BinaryKey="WixCA" DllEntry="WixQuietExec64" '
+                         'Execute="deferred" Impersonate="no" Return="ignore" />')
+                self.assertEqual(1, plain.count(quiet), action)
+                plain = plain.replace(quiet, (f'<CustomAction Id="{action}" FileKey="fil_repro_exe" '
+                                              f'ExeCommand="{command}" Execute="deferred" '
+                                              'Impersonate="no" Return="ignore" />'))
+            plain_wxs = self.work / "plain.wxs"
+            plain_wxs.write_text(plain, encoding="utf-8")
+            plain_msi = self.work / "plain.msi"
+            self.build_with_standin(plain_wxs, plain_msi, src)
+            with self.assertRaises(AssertionError):
+                self.assert_msi_completion(*self.msi_contents(plain_msi, "plain"))
 
         # (4) The Scoop manifest the publisher generates.
         with self.subTest(package="scoop"):
@@ -1002,6 +1215,31 @@ class WindowsCompletionTests(PackagerFixture):
             del mutant["post_install"]
             with self.assertRaises(AssertionError):
                 self.assert_scoop_completion(mutant)
+
+        # (4b) wixl cannot link the quiet-exec DLL: asked for, it is refused
+        # with the reason, and so is a WiX that is not given the extension
+        # (light's stand-in refuses as light does; the packager's read-back
+        # would refuse a package without the WixCA binary too).
+        with self.subTest(package="msi with wixl"):
+            self.out = self.work / "out-wixl"
+            run = self.build_msi(toolset_env={"REPRO_MSI_TOOLSET": "wixl"})
+            self.assertNotEqual(0, run.returncode, "wixl built the MSI")
+            self.assertIn("WiX quiet exec", run.stderr)
+            self.assertFalse(list(self.out.glob("*.msi")))
+            self.out = self.work / "out-no-wix"
+            run = self.build_msi(toolset_env={})
+            self.assertNotEqual(0, run.returncode, "an MSI was built with no WiX")
+            self.assertIn("REPRO_WIX3_BIN", run.stderr)
+        with self.subTest(package="msi linked without WixUtilExtension"):
+            text = PACKAGER.read_text(encoding="utf-8")
+            light = '"$_light" -nologo -sval -ext WixUtilExtension -out'
+            self.assertEqual(1, text.count(light), "the packager's light line changed")
+            no_ext = self.work / "packager-without-util-extension.sh"
+            no_ext.write_text(text.replace(light, '"$_light" -nologo -sval -out'), encoding="utf-8")
+            self.out = self.work / "out-no-ext"
+            run = self.build_msi(packager=no_ext)
+            self.assertNotEqual(0, run.returncode, "an MSI was linked without WixUtilExtension")
+            self.assertIn("Binary:WixCA", run.stderr)
 
         # (5) An archive without the script: the packager refuses and names it.
         with self.subTest(package="msi from an archive without repro.ps1"):
@@ -1050,13 +1288,21 @@ file="$STANDIN_DIR/script-$n.ps1"
 printf '%s' "$script" > "$file"
 printf '%s\n----\n' "$script" >> "$STANDIN_SCRIPTS"
 "$STANDIN_PWSH" -NoProfile -NonInteractive -File "$STANDIN_PARSER" "$file" >&2 || exit 1
-"$STANDIN_MSIINFO" export "$REPRO_MSI_DB" "$REPRO_MSI_TABLE" | tail -n +4
+# As the reader answers: a stream column ('v'/'V' in the export's type line)
+# is its length in bytes (Record.DataSize); msiinfo wrote the stream to
+# <table>/<cell> under the working directory.
+cd "$STANDIN_DIR" && "$STANDIN_MSIINFO" export "$REPRO_MSI_DB" "$REPRO_MSI_TABLE" | tr -d '\r' |
+  awk -F '\t' -v OFS='\t' -v dir="$STANDIN_DIR/$REPRO_MSI_TABLE" '
+    NR == 2 { for (k = 1; k <= NF; k++) stream[k] = ($k ~ /^[vV]/); next }
+    NR <= 3 { next }
+    { for (k = 1; k <= NF; k++) if (stream[k]) { c = "wc -c < \"" dir "/" $k "\""; c | getline n; close(c); gsub(/[^0-9]/, "", n); $k = n } print }'
 """
 
     def without_msiinfo_env(self):
         """The environment with powershell.exe's stand-in first on PATH and
         no msiinfo on it, so the packager takes its Windows read-back path;
-        wixl stays reachable to build the package."""
+        the package is built with the WiX v3 stand-in (wix_standin), which
+        names wixl by its full path."""
         msiinfo = shutil.which("msiinfo")
         wixl = shutil.which("wixl")
         standin_dir = self.work / "standin-bin"
@@ -1073,14 +1319,13 @@ printf '%s\n----\n' "$script" >> "$STANDIN_SCRIPTS"
         path = [str(standin_dir)] + [d for d in os.environ.get("PATH", "").split(os.pathsep)
                                      if d and d != msitools_dir
                                      and not (Path(d) / "msiinfo").exists()]
-        env = dict(os.environ, PATH=os.pathsep.join(path),
+        env = dict(os.environ, PATH=os.pathsep.join(path), **self.wix_standin(),
                    STANDIN_LOG=str(self.work / "standin.log"),
                    STANDIN_SCRIPTS=str(self.work / "standin-scripts.txt"),
                    STANDIN_DIR=str(scripts_dir),
                    STANDIN_PARSER=str(parser),
                    STANDIN_PWSH=shutil.which("pwsh"),
                    STANDIN_MSIINFO=msiinfo)
-        env.pop("REPRO_MSI_TOOLSET", None)
         return env
 
     @unittest.skipUnless(shutil.which("pwsh"), "needs pwsh (PowerShell 7) to parse the reader")
@@ -1132,6 +1377,95 @@ printf '%s\n----\n' "$script" >> "$STANDIN_SCRIPTS"
         self.assertIn("cannot read the Directory table", run.stderr)
         self.assertIn("Unexpected token", run.stderr)
         self.assertNotIn("does not install", run.stderr)
+
+    # ------------------------------ the Windows reader and stream columns
+    # The Binary table's Data column is a binary stream, and the Windows
+    # Installer automation object refuses Record.StringData on one: on a
+    # real Windows host the reader stopped with "reading MSI table Binary
+    # failed: Exception calling InvokeMember with 5 argument(s):
+    # StringData,Field". The reader now takes each column's type from
+    # View.ColumnInfo(1) and reads a 'v'/'V' (stream) column with
+    # Record.DataSize. The COM object exists only on Windows, so these cases
+    # run the reader's own functions (the text before its "# main:" line,
+    # unchanged) under pwsh with Get-ComProperty -- the one function through
+    # which the reader touches the COM object -- replaced by a stand-in that
+    # answers as the object did on that host: StringData on a stream field
+    # throws "StringData,Field", DataSize gives the stream's length. What the
+    # stand-in cannot show (that the real object answers DataSize for the
+    # WixCA row) is the Windows host's packages check.
+    READER_STANDIN_PS = r"""
+function Get-ComProperty($Object, [string]$Name, [object[]]$Arguments) {
+  $k = [int]$Arguments[0]
+  if ($Name -eq 'StringData') {
+    if ($Object.Types[$k - 1] -cmatch '^[vV]') {
+      throw 'Exception calling "InvokeMember" with "5" argument(s): "StringData,Field"'
+    }
+    return $Object.Values[$k - 1]
+  }
+  if ($Name -eq 'DataSize') { return $Object.Sizes[$k - 1] }
+  throw "the stand-in has no property $Name"
+}
+$record = @{ Types = @('s72', 'v0'); Values = @('WixCA', $null); Sizes = @(5, 3000) }
+try {
+  $cells = foreach ($k in 1..2) { Get-MsiCell $record $k $record.Types[$k - 1] }
+  [Console]::Out.WriteLine(($cells -join [char]9))
+  foreach ($t in @('s72', 'v0', 'V0', 'i2', 'l255', 'S0')) {
+    [Console]::Out.WriteLine($t + '=' + (Test-MsiStreamColumn $t))
+  }
+} catch {
+  [Console]::Error.WriteLine('reader failed: ' + $_.Exception.Message)
+  exit 1
+}
+"""
+
+    def reader_functions(self, packager_text):
+        start = packager_text.index("MSI_TABLE_PS=\"$(cat <<'MSI_TABLE_PS_EOF'\n")
+        body = packager_text[start:].split("\n", 1)[1]
+        body = body[:body.index("\nMSI_TABLE_PS_EOF\n")]
+        self.assertIn("# main:", body, "the reader lost its main marker; update this test")
+        return body[:body.index("# main:")]
+
+    def run_reader_functions(self, packager_text):
+        script = self.work / "reader-functions.ps1"
+        script.write_text(self.reader_functions(packager_text) + self.READER_STANDIN_PS,
+                          encoding="utf-8")
+        self.assertEqual([], powershell_parse_errors(script))
+        return subprocess.run([shutil.which("pwsh"), "-NoProfile", "-NonInteractive",
+                               "-File", str(script)],
+                              capture_output=True, text=True, check=False, timeout=120)
+
+    @unittest.skipUnless(shutil.which("pwsh"), "needs pwsh (PowerShell 7) to run the reader's functions")
+    def test_cs_m8e_the_msi_reader_reads_a_stream_column_as_its_length(self):
+        run = self.run_reader_functions(PACKAGER.read_text(encoding="utf-8"))
+        self.assertEqual(0, run.returncode, run.stderr)
+        lines = run.stdout.splitlines()
+        self.assertEqual("WixCA\t3000", lines[0])
+        self.assertEqual(["s72=False", "v0=True", "V0=True", "i2=False", "l255=False", "S0=False"],
+                         lines[1:])
+
+    @unittest.skipUnless(shutil.which("pwsh"), "needs pwsh (PowerShell 7) to run the reader's functions")
+    def test_cs_m8e_a_reader_that_reads_every_column_as_a_string_fails_on_the_binary_table(self):
+        """Control: the reader as it was (StringData for every column) fails
+        on the Binary row with the Windows host's message."""
+        text = PACKAGER.read_text(encoding="utf-8")
+        old = text.replace("  if (Test-MsiStreamColumn $Type) {\n", "  if ($false) {\n")
+        self.assertNotEqual(old, text, "the reader's stream branch moved; update this control")
+        run = self.run_reader_functions(old)
+        self.assertNotEqual(0, run.returncode, run.stdout)
+        self.assertIn("StringData,Field", run.stderr)
+
+    def test_cs_m8e_the_packager_refuses_an_empty_wixca_binary(self):
+        """The read-back now wants the WixCA stream non-empty (its length,
+        read through msiinfo here); a package whose WixCA is empty is
+        refused, and the same build with the placeholder DLL passes (the
+        other MSI cases)."""
+        env = self.wix_standin()
+        empty = self.work / "empty-wixca.dll"
+        empty.write_bytes(b"")
+        env["WIX_STANDIN_DLL"] = str(empty)
+        run = self.build_msi(toolset_env=env)
+        self.assertNotEqual(0, run.returncode, run.stderr)
+        self.assertIn("no non-empty WixCA binary", run.stderr)
 
     @unittest.skipUnless(shutil.which("pwsh"), "needs pwsh (PowerShell 7) to parse the hooks")
     def test_the_scoop_hooks_parse_as_powershell(self):

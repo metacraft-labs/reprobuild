@@ -42,8 +42,6 @@ suite "tarball mode builds a fall-through source recipe":
     # `repro build --tool-provisioning=tarball` realizes tools into the
     # user's tool store under the store root; this test gets its own.
     env["REPRO_STORE_ROOT"] = root / "store-root"
-    # A cold interface-extraction compile outruns the default 1800 s cap on a loaded Windows host; the cap stays finite.
-    env["REPRO_INTERFACE_COMPILE_TIMEOUT_SECONDS"] = "7200"
     let res = execCmdEx(quoteShellCommand([binary, "build", "--daemon=off",
       "--tool-provisioning=tarball", "--progress=quiet", "--log=actions"]),
       env = env, workingDir = root / "consumer")

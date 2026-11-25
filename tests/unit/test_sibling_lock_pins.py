@@ -34,7 +34,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'scripts'))
-from check_sibling_lock_pins import check  # noqa: E402
+from check_sibling_lock_pins import DERIVED_SOURCES, check, parse_derived  # noqa: E402
 
 ADAPTERS = 'reprobuild-test-adapters'
 STALE_ADAPTERS_PIN = '72962c60f12426ba00b621fda5ab76b0f89ba912'
@@ -132,6 +132,80 @@ class SiblingLockPinFixtures(unittest.TestCase):
             check(self.root)
 
 
+class SiblingPinDerivedFixtures(unittest.TestCase):
+    """CodeTracer and its trace-format source are derived from the CodeTracer
+    pin, not locked by name, so neither lock can catch a stale entry; the
+    revisions the flake evaluation gives are what the entries must equal."""
+    pinned_ct, pinned_tf, stale = 'a' * 40, 'c' * 40, '0' * 40
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        self.derived = {'codetracer': self.pinned_ct,
+                        'codetracer-trace-format-nim': self.pinned_tf}
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def errors_for(self, siblings: str) -> list[str]:
+        write_tree(self.root, siblings, '[lock]\ndeps = []\n',
+                   json.dumps({'root': 'root', 'nodes': {'root': {'inputs': {}}}}))
+        return check(self.root, self.derived)
+
+    def test_entries_at_the_derived_revisions_pass(self):
+        self.assertEqual(self.errors_for(
+            f'codetracer={self.pinned_ct}  # why\n'
+            f'codetracer-trace-format-nim={self.pinned_tf.upper()}\n'), [])
+
+    def test_a_stale_entry_is_refused_naming_both_revisions(self):
+        # The defect this rule exists for: the pin moved (`nix flake update
+        # metacraft-github-actions`) and the clone list did not.
+        for name in self.derived:
+            with self.subTest(name=name):
+                lines = {n: f'{n}={self.stale if n == name else rev}'
+                         for n, rev in self.derived.items()}
+                errors = self.errors_for('\n'.join(lines.values()) + '\n')
+                self.assertEqual(len(errors), 1, errors)
+                self.assertIn(f'{name}={self.stale}', errors[0])
+                self.assertIn(self.derived[name], errors[0])
+                self.assertIn('CodeTracer pin', errors[0])
+
+    def test_a_branch_or_bare_entry_is_refused(self):
+        for entry in ('codetracer=dev', 'codetracer', 'codetracer!=agents'):
+            with self.subTest(entry=entry):
+                errors = self.errors_for(f'{entry}\ncodetracer-trace-format-nim={self.pinned_tf}\n')
+                self.assertEqual(len(errors), 1, errors)
+                self.assertIn(f'set `codetracer={self.pinned_ct}`', errors[0])
+
+    def test_a_missing_or_duplicated_entry_is_refused(self):
+        errors = self.errors_for(f'codetracer={self.pinned_ct}\n')
+        self.assertEqual(len(errors), 1, errors)
+        self.assertIn('lists codetracer-trace-format-nim 0 times', errors[0])
+        errors = self.errors_for(f'codetracer={self.pinned_ct}\ncodetracer={self.pinned_ct}\n'
+                                 f'codetracer-trace-format-nim={self.pinned_tf}\n')
+        self.assertEqual(len(errors), 1, errors)
+        self.assertIn('lists codetracer 2 times', errors[0])
+
+    def test_without_derived_revisions_the_rule_is_not_applied(self):
+        # Positive control for the cases above: the same stale list passes
+        # when nothing is derived, so the refusals came from this rule.
+        write_tree(self.root, f'codetracer={self.stale}\n', '[lock]\ndeps = []\n',
+                   json.dumps({'root': 'root', 'nodes': {'root': {'inputs': {}}}}))
+        self.assertEqual(check(self.root), [])
+
+    def test_the_evaluation_output_is_validated(self):
+        good = {name: self.pinned_ct for name in DERIVED_SOURCES}
+        self.assertEqual(parse_derived(json.dumps(good)), good)
+        for bad in ({'codetracer': self.pinned_ct},
+                    {**good, 'codetracer': 'dev'},
+                    {**good, 'codetracer': None},
+                    {**good, 'extra': self.pinned_ct},
+                    [self.pinned_ct]):
+            with self.subTest(bad=bad):
+                with self.assertRaises(ValueError):
+                    parse_derived(json.dumps(bad))
+
+
 class SiblingLockPinsRealTree(unittest.TestCase):
     def setUp(self):
         self.siblings = (ROOT / '.github/sibling-repos').read_text()
@@ -175,18 +249,30 @@ class SiblingLockPinsRealTree(unittest.TestCase):
         self.assertIn(f'{ADAPTERS}={STALE_ADAPTERS_PIN}', errors[0])
         self.assertIn(f'repro.lock pins {ADAPTERS} at revision {self.locked_adapters}', errors[0])
 
-    def test_trace_format_nim_is_pinned_to_flake_lock_revision_not_a_branch(self):
+    def test_codetracer_pair_is_pinned_to_revisions_not_branches(self):
         # reprobuild-pm issue
         # 2026-11-01-reprobuild-pins-codetracer-trace-format-nim-to-dev-while-its-work-accumulates-on-agents:
         # `=dev` named a branch that lagged the repository's `agents` line by
-        # 131 commits and jumped when a promotion landed. The entry is an exact
-        # revision, the one flake.lock's `ct-trace-format-src` pins.
-        name = 'codetracer-trace-format-nim'
+        # 131 commits and jumped when a promotion landed. Both entries are
+        # exact revisions: CodeTracer's is pins/codetracer.json's, the
+        # trace-format's is the one that CodeTracer revision's repro.lock
+        # names. Neither is in flake.lock (both are read from the pin), so the
+        # equality is the flake check `ct-trace-format-pin-coherence`'s; this
+        # asks only that they are commits, and that flake.lock does not lock
+        # either by name, which would make the gate above compare them to a
+        # second record.
         flake = json.loads(self.flake)
-        nodes = flake['nodes']
-        flake_rev = nodes[nodes[flake['root']]['inputs']['ct-trace-format-src']]['locked']['rev']
-        self.assertRegex(flake_rev, r'^[0-9a-f]{40}$')
-        self.assertEqual(self.entries().get(name), flake_rev)
+        root_inputs = flake['nodes'][flake['root']]['inputs']
+        self.assertNotIn('ct-trace-format-src', root_inputs)
+        self.assertIsInstance(root_inputs.get('codetracer-src'), list)
+        entries = self.entries()
+        for name in ('codetracer', 'codetracer-trace-format-nim'):
+            self.assertRegex(entries.get(name, ''), r'^[0-9a-f]{40}$', name)
+        # The gate compares them with what the flake derives; the fixtures
+        # above show that comparison refusing a stale entry.
+        gate = (ROOT / 'scripts/check_sibling_lock_pins.py').read_text()
+        self.assertIn('derived = flake_derived(args.root)', gate)
+        self.assertIn('errors = check(args.root, derived)', gate)
 
     def test_lint_runs_the_gate_and_this_test(self):
         workflows = (ROOT / 'scripts/check_workflows.sh').read_text()
