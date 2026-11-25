@@ -122,6 +122,179 @@ proc openDirNoFollow*(path: string): cint =
     fd = next
   fd
 
+# ---------------------------------------------------------------------------
+# Who can write the directories on the path
+#
+# Refusing links on the path stops a write from being REDIRECTED; it does
+# not stop a principal who can write a directory on the path from
+# replacing what the write leaves there. Intel Homebrew hands
+# ``/usr/local/etc`` to the installing user, so a root-written
+# ``fs.systemFile`` there is a root-owned file in a directory its user can
+# rename, replace or delete at will -- a "system" file under a user's
+# control. ``untrustedDirOnPath`` names the first directory on the way to
+# a write that a principal other than root (or the writer itself) can
+# modify, and the system-file driver refuses the write there.
+# ---------------------------------------------------------------------------
+
+when defined(linux):
+  proc c_fgetxattr(fd: cint; name: cstring; value: pointer; size: csize_t): int
+    {.importc: "fgetxattr", header: "<sys/xattr.h>".}
+
+  proc hasAccessAcl(fd: cint): bool =
+    ## True when the directory carries a POSIX.1e access ACL
+    ## (``system.posix_acl_access``, acl(5)). Its group permission bits
+    ## are then the ACL *mask*, the upper bound of every named user and
+    ## group entry, so a group-write bit no longer means only the owning
+    ## group can write.
+    c_fgetxattr(fd, "system.posix_acl_access", nil, 0) > 0
+
+  proc aclGrantsModify(fd: cint): bool = false
+    ## Linux ACL entries are bounded by the mask (``hasAccessAcl``).
+elif defined(macosx):
+  type AclT = pointer
+  var
+    aclTypeExtended {.importc: "ACL_TYPE_EXTENDED", header: "<sys/acl.h>".}: cint
+    aclFirstEntry {.importc: "ACL_FIRST_ENTRY", header: "<sys/acl.h>".}: cint
+    aclNextEntry {.importc: "ACL_NEXT_ENTRY", header: "<sys/acl.h>".}: cint
+    aclExtendedAllow {.importc: "ACL_EXTENDED_ALLOW", header: "<sys/acl.h>".}: cint
+    aclAddFile {.importc: "ACL_ADD_FILE", header: "<sys/acl.h>".}: cint
+    aclAddSubdirectory {.importc: "ACL_ADD_SUBDIRECTORY",
+                         header: "<sys/acl.h>".}: cint
+    aclDeleteChild {.importc: "ACL_DELETE_CHILD", header: "<sys/acl.h>".}: cint
+    aclDelete {.importc: "ACL_DELETE", header: "<sys/acl.h>".}: cint
+    aclWriteSecurity {.importc: "ACL_WRITE_SECURITY", header: "<sys/acl.h>".}: cint
+    aclChangeOwner {.importc: "ACL_CHANGE_OWNER", header: "<sys/acl.h>".}: cint
+  proc c_acl_get_fd_np(fd: cint; kind: cint): AclT
+    {.importc: "acl_get_fd_np", header: "<sys/acl.h>".}
+  proc c_acl_get_entry(acl: AclT; entryId: cint; entry: ptr pointer): cint
+    {.importc: "acl_get_entry", header: "<sys/acl.h>".}
+  proc c_acl_get_tag_type(entry: pointer; tag: ptr cint): cint
+    {.importc: "acl_get_tag_type", header: "<sys/acl.h>".}
+  proc c_acl_get_permset(entry: pointer; permset: ptr pointer): cint
+    {.importc: "acl_get_permset", header: "<sys/acl.h>".}
+  proc c_acl_get_perm_np(permset: pointer; perm: cint): cint
+    {.importc: "acl_get_perm_np", header: "<sys/acl.h>".}
+  proc c_acl_free(obj: pointer): cint
+    {.importc: "acl_free", header: "<sys/acl.h>".}
+
+  proc hasAccessAcl(fd: cint): bool = false
+    ## macOS mode bits carry no ACL mask; see ``aclGrantsModify``.
+
+  proc aclGrantsModify(fd: cint): bool =
+    ## True when the directory's extended ACL (acl(3), ``ACL_TYPE_EXTENDED``)
+    ## holds an allow entry granting any right that changes what is in the
+    ## directory or who controls it: ``add_file``, ``add_subdirectory``,
+    ## ``delete_child``, ``delete``, ``writesecurity`` or ``chown``. Such
+    ## entries are not bounded by the mode bits. The entry's principal is
+    ## not resolved, so an allow entry naming root itself counts as well:
+    ## no directory the allowlist reaches carries one on a stock install,
+    ## and a refusal names the directory. Deny entries grant nothing.
+    let acl = c_acl_get_fd_np(fd, aclTypeExtended)
+    if acl == nil:
+      return false
+    defer: discard c_acl_free(acl)
+    var entry: pointer
+    var which = aclFirstEntry
+    while c_acl_get_entry(acl, which, addr entry) == 0:
+      which = aclNextEntry
+      var tag: cint
+      if c_acl_get_tag_type(entry, addr tag) != 0 or tag != aclExtendedAllow:
+        continue
+      var perms: pointer
+      if c_acl_get_permset(entry, addr perms) != 0:
+        return true                  # unreadable: assume the worst
+      for perm in [aclAddFile, aclAddSubdirectory, aclDeleteChild, aclDelete,
+                   aclWriteSecurity, aclChangeOwner]:
+        if c_acl_get_perm_np(perms, perm) == 1:
+          return true
+    false
+else:
+  proc hasAccessAcl(fd: cint): bool = false
+  proc aclGrantsModify(fd: cint): bool = false
+
+proc modeIsTrusted*(gid, mode: int; hasAcl: bool;
+                    aclGrantsModify = false): bool =
+  ## The part of ``dirIsTrusted`` that does not depend on the owner: not
+  ## writable by others, writable by its group only when that group is
+  ## root's (gid 0) and no Linux ACL widens it (with one the group bits are
+  ## the mask of the named entries, so any group-write bit admits an
+  ## unknown writer), and no macOS ACL entry granting a modifying right
+  ## (``aclGrantsModify``). Pure.
+  if (mode and 0o002) != 0 or aclGrantsModify:
+    return false
+  if (mode and 0o020) != 0 and (gid != 0 or hasAcl):
+    return false
+  true
+
+proc dirIsTrusted*(uid, gid, mode, writerUid: int; hasAcl: bool;
+                   aclGrantsModify = false): bool =
+  ## Whether a directory with this owner, group, permission bits and ACL
+  ## can be modified only by root or by ``writerUid`` (the process doing
+  ## the write): owned by one of them, and ``modeIsTrusted``. Pure, so the
+  ## rule is tested on every platform.
+  (uid == 0 or uid == writerUid) and
+    modeIsTrusted(gid, mode, hasAcl, aclGrantsModify)
+
+proc untrustedDirOnPath*(dir: string; judgeFrom = "/"): string =
+  ## The first directory from ``judgeFrom`` down to ``dir`` (both
+  ## inclusive) that a principal other than root or this process's
+  ## effective user can modify (``dirIsTrusted``), or "" when there is
+  ## none. ``judgeFrom`` must be ``dir`` or one of its ancestors; the
+  ## system-file driver passes the allowlist root the write is under
+  ## (``/etc``, ``/usr/local/etc``). The ancestors of ``judgeFrom``
+  ## belong to the operating system, so their owner is not judged (in a
+  ## user namespace the host's ``/`` is owned by the overflow uid), but
+  ## their mode and ACL are (``modeIsTrusted``): a world- or foreign-group-
+  ## writable ``/usr/local`` would let its writers move ``/usr/local/etc``
+  ## aside between this check and the write.
+  ##
+  ## The walk itself always starts at ``/``: each directory is opened
+  ## relative to the one before it with ``O_NOFOLLOW`` and inspected
+  ## through that descriptor, so a link anywhere on the way, above
+  ## ``judgeFrom`` included, is ``SymlinkOnPath``, and what is judged is
+  ## exactly what a later no-follow walk opens. It stops, trusted, at the
+  ## first component that does not exist yet: the writer creates the rest
+  ## itself.
+  let writer = int(geteuid())
+  let rootParts = if judgeFrom == "/": @[] else: components(judgeFrom)
+  let parts = if dir == "/": @[] else: components(dir)
+  let skip = rootParts.len
+  if skip > parts.len or parts[0 ..< skip] != rootParts:
+    raise newException(NoFollowError, judgeFrom & " is not " & dir &
+      " or one of its ancestors")
+  var fd = posix.open("/", O_RDONLY or oDirectory or oCloExec)
+  if fd < 0:
+    raiseOSError(osLastError(), "open /")
+  defer: discard posix.close(fd)
+  proc judge(fd: cint; shown: string; owner: bool): string =
+    var st: Stat
+    if fstat(fd, st) != 0:
+      raiseOSError(osLastError(), "stat " & shown)
+    let uid = if owner: int(st.st_uid) else: 0
+    if dirIsTrusted(uid, int(st.st_gid), int(st.st_mode) and 0o7777,
+                    writer, hasAccessAcl(fd), aclGrantsModify(fd)): ""
+    else: shown
+  result = judge(fd, "/", owner = skip == 0)
+  if result.len > 0:
+    return
+  var cur = ""
+  for i, seg in parts:
+    cur.add("/" & seg)
+    let next = c_openat(fd, seg.cstring,
+                        O_RDONLY or oDirectory or oNoFollow or oCloExec, Mode(0))
+    if next < 0:
+      let err = osLastError()
+      if err == OSErrorCode(ELOOP) or symlinkExists(cur):
+        raiseSymlinkOnPath(cur)
+      if err == OSErrorCode(ENOENT):
+        return ""
+      raiseOSError(err, "open directory " & cur)
+    discard posix.close(fd)
+    fd = next
+    result = judge(fd, cur, owner = i + 1 >= skip)
+    if result.len > 0:
+      return
+
 proc createDirsNoFollow*(path: string; mode = 0o755) =
   ## ``mkdir -p`` that never follows a link: each missing component is
   ## created with ``mkdirat`` relative to the descriptor of the component

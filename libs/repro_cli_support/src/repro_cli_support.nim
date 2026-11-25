@@ -39,6 +39,7 @@ import repro_cli_support/stdin_terminal
 # The content identity of a producer's channel directories, folded into the
 # keys of consumer actions whose reads nothing observes (§4.3 rule 2).
 import repro_cli_support/producer_channel_content
+import repro_cli_support/producer_gitlink_sources
 # repro's own command line: the generated parser, help and completion.
 import repro_cli_support/cli_program
 # The role processes whose command lines test binaries also serve.
@@ -5863,6 +5864,21 @@ var producerMaterializedSourceRoots: Table[string, string] =
   ## Provenance of the cached channels. A later consumer must validate the
   ## source actually reused, which may differ from its freshly discovered root.
 
+var producerComposedSourceRequirements: Table[string, seq[string]] =
+  initTable[string, seq[string]]()
+  ## Cross-Repo-Source-Consumption §4.2a.2a: selector -> the
+  ## ``<library>:<gitlink path>`` requirements whose composed source artifact
+  ## replaced the producer's exported root on ``nimPathDirs``. Its presence
+  ## puts the composition semantics into ``producerChannelIdentity``, and
+  ## stops ``canReuseMaterializedProducer`` from serving a cached projection:
+  ## the artifact is a snapshot, so every build recomposes (cheaply, when the
+  ## descriptor still matches) to see the producer's current source.
+
+var producerComposedSourceLog: Table[string, seq[string]] =
+  initTable[string, seq[string]]()
+  ## Status lines of the composition, printed by the build's summary log
+  ## once the producer is spliced (the log template is the build's own).
+
 var producerActionHashes*: Table[string, string] =
   initTable[string, string]()
   ## SC-2 fingerprint fold sink: consumer selector -> the producer edge's
@@ -6472,6 +6488,14 @@ proc producerChannelIdentity*(selector: string): string =
   ## thing that distinguishes the new content from the old, which is still on
   ## disk unchanged.
   var payload = "cross-repo-producer-channel.v1\x00" & selector & "\x00"
+  if producerComposedSourceRequirements.hasKey(selector):
+    # §4.2a.2a: the Nim root is a composed source artifact. Its semantics
+    # (and which gitlinks it composes) are part of what the action is
+    # handed; its CONTENT is not, for the same reason as every channel's.
+    payload.add(GitlinkSourceCompositionChannelTag & "\x00")
+    for requirement in producerComposedSourceRequirements[selector]:
+      payload.add(requirement)
+      payload.add('\x00')
   var nimProjectionTagged = false
   for dir in producerChannelDirs(selector):
     if dir.channel == "nimpath" and not nimProjectionTagged and
@@ -12052,6 +12076,10 @@ proc canReuseMaterializedProducer(selector: string; binding: ProducerBinding;
                                   consumerRoot: string): bool =
   result = producerMaterializedBinDirs.hasKey(selector) or
     producerMaterializedAuxPaths.hasKey(selector)
+  if result and producerComposedSourceRequirements.hasKey(selector):
+    # A composed gitlink source artifact (§4.2a.2a) is a snapshot of the
+    # producer's source, not a view of it: recompose it for this build.
+    return false
   if not result or binding.kind != pbkLockPinned:
     return
   let cachedRoot = producerMaterializedSourceRoots.getOrDefault(selector)
@@ -12082,10 +12110,53 @@ proc producerNativeLibraryNeedsBuild(lib: InterfaceLibrary;
     if lib.exportedPath.len > 0: lib.exportedPath else: "src"
   not dirExists(extendedPath(producerRootAbs / exported))
 
+proc gitlinkSourceArtifactDir(consumerRoot, selector, library: string):
+    string =
+  ## Where the composed gitlink source artifact of ``library`` from producer
+  ## ``selector`` lives: beside the consumer's fetched pinned producers, in
+  ## its workspace ``.repro`` tree, under a name made of the selector and
+  ## the library alone. The name is deliberately NOT content- or
+  ## revision-dependent (§4.2a.2a "Identity and invalidation"): the
+  ## directory is on every consumer compile's ``--path:``, so a name that
+  ## moved with the source would miss every compile on any edit. Its content
+  ## reaches keys through the reads compiles make there, and through the
+  ## channel-content fold for actions nothing observes.
+  lockPinnedProducerCacheRoot(consumerRoot) / ".source-artifacts" /
+    selectorFilesystemKey(selector) / selectorFilesystemKey(library)
+
+proc composeProducerGitlinkSource(selector, producerRootAbs: string;
+                                  lib: InterfaceLibrary;
+                                  consumerRoot: string): ComposedLibrarySource =
+  ## §4.2a.2a: compose ``lib``'s required gitlink source artifact. An
+  ## uninitialized gitlink is acquired through the same pinned-revision Git
+  ## fetch a lock-pinned producer uses (``fetchLockPinnedProducer``),
+  ## exactly at the commit the selected source's committed gitlink names.
+  if consumerRoot.len == 0:
+    raise newException(GitlinkSourceError,
+      "cross-repo producer \"" & selector & "\" library \"" & lib.name &
+      "\" sourceGitlinks: no consumer workspace to compose the source " &
+      "artifact in")
+  let acquire = proc (name, url, commit: string): string =
+    fetchLockPinnedProducer(LockedDep(name: name,
+      coordinates: Coordinates(kind: ckVcs, url: url, revision: commit)),
+      consumerRoot)
+  result = composeGitlinkSourceArtifact(selector, lib.name, producerRootAbs,
+    (if lib.exportedPath.len > 0: lib.exportedPath else: "src"),
+    lib.sourceGitlinks,
+    gitlinkSourceArtifactDir(consumerRoot, selector, lib.name), acquire)
+  var lines = producerComposedSourceLog.getOrDefault(selector)
+  lines.add("library \"" & lib.name & "\" composed with its required " &
+    "gitlinks at " & result.exportedRoot &
+    (if result.reused: " (reused)" else: ""))
+  for note in result.notes:
+    lines.add(note)
+  producerComposedSourceLog[selector] = lines
+
 proc recordProducerMaterialization(selector, producerRootAbs: string;
                                    producerArtifact: ProjectInterfaceArtifact;
                                    producerRuntimeIdentity: PathOnlyBuildIdentity;
                                    binding: ProducerBinding;
+                                   consumerRoot: string;
                                    includeCompiledOutputs = true): bool =
   ## Discover a producer's already-materialized public outputs and project
   ## them onto the consumer's executable/library channels. The build path
@@ -12152,14 +12223,30 @@ proc recordProducerMaterialization(selector, producerRootAbs: string;
           pkgConfigOutDir notin aux.pkgConfigDirs:
         aux.pkgConfigDirs.add(pkgConfigOutDir)
 
+  var composedRequirements: seq[string] = @[]
   for lib in producerArtifact.projectInterface.publicLibraries:
     if lib.name.len == 0:
       continue
     let exported =
       if lib.exportedPath.len > 0: lib.exportedPath else: "src"
-    let nimSrcDir = producerRootAbs / exported
+    var nimSrcDir = producerRootAbs / exported
+    if lib.sourceGitlinks.len > 0 and dirExists(extendedPath(nimSrcDir)):
+      # §4.2a.2a: the exported tree is incomplete without its required Git
+      # trees. Project an owned composed artifact instead of the producer's
+      # own directory; the producer checkout and its submodules are only
+      # read. A refusal raises here, before any consumer compile.
+      let composed = composeProducerGitlinkSource(selector, producerRootAbs,
+        lib, consumerRoot)
+      nimSrcDir = composed.exportedRoot
+      for req in lib.sourceGitlinks:
+        composedRequirements.add(lib.name & ":" & req.relativePath)
     if dirExists(extendedPath(nimSrcDir)) and nimSrcDir notin aux.nimPathDirs:
       aux.nimPathDirs.add(nimSrcDir)
+  if composedRequirements.len > 0:
+    composedRequirements.sort()
+    producerComposedSourceRequirements[selector] = composedRequirements
+  else:
+    producerComposedSourceRequirements.del(selector)
 
   let haveLibChannel = aux.libDirs.len > 0 or aux.includeDirs.len > 0 or
     aux.pkgConfigDirs.len > 0 or aux.cmakePrefixDirs.len > 0 or
@@ -15105,11 +15192,15 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
             "(no compiled artifact; src threaded via nimPathDirs).")
         if not recordProducerMaterialization(selector, producerRootAbs,
             producerArtifact, producerRuntimeIdentity, producer,
+            result.projectRoot,
             includeCompiledOutputs = not sourceChannelOnly):
           raise newException(OSError,
             "cross-repo producer \"" & selector & "\" at " & producerRootAbs &
             " declares no materialized executable, library, or Nim source " &
             "output to splice onto the consumer's tool channels.")
+        for line in producerComposedSourceLog.getOrDefault(selector):
+          logSummary("cross-repo producer: \"" & selector & "\" " & line)
+        producerComposedSourceLog.del(selector)
         if producerMaterializedBinDirs.hasKey(selector):
           logSummary("cross-repo producer: spliced \"" & selector &
             "\" bin dir(s) into tool identities: " &
@@ -34440,7 +34531,7 @@ proc recordMaterializedProducersForInspection(
         selections = activeToolModeSelections(runtimeArtifact, mode),
         storeRootFor = overriddenToolStoreRoot(""))
     if not recordProducerMaterialization(selector, sourceRootAbs,
-        producerArtifact, runtimeIdentity, binding):
+        producerArtifact, runtimeIdentity, binding, projectRoot):
       raise newException(IOError,
         "cross-repo producer \"" & selector & "\" at " & sourceRootAbs &
         " is not materialized; run `repro build` for the consuming target " &
@@ -44977,6 +45068,12 @@ type
       ## document that ``--write-report`` persists).
     report: ReportSpec
       ## Opt-in ``--write-report[=PATH]`` artifact.
+    excludedRepos: seq[string]
+      ## Internal, no command-line flag: member repos this materialization
+      ## leaves uncloned, matched by ``repoNamedIn``. Set only by the fork form
+      ## of ``repro branch`` from its ``--except`` (CLI/branch.md §"--except"),
+      ## whose excluded repos stay members of the new workspace but must get no
+      ## checkout there. The membership this init records is unaffected.
 
   WorkspaceInitResolution = object
     project: ResolvedProject
@@ -46644,6 +46741,37 @@ proc alignWorkspaceRemotes*(workspaceRoot: string; repos: seq[ResolvedRepo]; ide
 # nested) checkout paths so discovery is not reimplemented here.
 proc refreshWorkspaceSiblingIgnoresBestEffort(workspaceRoot: string)
 
+proc repoNamedIn(repo: ResolvedRepo; names: openArray[string]): bool =
+  ## Whether ``names`` names ``repo`` EXACTLY: by its name, or by a name it
+  ## declares it was previously known under (``[extensions] previously``).
+  ##
+  ## This is the identity ``repro branch --except`` matches on
+  ## (CLI/branch.md §"--except"). The ``previously`` arm is what keeps an
+  ## exclusion written against the SOURCE workspace's names applying to a repo
+  ## the target's manifests have renamed under ``--from=<role>``; the same
+  ## identities correlate source and target checkouts there
+  ## (``matchSourceState``).
+  if repo.name in names:
+    return true
+  for prior in repo.previously:
+    if prior.name.len > 0 and prior.name in names:
+      return true
+  false
+
+proc namesMatchingNoRepo(repos: openArray[ResolvedRepo];
+                         names: openArray[string]): seq[string] =
+  ## The entries of ``names`` that ``repoNamedIn`` matches against NO repo of
+  ## ``repos``, in the order given. Every one is returned, not just the first,
+  ## so a refusal can name all the typos at once.
+  for name in names:
+    var matched = false
+    for repo in repos:
+      if repoNamedIn(repo, [name]):
+        matched = true
+        break
+    if not matched and name notin result:
+      result.add(name)
+
 proc executeWorkspaceInit(argsIn: WorkspaceInitArgs): WorkspaceInitOutcome =
   ## End-to-end driver. Resolves the named project / variant, classifies
   ## each declared repo against the on-disk workspace, schedules a
@@ -46740,6 +46868,10 @@ proc executeWorkspaceInit(argsIn: WorkspaceInitArgs): WorkspaceInitOutcome =
   var cloneActions: seq[BuildAction]
   var cloneEntries: seq[WorkspaceInitClonedEntry]
   for idx, repo in resolved.repos:
+    # A repo the caller excluded is neither classified nor cloned: the fork
+    # that asked for it promises the repo is not touched at all.
+    if repoNamedIn(repo, args.excludedRepos):
+      continue
     let absPath = args.workspaceRoot / repo.path
     if dirExists(absPath):
       classifyExistingRepo(identity, args.workspaceRoot, repo,
@@ -87058,9 +87190,13 @@ proc branchOutcomeCreatedBranch*(outcome: string): bool =
   ## definition for the two decisions that hinge on it: how a failure summary
   ## is worded (a partial advance is not a refusal), and whether a failed fork
   ## may remove what it materialized (only when no repo reached the branch).
+  ##
+  ## ``already`` is a repo an earlier run of a resumed fork put on the branch
+  ## (CLI/branch.md, resumability): the branch exists there too, so it counts
+  ## for both decisions.
   outcome in ["branched", "branched_with_changes",
               "branched_from_declared_baseline", "branched_from_mainline",
-              branchOutcomeTag(broCreated)]
+              "already", branchOutcomeTag(broCreated)]
 
 proc toJsonNode*(report: BranchReport): JsonNode =
   result = newJObject()
@@ -87142,9 +87278,16 @@ proc renderBranchTextLines*(report: BranchReport): seq[string] =
       line.add(" (" & entry.diagnostic & ")")
     result.add(line)
   if report.exitCode == 0:
+    # An `--except`ed repo has no branch (CLI/branch.md §"--except"), so it is
+    # counted apart rather than among the repos the branch spans.
+    var excluded = 0
+    for entry in report.repos:
+      if entry.outcome == "excluded":
+        inc excluded
     result.add("workspace branch: '" & report.branch &
-      "' created across " & $report.repos.len & " repos; metadata=" &
-      report.recordedBranch)
+      "' created across " & $(report.repos.len - excluded) & " repos" &
+      (if excluded > 0: " (" & $excluded & " excluded)" else: "") &
+      "; metadata=" & report.recordedBranch)
     # M27 fork form: the operator's next step is in a DIFFERENT directory than
     # the one they ran from, so say where it is (communicate-before-execute's
     # closing half) and point at the readiness check.
@@ -87171,10 +87314,17 @@ proc renderBranchTextLines*(report: BranchReport): seq[string] =
     var blockers: seq[string]
     var created: seq[string]
     for entry in report.repos:
+      # `already` is a repo a previous run of this resumed fork put on the
+      # branch: the branch exists there, so it counts toward "created in N
+      # repo(s)" (``branchOutcomeCreatedBranch`` says so) — otherwise a re-run
+      # that fails in one repo would claim no branch exists anywhere while the
+      # earlier run's branches are on disk.
       if branchOutcomeCreatedBranch(entry.outcome):
         created.add(entry.path)
-      elif entry.outcome != "ready" and
-          entry.outcome != branchOutcomeTag(broAlreadyAtHead):
+      elif entry.outcome notin ["ready", "excluded",
+                                 branchOutcomeTag(broAlreadyAtHead)]:
+        # `excluded` (left out by `--except`) is a requested outcome, never a
+        # blocker.
         blockers.add(entry.path & "=" & entry.outcome)
     # The fork form also says what is at the destination, from
     # ``destinationState`` rather than from a guess: a fork that created no
@@ -87270,6 +87420,12 @@ type
       ## inherited rather than re-derived. A non-empty value REPLACES the
       ## inherited set, which is how a developer forks a narrower (or wider)
       ## slice than they currently have checked out.
+    exceptRepos: seq[string]
+      ## ``--except=a,b`` (CLI/branch.md §"--except") — member repos the fork
+      ## leaves out: not probed, fetched, cloned or branched, and reported
+      ## ``excluded``. Applied AFTER ``projects``: that chooses the membership,
+      ## this chooses which members get a checkout. Membership itself is not
+      ## edited, so a later fork without the flag brings an excluded repo in.
     fromRole: RoleChoice
       ## ``--from=<role>`` (Workspace-Branch-Roles.md §4.2) or a shorthand —
       ## take the repo SET from this
@@ -87403,6 +87559,10 @@ proc branchArgsOf*[T](c: T; verb = "repro branch";
     let trimmed = name.strip()
     if trimmed.len > 0 and trimmed notin result.projects:
       result.projects.add(trimmed)
+  for name in c.exceptRepos:
+    let trimmed = name.strip()
+    if trimmed.len > 0 and trimmed notin result.exceptRepos:
+      result.exceptRepos.add(trimmed)
   result.json = c.json
   result.report = reportSpecOf(c)
   result.forkPath = c.path
@@ -87417,10 +87577,11 @@ proc branchArgsOf*[T](c: T; verb = "repro branch";
     # destination, so accepting them here would silently do nothing.
     if explicitBranch.len > 0 or result.existingBranch or
         result.includeChanges or result.projects.len > 0 or
+        result.exceptRepos.len > 0 or
         result.unpublished != upRefuse or result.cutsFromRole or fetchGiven:
       raise newException(ValueError,
         "`--branch` / `--existing-branch` / `--include-changes` / " &
-          "`--unpublished` / `--projects` / `--from=<role>` (or a " &
+          "`--unpublished` / `--projects` / `--except` / `--from=<role>` (or a " &
           "shorthand) / `--fetch` require a " &
           "destination path (`" & verb & " <path>`); with no path " &
           "`repro branch` only reports the current workspace branch")
@@ -90648,6 +90809,35 @@ proc roleBranchLabel(r: Option[ResolvedRole]; branch: string): string =
   if r.isSome: "branch '" & branch & "' (role " & roleChainText(r.get()) & ")"
   else: "branch '" & branch & "'"
 
+proc projectsFlagNameListing(workspaceRoot: string):
+    tuple[names: seq[string]; listing: string] =
+  ## Every name ``--projects`` accepts in this workspace — the manifests
+  ## root's ``projects/``, then ``variants/``, then ``repo-sets/`` (the
+  ## resolution ladder's order) — and the same names rendered for a
+  ## diagnostic, grouped by kind (``projects: a, b; variants: c``).
+  ##
+  ## A directory listing rather than a resolve, like ``definedProjectNames``:
+  ## a set whose manifest is malformed still exists. ``names`` is empty when
+  ## the root holds none of the three directories, which is how a caller tells
+  ## "not a defined name" from "nothing to compare against".
+  let source = newDirectorySource(manifestsRoot(workspaceRoot))
+  var parts: seq[string]
+  for (dir, label) in [("projects", "projects"), ("variants", "variants"),
+                       (repoSetsDirName, "repo sets")]:
+    var names: seq[string]
+    for relPath in source.listTomlFiles(dir):
+      let name = relPath.splitFile.name
+      if name notin names:
+        names.add(name)
+    if names.len == 0:
+      continue
+    names.sort()
+    parts.add(label & ": " & names.join(", "))
+    for name in names:
+      if name notin result.names:
+        result.names.add(name)
+  result.listing = parts.join("; ")
+
 type
   ForkDestinationKind = enum
     ## What was at a fork's destination when the command started. Recorded
@@ -90849,12 +91039,28 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
       resolved = resolveProjectSet(parsed.workspaceRoot, forkProjects)
     except CatchableError as err:
       # Refused before anything is created, like every other fork guard.
+      #
+      # When a given name is not one the workspace defines at all — usually a
+      # repo's directory name — the remedy is a name from a list the operator
+      # has not seen yet, so the list is part of the diagnostic. A conflict
+      # between two real projects gets no list: every name there is valid.
+      var diagnostic = "`--projects=" & forkProjects.join(",") &
+        "` does not resolve against '" & parsed.workspaceRoot & "': " &
+        err.msg
+      let accepted = projectsFlagNameListing(parsed.workspaceRoot)
+      if accepted.names.len > 0:
+        var undefined: seq[string]
+        for name in forkProjects:
+          if name notin accepted.names:
+            undefined.add("'" & name & "'")
+        if undefined.len > 0:
+          diagnostic.add(". " & undefined.join(", ") & " is not a project, " &
+            "variant or repo set of this workspace (`--projects` selects " &
+            "whole projects; `--except` leaves out single repos). " &
+            "`--projects` accepts " & accepted.listing)
       result.exitCode = 2
       result.repos.add(BranchRepoEntry(
-        outcome: "projects_unresolved",
-        diagnostic: "`--projects=" & forkProjects.join(",") &
-          "` does not resolve against '" & parsed.workspaceRoot & "': " &
-          err.msg))
+        outcome: "projects_unresolved", diagnostic: diagnostic))
       return
   else:
     let parsedSwitch = SwitchArgs(
@@ -90871,6 +91077,46 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
     forkProjects = @[resolved.projectName]
   result.project = resolved.projectName
   result.projects = forkProjects
+
+  # ---- --except: members that get no checkout here ------------------------
+  # CLI/branch.md §"--except". Applied after the membership above: the set is
+  # not narrowed (it is recorded unchanged at the end), only which of its repos
+  # this run touches. An excluded repo is dropped BEFORE the observation pass,
+  # so it is never probed, fetched, collision-checked, cloned, branched or
+  # carried for — a probe that cannot run is never asked to — and each one is
+  # still reported, so the report names everything the new workspace lacks.
+  #
+  # An unknown name is refused before anything is created: an exclusion that
+  # silently matched nothing reads exactly like a fork with nothing to leave
+  # out. Names are checked against the set resolved from the SOURCE's
+  # manifests, the only ones there are before the target exists.
+  if parsed.exceptRepos.len > 0:
+    let unknown = namesMatchingNoRepo(resolved.repos, parsed.exceptRepos)
+    if unknown.len > 0:
+      var quoted: seq[string]
+      for name in unknown:
+        quoted.add("'" & name & "'")
+      result.exitCode = 2
+      result.repos.add(BranchRepoEntry(
+        outcome: "except_unresolved",
+        diagnostic: "`--except` names no repo of the new workspace's set: " &
+          quoted.join(", ") & " (names are matched EXACTLY against the " &
+          "repo names; `repro workspace repos list` shows them)"))
+      return
+  var memberRepos: seq[ResolvedRepo]
+  var excludedEntries: seq[BranchRepoEntry]
+  for repo in resolved.repos:
+    if repoNamedIn(repo, parsed.exceptRepos):
+      # Nothing was probed or resolved, so no baseline is asserted.
+      excludedEntries.add(BranchRepoEntry(
+        name: repo.name, path: repo.path, outcome: "excluded"))
+    else:
+      memberRepos.add(repo)
+  defer:
+    # Every exit from here on — success, refusal or partial advance — reports
+    # the excluded repos after the ones the run did act on.
+    for entry in excludedEntries:
+      result.repos.add(entry)
 
   let identity = ensureGitToolResolvable(
     parsed.toolProvisioning, getEnv("PATH"))
@@ -90991,7 +91237,7 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
   # before a 100+-repo workspace starts any network probe, while an ABSENT
   # checkout is a valid state: target init will materialize it under the normal
   # manifest/lock rules and its target HEAD becomes the branch baseline.
-  for repo in resolved.repos:
+  for repo in memberRepos:
     var state: ForkSourceState
     state.repo = repo
     state.srcPath = parsed.workspaceRoot / repo.path
@@ -91595,6 +91841,9 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
     initArgs.additionalProjects = forkProjects[1 .. ^1]
   initArgs.toolProvisioning = parsed.toolProvisioning
   initArgs.cloneObjects = parsed.cloneObjects
+  # `--except`: the excluded repos stay members (init records the whole set)
+  # but get no checkout.
+  initArgs.excludedRepos = parsed.exceptRepos
   var initOutcome: WorkspaceInitOutcome
   try:
     initOutcome = executeWorkspaceInit(initArgs)
@@ -91650,6 +91899,10 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
     let targetRoleSettings = workspaceRoleSettings(parsed.forkPath)
     var usedSource = initHashSet[int]()
     for targetRepo in targetResolved.repos:
+      # Excluded by its target name or a name it was previously known under,
+      # so an exclusion survives a rename in the role's manifests.
+      if repoNamedIn(targetRepo, parsed.exceptRepos):
+        continue
       var ts: TargetBranchState
       ts.repo = targetRepo
       ts.srcIdx = matchSourceState(targetRepo, states, usedSource)
@@ -91742,6 +91995,32 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
   createDir(receiptDir)
   var actions: seq[BuildAction]
   var actionRepoIndex = initTable[string, int]()
+  # Resumability (CLI/branch.md §"Resumability & partial-failure reporting"):
+  # a checkout a previous run of this same fork already put on the branch, at
+  # the commit this run would cut, is reported `already` rather than as newly
+  # branched. Its fork action still runs (it is a no-op there), but the report
+  # must tell the operator which repos the re-run actually did something to —
+  # after an `--except` it is exactly the formerly excluded ones.
+  var alreadyActions = initHashSet[string]()
+  proc alreadyOnBranch(repoPath, sha: string): bool =
+    ## HEAD is attached to ``refs/heads/<branch>`` and, when ``sha`` is given,
+    ## the branch is at it. ``sha`` is empty under ``--existing-branch``,
+    ## where the branch point is the existing branch itself. Only a resumed
+    ## fork asks: in a fresh destination every checkout was just cloned, and
+    ## its branch pass is the one doing the work.
+    if not resuming or not dirExists(repoPath / ".git"):
+      return false
+    let head = gitRunPlainQuery(identity,
+      ["-C", repoPath, "symbolic-ref", "--quiet", "HEAD"])
+    if head.code != 0 or
+        head.output.strip() != "refs/heads/" & parsed.branchName:
+      return false
+    if sha.len == 0:
+      return true
+    let tip = gitRunPlainQuery(identity,
+      ["-C", repoPath, "rev-parse", "--verify", "--quiet",
+       "refs/heads/" & parsed.branchName])
+    tip.code == 0 and tip.output.strip() == sha
 
   const RootEntryIndex = -1
   let rootActionId = "workspace-start-fork-root"
@@ -91787,6 +92066,11 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
           receiptPath = ".repro" / "workspace" / "receipts" /
             "start-fork-root.receipt")
     rootAction.cwd = parsed.forkPath
+    if alreadyOnBranch(parsed.forkPath,
+        (if parsed.existingBranch: ""
+         elif parsed.cutsFromRole: rootRoleTip
+         else: rootHead.headSha)):
+      alreadyActions.incl(rootActionId)
     actions.add(rootAction)
     actionRepoIndex[rootActionId] = RootEntryIndex
 
@@ -91811,6 +92095,8 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
       action.cwd = parsed.forkPath
       action.pool = "vcs/fetch"
       action.poolUnits = 1'u32
+      if alreadyOnBranch(parsed.forkPath / ts.repo.path, ts.targetTip):
+        alreadyActions.incl(actionId)
       actions.add(action)
       actionRepoIndex[actionId] = idx
   else:
@@ -91843,6 +92129,9 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
       action.cwd = parsed.forkPath
       action.pool = "vcs/fetch"
       action.poolUnits = 1'u32
+      if alreadyOnBranch(parsed.forkPath / state.repo.path,
+          (if parsed.existingBranch: "" else: state.headSha)):
+        alreadyActions.incl(actionId)
       actions.add(action)
       actionRepoIndex[actionId] = idx
 
@@ -91896,7 +92185,8 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
           resolvedRole: (if parsed.cutsFromRole: rootRole
                          else: none(ResolvedRole)),
           outcome:
-            (if parsed.cutsFromRole: "branched_from_mainline"
+            (if action.id in alreadyActions: "already"
+             elif parsed.cutsFromRole: "branched_from_mainline"
              else: "branched")))
       continue
     if parsed.cutsFromRole:
@@ -91916,7 +92206,9 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
         entry.diagnostic = "status=" & $outcome.status & " reason=" &
           outcome.reason & " " & outcome.stderr
       else:
-        entry.outcome = "branched_from_mainline"
+        entry.outcome =
+          if action.id in alreadyActions: "already"
+          else: "branched_from_mainline"
         # ---- optional WIP carry-over ------------------------------------
         if parsed.includeChanges and ts.srcIdx >= 0 and not states[ts.srcIdx].isClean:
           let copied = copyWorkingTreeChanges(identity, states[ts.srcIdx].srcPath,
@@ -91948,7 +92240,9 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
           outcome.reason & " " & outcome.stderr
       else:
         entry.outcome =
-          if state.baselineSource == "mainline_head":
+          if action.id in alreadyActions:
+            "already"
+          elif state.baselineSource == "mainline_head":
             "branched_from_mainline"
           elif state.baselineSource == "declared_checkout":
             "branched_from_declared_baseline"
@@ -109871,6 +110165,26 @@ type
     memberSets: seq[string]
     memberRepos: seq[string]
 
+proc manifestCheckoutRefusal(identity: GitToolIdentity;
+                             manifestRoot: string): string =
+  ## Asked by every definition verb (`sets`/`projects` `add`/`remove`,
+  ## `repos add`/`remove`) before it writes or deletes anything: the empty
+  ## string when ``manifestRoot`` is itself a git checkout, otherwise the
+  ## refusal diagnostic. A definition verb writes, commits and pushes, and
+  ## the commit is part of the verb rather than a follow-up to it: one that
+  ## cannot commit must refuse with the tree untouched rather than leave
+  ## uncommitted manifest edits behind (which the next verb's commit would not
+  ## stage) and report a definition no other workspace can see.
+  ## `commitAndPushManifest` keeps the same check as a backstop for a caller
+  ## that reaches it without asking first.
+  let discovery = discoverGitWorktree(identity, manifestRoot)
+  if discovery.ok:
+    return ""
+  "manifest repo root '" & manifestRoot &
+    "' is not a git checkout; refusing to change manifest definitions, " &
+    "nothing was written" &
+    (if discovery.diagnostic.len > 0: ": " & discovery.diagnostic else: "")
+
 proc commitAndPushManifest(identity: GitToolIdentity;
                            gitBin, manifestRoot, message: string;
                            paths: openArray[string]): tuple[
@@ -110686,6 +111000,13 @@ proc runWorkspaceSetsCommand(req: WorkspaceSetsRequest;
         return 1
       seed.memberSets = loaded.member_sets
       seed.memberRepos = loaded.member_repos
+    # The last check before the first write: a definition that cannot be
+    # committed is not made, so the tree is left as it was, the index is not
+    # regenerated, and no "defined" line follows.
+    let noCheckout = manifestCheckoutRefusal(identity, manifestRoot)
+    if noCheckout.len > 0:
+      stderr.writeLine(verb & " add: " & name & " — " & noCheckout)
+      return 1
     createDir(manifestRoot / addDir)
     let fileRel = addDir & "/" & name & ".toml"
     let fileAbs = manifestRoot / addDir / (name & ".toml")
@@ -110806,6 +111127,12 @@ proc runWorkspaceSetsCommand(req: WorkspaceSetsRequest;
     except CatchableError as exc:
       stderr.writeLine(verb & " remove: warning: cannot read " & target.abs &
         " (" & exc.msg & "); removing it without an orphan report")
+    # The last check before the first deletion, for the same reason as `add`:
+    # a removal that cannot be committed must not happen on disk.
+    let noCheckout = manifestCheckoutRefusal(identity, manifestRoot)
+    if noCheckout.len > 0:
+      stderr.writeLine(verb & " remove: " & name & " — " & noCheckout)
+      return 1
     var paths = @[target.rel]
     removeFile(target.abs)
     let docRel = target.rel.changeFileExt("md")
@@ -111239,6 +111566,15 @@ proc runWorkspaceReposCommand*(c: ReproCommandLineWorkspaceRepos): int =
       stderr.writeLine("  Nothing was written.")
       return 2
 
+    # Before the remote probe and the first write (the url-prefix minting
+    # below): without a manifest checkout to commit to, nothing is written at
+    # all, and the refusal costs no network round trip.
+    let noCheckout = manifestCheckoutRefusal(identity, manifestRoot)
+    if noCheckout.len > 0:
+      stderr.writeLine("repro workspace repos add: " & repo & " — " &
+        noCheckout)
+      return 1
+
     # `--mainline` and `--revision` are each validated against the remote, for
     # the same reason: a manifest naming a branch or a pin that does not exist
     # authors fine and fails at sync time on everyone else's machine. Both are
@@ -111374,6 +111710,13 @@ proc runWorkspaceReposCommand*(c: ReproCommandLineWorkspaceRepos): int =
       stdout.writeLine("repro workspace repos remove: no repo-set or " &
         "project declares " & fragmentRel & "; nothing to do")
       return 0
+    # Before the first membership edge is dropped: a removal that cannot be
+    # committed must not happen on disk.
+    let noCheckout = manifestCheckoutRefusal(identity, manifestRoot)
+    if noCheckout.len > 0:
+      stderr.writeLine("repro workspace repos remove: " & repo & " — " &
+        noCheckout)
+      return 1
     var paths: seq[string]
     var droppedFrom: seq[string]
     for project in projects:

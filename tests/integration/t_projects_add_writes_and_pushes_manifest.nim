@@ -197,9 +197,13 @@ suite "RA-6/WV-3 — repro workspace projects add (writes + pushes manifest)":
       check res.output.contains("is not a git checkout")
       check res.output.contains(nested)
 
+      # Refused before writing (spec/CLI/workspace.md, "No manifest checkout,
+      # no edit"): no scaffolded manifest or description is left behind.
+      check not fileExists(nested / "projects" / "nested-proj.toml")
+      check not fileExists(nested / "projects" / "nested-proj.md")
+
       # The enclosing repository took no part: no commit, nothing staged, no
-      # tracked change. (The written manifest file is left as untracked
-      # residue of the refused verb; that is not a publication side effect.)
+      # tracked change.
       check requireGit(q(gitBin) & " -C " & q(outer) &
         " rev-list --count HEAD").strip() == outerCommits
       let staged = runCmd(q(gitBin) & " -C " & q(outer) &

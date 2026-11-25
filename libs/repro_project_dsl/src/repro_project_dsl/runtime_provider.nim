@@ -140,27 +140,45 @@ when defined(reproProviderMode):
   #
   # The files go to ``build/completions/<binary>/``, the list to
   # ``build/entrypoints/<binary>.entrypoints.json``, both under the recipe
-  # root; the edge's id is ``<compile id>.completion-files``, and it joins
-  # every collection and aggregate that lists the compile, so a build of
-  # those collections makes the files with the binary.
+  # root, and under ``build@<triple>/`` instead of ``build/`` for a
+  # ``--target`` build (``targetKeyedOutputName``, the rule the target's
+  # compile outputs follow), so a cross build and a native build of one
+  # recipe never write or read each other's; the edge's id is
+  # ``<compile id>.completion-files``, and it joins every collection and
+  # aggregate that lists the compile, so a build of those collections makes
+  # the files with the binary.
+  #
+  # A packaging producer asks for the files of each executable it installs
+  # (``cliCompletionFilesOf``, called from the ``build:`` body, before the
+  # pass after it), which creates the edge then; the pass after the body
+  # finds it already there. When the producer installs the executable under
+  # another name than its program's, the scripts must complete that name, so
+  # it gets a second edge, ``<compile id>.completion-files.<name>``, writing
+  # files for that name into the same directory.
 
   const
     CompletionFilesBuiltin = "completionFiles"
     EntryListDefine = "entrypointsManifest"
 
+  proc completionBuildDir(): string =
+    ## ``build``, or ``build@<triple>`` under ``--target``.
+    targetKeyedOutputName("build")
+
   proc completionEntryListPath(binaryName: string): string =
     ## Where the compile of ``binaryName`` writes its entry list, relative
     ## to the recipe root.
-    "build/entrypoints/" & binaryName & ".entrypoints.json"
+    completionBuildDir() & "/entrypoints/" & binaryName & ".entrypoints.json"
 
   proc completionFilesDir(binaryName: string): string =
     ## Where the completion files of ``binaryName`` are written, relative to
     ## the recipe root.
-    "build/completions/" & binaryName
+    completionBuildDir() & "/completions/" & binaryName
 
-  proc completionFilesActionId(compileId: string): string =
-    ## The id of the completion edge of the compile ``compileId``.
-    compileId & ".completion-files"
+  proc completionFilesActionId(compileId: string; program = ""): string =
+    ## The id of the completion edge of the compile ``compileId``; with
+    ## ``program``, of the edge writing files for that other name.
+    if program.len == 0: compileId & ".completion-files"
+    else: compileId & ".completion-files." & program
 
   proc isNimCompile(action: BuildActionDef): bool =
     action.call.executableName == "nim" and
@@ -196,10 +214,13 @@ when defined(reproProviderMode):
       relativePath(rootRelative, cwd, '/')
 
   proc addEntryListDefine(action: var BuildActionDef; value: string) =
-    ## Appends ``-d:<EntryListDefine>=<value>`` to a Nim compile's defines.
+    ## Appends ``-d:<EntryListDefine>=<value>`` to a Nim compile's defines,
+    ## once: a second call with the same value changes nothing.
     let define = EntryListDefine & "=" & value
     for arg in action.call.arguments.mitems:
       if arg.name == "defines":
+        if define in arg.encodedValue.split('\x1f'):
+          return
         arg.encodedValue =
           if arg.encodedValue.len == 0: define
           else: arg.encodedValue & "\x1f" & define
@@ -211,76 +232,161 @@ when defined(reproProviderMode):
       format: cafConcat, placement: capAfterSubcommand, repeated: true,
       encodedValue: define))
 
+  proc cliProgramOf(pkg: PackageDef; exe: ExecutableDef): string =
+    ## The program name of ``exe``'s ``cli:`` section, or "" when it has
+    ## none. Whether it has one, and the name its description gives, come
+    ## from the ``package`` macro's registration: a section of root-scope
+    ## parameters alone yields no ``exe.commands``.
+    for entry in registeredCliPrograms():
+      if entry.packageName == pkg.packageName and
+          entry.executable == exe.exportName:
+        return entry.program
+    ""
+
+  proc exeBinaryName(exe: ExecutableDef): string =
+    if exe.binaryName.len > 0: exe.binaryName else: exe.exportName
+
+  proc completionCompileIndex(exe: ExecutableDef; binaryName: string): int =
+    ## The registry index of the one Nim compile building ``binaryName``, or
+    ## -1 when none does. Two are refused, naming both.
+    var compiles: seq[int]
+    for i in 0 ..< buildActionRegistry.len:
+      let action = buildActionRegistry[i]
+      if action.isNimCompile and
+          binaryBaseName(action.nimCompileOutput) == binaryName:
+        compiles.add(i)
+    if compiles.len == 0:
+      return -1
+    if compiles.len > 1:
+      var ids: seq[string]
+      for i in compiles:
+        ids.add(buildActionRegistry[i].id)
+      raise newException(ValueError, "executable " & exe.exportName &
+        " (`" & binaryName & "`) has a `cli:` section, so its compile " &
+        "gets a completion edge, but " & $compiles.len & " Nim compiles " &
+        "build a file of that name: " & ids.join(", ") & ". Build it " &
+        "once, or give the other binaries other names.")
+    compiles[0]
+
+  proc registeredActionIndex(id: string): int =
+    for i in 0 ..< buildActionRegistry.len:
+      if buildActionRegistry[i].id == id:
+        return i
+    -1
+
+  proc ensureCompletionEdge(exe: ExecutableDef; at: int; binaryName,
+                            program, idProgram, projectRoot: string):
+      CliCompletionFileSet =
+    ## The completion edge writing ``program``'s files for the compile at
+    ## registry index ``at`` (and the entry-list define on that compile),
+    ## created on the first call and returned as it is on later ones.
+    if not validCompletionProgram(program):
+      raise newException(ValueError, "executable " & exe.exportName &
+        ": its program name `" & program & "` cannot name completion " &
+        "files")
+    let compileId = buildActionRegistry[at].id
+    let entryList = completionEntryListPath(binaryName)
+    block compile:
+      var action = buildActionRegistry[at]
+      let fromCwd = action.respelledFromCwd(entryList, projectRoot)
+      action.addEntryListDefine(fromCwd)
+      if fromCwd notin action.optionalOutputs:
+        action.optionalOutputs.add(fromCwd)
+      buildActionRegistry[at] = action
+    let outDir = completionFilesDir(binaryName)
+    result.program = program
+    var outputs: seq[string]
+    for shell in CompletionShells:
+      let name = completionFileName(shell, program)
+      outputs.add(outDir & "/" & name)
+      result.files.add(CliCompletionFile(shell: $shell,
+        path: outDir & "/" & name, fileName: name))
+    let completionId = completionFilesActionId(compileId, idProgram)
+    let existing = registeredActionIndex(completionId)
+    if existing >= 0:
+      result.edge = buildActionRegistry[existing]
+      return
+    let call = publicCliCall(BuiltinPackageName, CompletionFilesBuiltin,
+      "write", BuiltinPackageName & "." & CompletionFilesBuiltin & ".write",
+      [cliArg("program", program), cliArg("entryList", entryList),
+       cliArg("outDir", outDir)])
+    result.edge = buildAction(completionId, call, deps = [compileId],
+      outputs = outputs, cacheable = true,
+      dependencyPolicy = automaticMonitorPolicy())
+
+  proc joinCompileTargets(compileId, completionId: string) =
+    ## Adds ``completionId`` to every collection and aggregate that lists
+    ## the compile ``compileId``.
+    for target in buildTargetRegistry.mitems:
+      if target.kind != btkTarget and compileId in target.actions and
+          completionId notin target.actions:
+        target.actions.add(completionId)
+    for target in collectionRegistry.mitems:
+      if compileId in target.actions and completionId notin target.actions:
+        target.actions.add(completionId)
+
+  proc cliCompletionFilesOf*(packageName, binaryPath, installedName: string):
+      CliCompletionFileSet {.dynOrStatic.} =
+    ## The completion files of the executable of ``packageName`` (the package
+    ## whose ``build:`` body is running when empty) that a build writes to
+    ## ``binaryPath``, for a packaging producer that installs it as
+    ## ``installedName`` (".exe" ignored; empty = its own name). Empty
+    ## (``program == ""``) when no executable of the package is built under
+    ## that file name, when it has no ``cli:`` section, or when no Nim
+    ## compile builds it. Creates the completion edge when it does not exist
+    ## yet, so the producer can order its staging after it; the scripts and
+    ## file names are for ``installedName``, which is the command a user
+    ## types. Call it from a ``build:`` body, after the executable's compile.
+    let name =
+      if packageName.len > 0: packageName else: currentOwningPackage()
+    let binaryName = binaryBaseName(binaryPath)
+    if name.len == 0 or binaryName.len == 0:
+      return
+    for pkg in registeredPackages():
+      if pkg.packageName != name:
+        continue
+      for exe in pkg.executables:
+        if exe.exeBinaryName != binaryName:
+          continue
+        let program = cliProgramOf(pkg, exe)
+        if program.len == 0:
+          continue
+        let at = completionCompileIndex(exe, binaryName)
+        if at < 0:
+          return
+        let installed =
+          if installedName.len > 0: binaryBaseName(installedName)
+          else: program
+        let idProgram = if installed == program: "" else: installed
+        return ensureCompletionEdge(exe, at, binaryName, installed,
+          idProgram, currentProviderProjectRoot)
+      return
+
   proc addCompletionEdges(pkg: PackageDef; projectRoot: string) =
     ## Gives each ``cli:`` executable that a Nim compile of this fragment
-    ## builds its entry-list define and its completion edge (see above).
-    ## Mutates the action and target registries; runs after the ``build:``
-    ## body, while the project root is still active.
+    ## builds its entry-list define and its completion edge (see above), and
+    ## puts every completion edge of a compile, including those a producer
+    ## asked for, into the compile's collections and aggregates. Mutates the
+    ## action and target registries; runs after the ``build:`` body, while
+    ## the project root is still active.
     for exe in pkg.executables:
-      # Whether the executable has a ``cli:`` section, and the program name
-      # its description gives, come from the ``package`` macro's
-      # registration: a section of root-scope parameters alone yields no
-      # ``exe.commands``.
-      var program = ""
-      for entry in registeredCliPrograms():
-        if entry.packageName == pkg.packageName and
-            entry.executable == exe.exportName:
-          program = entry.program
-          break
+      let program = cliProgramOf(pkg, exe)
       if program.len == 0:
         continue
-      let binaryName =
-        if exe.binaryName.len > 0: exe.binaryName else: exe.exportName
-      var compiles: seq[int]
-      for i in 0 ..< buildActionRegistry.len:
-        let action = buildActionRegistry[i]
-        if action.isNimCompile and
-            binaryBaseName(action.nimCompileOutput) == binaryName:
-          compiles.add(i)
-      if compiles.len == 0:
+      let binaryName = exe.exeBinaryName
+      let at = completionCompileIndex(exe, binaryName)
+      if at < 0:
         continue
-      if compiles.len > 1:
-        var ids: seq[string]
-        for i in compiles:
-          ids.add(buildActionRegistry[i].id)
-        raise newException(ValueError, "executable " & exe.exportName &
-          " (`" & binaryName & "`) has a `cli:` section, so its compile " &
-          "gets a completion edge, but " & $compiles.len & " Nim compiles " &
-          "build a file of that name: " & ids.join(", ") & ". Build it " &
-          "once, or give the other binaries other names.")
-      if not validCompletionProgram(program):
-        raise newException(ValueError, "executable " & exe.exportName &
-          ": its program name `" & program & "` cannot name completion " &
-          "files")
-      let at = compiles[0]
       let compileId = buildActionRegistry[at].id
-      let entryList = completionEntryListPath(binaryName)
-      block compile:
-        var action = buildActionRegistry[at]
-        let fromCwd = action.respelledFromCwd(entryList, projectRoot)
-        action.addEntryListDefine(fromCwd)
-        if fromCwd notin action.optionalOutputs:
-          action.optionalOutputs.add(fromCwd)
-        buildActionRegistry[at] = action
-      let outDir = completionFilesDir(binaryName)
-      var outputs: seq[string]
-      for name in completionFileNames(program):
-        outputs.add(outDir & "/" & name)
-      let call = publicCliCall(BuiltinPackageName, CompletionFilesBuiltin,
-        "write", BuiltinPackageName & "." & CompletionFilesBuiltin & ".write",
-        [cliArg("program", program), cliArg("entryList", entryList),
-         cliArg("outDir", outDir)])
-      let completionId = completionFilesActionId(compileId)
-      discard buildAction(completionId, call, deps = [compileId],
-        outputs = outputs, cacheable = true,
-        dependencyPolicy = automaticMonitorPolicy())
-      for target in buildTargetRegistry.mitems:
-        if target.kind != btkTarget and compileId in target.actions and
-            completionId notin target.actions:
-          target.actions.add(completionId)
-      for target in collectionRegistry.mitems:
-        if compileId in target.actions and completionId notin target.actions:
-          target.actions.add(completionId)
+      discard ensureCompletionEdge(exe, at, binaryName, program, "",
+        projectRoot)
+      let prefix = completionFilesActionId(compileId)
+      var completionIds: seq[string]
+      for action in buildActionRegistry:
+        if action.id == prefix or action.id.startsWith(prefix & "."):
+          completionIds.add(action.id)
+      for completionId in completionIds:
+        joinCompileTargets(compileId, completionId)
 
   proc buildPackageFragment*(pkg: PackageDef; request: ProviderGraphRequest;
                              buildProc: proc (); includeDefault = true):

@@ -2156,11 +2156,11 @@
         "vscode-server": "vscode-server"
       },
       "locked": {
-        "lastModified": 1795265436,
-        "narHash": "sha256-nsjsWqquf7vedBRUXaeo3xGsOUp3PA3qsq529cRUo/Y=",
+        "lastModified": 1795494009,
+        "narHash": "sha256-g1UcoPq/8FDeL8tbGIzjbRrODY6koTNjcB7/cgah4Tc=",
         "owner": "metacraft-labs",
         "repo": "devops-modules",
-        "rev": "613b282bc2597b4af008c5b6c7e9f2c9609bdb3d",
+        "rev": "1d79a7b65ba071a2aab18e3ec547e94cf372fe72",
         "type": "github"
       },
       "original": {
@@ -2657,11 +2657,11 @@
         "runquota-package-catalog": "runquota-package-catalog"
       },
       "locked": {
-        "lastModified": 1795497045,
-        "narHash": "sha256-t/hgCyWNeQcL30zX1cWOnvAVVZbquE6lO05gKD6xUkw=",
+        "lastModified": 1795498935,
+        "narHash": "sha256-7Q7UokDVA6Uea1FYnPWDy+wxkmVKq7W1EQv/cYosfOU=",
         "owner": "metacraft-labs",
         "repo": "runquota",
-        "rev": "83d89e581d01c96eadb157bee48cecab6aba1866",
+        "rev": "f766cf21f2ccfb7f7904446f04888d92520d9644",
         "type": "github"
       },
       "original": {

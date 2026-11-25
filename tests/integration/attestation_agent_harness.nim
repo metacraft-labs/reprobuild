@@ -192,7 +192,8 @@ proc parseRawResponse(raw: string): RawResponse =
     result.reason = parts[2 .. ^1].join(" ")
 
 proc request(port: Port; verb, target: string; body = "";
-             extraHeaders: seq[string] = @[]): RawResponse =
+             extraHeaders: seq[string] = @[];
+             timeoutMs = 4_000): RawResponse =
   var payload = verb & " " & target & " HTTP/1.1\r\n"
   payload.add "Host: 127.0.0.1\r\n"
   for h in extraHeaders: payload.add h & "\r\n"
@@ -201,7 +202,7 @@ proc request(port: Port; verb, target: string; body = "";
     payload.add "Content-Length: " & $body.len & "\r\n"
   payload.add "\r\n"
   payload.add body
-  parseRawResponse(rawExchange(port, payload))
+  parseRawResponse(rawExchange(port, payload, timeoutMs))
 
 proc get(port: Port; target: string): RawResponse =
   request(port, "GET", target)
@@ -287,19 +288,33 @@ type
     ## complete PARTIALLY and then fail -- and a partial-then-failing
     ## write is the exact condition under which the standard library's
     ## `send` never terminates.
+    ##
+    ## ``bigQuotes`` limits how many quotes get the big chain; later ones
+    ## get one small certificate. A gate that abandons N big responses and then probes the
+    ## daemon sets it to N, so the probe is a cheap answer. A probe that
+    ## had to build a megabyte itself would be measuring the host's CPU
+    ## share: building it is work the connection deadline does not
+    ## pause for, and on a starved host it alone outlasts the deadline.
+    bigQuotes: int
 
 method driverProbe(d: BigChainDriver): BackendReadiness =
   BackendReadiness(ready: true, detail: "bundles a maximal chain")
 
 method driverQuote(d: BigChainDriver; req: QuoteRequest): QuoteResult =
   var chain: seq[string] = @[]
-  for i in 0 ..< MaxCertificates:
-    chain.add repeat(char(ord('A') + i), 48_000)
+  if d.bigQuotes > 0:
+    dec d.bigQuotes
+    for i in 0 ..< MaxCertificates:
+      chain.add repeat(char(ord('A') + i), 48_000)
+  else:
+    # An empty chain is refused by the seam, so the cheap answer is one
+    # small certificate.
+    chain.add repeat('A', 64)
   QuoteResult(evidence: renderMockEvidence(bytesToHex(req.reportData)),
               certificates: some(chain))
 
-proc newBigChainDriver(): BigChainDriver =
-  result = BigChainDriver()
+proc newBigChainDriver(bigQuotes = high(int)): BigChainDriver =
+  result = BigChainDriver(bigQuotes: bigQuotes)
   initAttestationDriver(result, abMock, "big-chain")
 
 type
