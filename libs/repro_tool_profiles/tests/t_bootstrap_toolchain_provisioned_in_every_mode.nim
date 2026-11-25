@@ -101,3 +101,46 @@ suite "bootstrap toolchain provisioning":
 
     # No pinned toolchain for another cpu: no realization, not a borrowed one.
     check windowsBootstrapCToolUse("i386").tarballProvisioning.len == 0
+
+  test "each Windows cpu bootstraps its own native Nim":
+    # The engine's bootstrap Nim is the 2.2.10 vccexe maintenance prefix on
+    # both Windows CPUs; the metacraft-labs/nim factory builds the aarch64 one
+    # natively, because nim-lang publishes no Windows ARM64 archive. A
+    # pure function of the cpu, so both answers are checked on every host.
+    # Hand an arm64 engine the x64 prefix and the first assertion on `arm`
+    # fails.
+    let x64 = windowsBootstrapNimTarballProvisioning("amd64")
+    check x64.len == 1
+    check x64[0].cpu == "x86_64"
+    check x64[0].os == "windows"
+    check x64[0].url.endsWith("-windows-x64.zip")
+
+    let arm = windowsBootstrapNimTarballProvisioning("arm64")
+    check arm.len == 1
+    let rec = arm[0]
+    check rec.cpu == "aarch64"
+    check rec.os == "windows"
+    check rec.url == BootstrapNimTarballWindowsArm64Url
+    check rec.sha256 == BootstrapNimTarballWindowsArm64Sha256
+    check rec.url.endsWith("/nim-" & BootstrapNimVersion &
+      "-vccexe-8910b50d-8910b50d2d21-windows-arm64.zip")
+    check rec.archiveType == "zip"
+    check rec.executablePath == "bin/nim.exe"
+    check rec.stripComponents == 1
+    check rec.packageId == "nim@" & BootstrapNimVersion
+    check rec.detail.version == BootstrapNimVersion
+    # Its own lock identity, never the x64 one: the two archives differ.
+    check rec.lockIdentity == "tarball:nim@" & BootstrapNimVersion &
+      ":windows-aarch64:sha256:" & BootstrapNimTarballWindowsArm64Sha256
+    check rec.lockIdentity != x64[0].lockIdentity
+
+    # The selector the acquisition uses picks each cpu's own archive.
+    let armTarget = realizationTargetFor(pcAArch64, poWindows,
+      baselineMicroarchLevel(pcAArch64))
+    check selectTarballRecord(arm, armTarget,
+      versionRange = ">=2.2 <3.0").status == kcSelected
+    check selectTarballRecord(x64, armTarget,
+      versionRange = ">=2.2 <3.0").status != kcSelected
+
+    # No pinned prefix for another cpu: no realization, not a borrowed one.
+    check windowsBootstrapNimTarballProvisioning("i386").len == 0
