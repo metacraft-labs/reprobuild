@@ -52,6 +52,17 @@ static void *repro_hcr_lx_map_anonymous(void *hint, size_t length,
   if ((protection & REPRO_HCR_LX_PROT_EXEC) != 0) {
     prot |= PROT_EXEC;
   }
+  /* Inside the tier-2 window (a §5.1 page replacement's anonymous fallback)
+   * this must be a raw system call: design §6.2 allows only those between
+   * signalling and release, and libc entry points are interposed when MCR is
+   * loaded (§5.1). Outside the window it stays libc's `mmap`, so a recorder
+   * sees the provider's ordinary data and probe pages as it always has. */
+  if (repro_hcr_lx_quiesce_is_held()) {
+    long raw = repro_hcr_lx_syscall6(
+        REPRO_HCR_LX_NR_MMAP, (long)(uintptr_t)hint, (long)length, (long)prot,
+        (long)(MAP_PRIVATE | MAP_ANONYMOUS | extra_flags), -1L, 0L);
+    return raw < 0 && raw > -4096 ? NULL : (void *)(uintptr_t)raw;
+  }
   mapped = mmap(hint, length, prot, MAP_PRIVATE | MAP_ANONYMOUS | extra_flags,
                 -1, 0);
   return mapped == MAP_FAILED ? NULL : mapped;
@@ -61,6 +72,12 @@ static void *repro_hcr_lx_map_anonymous(void *hint, size_t length,
 static void repro_hcr_lx_apply_probe_levers(void) {}
 
 static int repro_hcr_lx_unmap(void *address, size_t length) {
+  /* Raw inside the tier-2 window, libc outside it, as just above. */
+  if (repro_hcr_lx_quiesce_is_held()) {
+    return repro_hcr_lx_raw_munmap((uint64_t)(uintptr_t)address, length) == 0
+               ? 0
+               : -1;
+  }
   return munmap(address, length);
 }
 
@@ -707,6 +724,54 @@ int repro_hcr_lx_probe_txn_commit(void) {
 
 int repro_hcr_lx_probe_txn_rollback(void) {
   return repro_hcr_lx_txn_rollback(&repro_hcr_lx_last_txn);
+}
+
+/* ---------------------------------------------------------------------------
+ * The tier-2 publication order (design §6.2 "Deadlock hazards", §11.2),
+ * re-exported for the HLX-M4 fixtures that hold quiescence themselves.
+ *
+ * The agent's `repro_hcr_prepare_direct_patch` prepares the transaction with
+ * every thread RUNNING (it claims the window and maps the body, either of which
+ * may take a lock a parked thread holds), acquires quiescence as the last step,
+ * commits with the threads parked, and only after releasing them finishes any
+ * rollback. A fixture that parks the threads itself must follow the same order
+ * or it measures a publication the provider never performs, so these forward
+ * to exactly the production halves the agent composes:
+ *
+ *   txn_reset / txn_add ...          (any number of sites: set-wide)
+ *   txn_prepare_for_quiescence()     threads running
+ *   quiesce_begin(...)               on failure: txn_discard_prepared()
+ *   txn_commit_quiesced()            threads parked; text writes only
+ *   quiesce_release()
+ *   txn_finish_cleanup()             threads running
+ * ------------------------------------------------------------------------- */
+
+/* Prepare on the promise that the caller acquires quiescence before it
+ * commits: on a kernel without MEMBARRIER SYNC_CORE that promise is what lets
+ * prepare proceed, and `txn_commit_quiesced` holds the caller to it. */
+int repro_hcr_lx_probe_txn_prepare_for_quiescence(void) {
+  int rc;
+  repro_hcr_lx_quiesce_planned = 1;
+  rc = repro_hcr_lx_txn_prepare(&repro_hcr_lx_last_txn);
+  repro_hcr_lx_quiesce_planned = 0;
+  return rc;
+}
+
+/* Commit with the threads parked. A failure re-publishes the saved words and
+ * leaves claim release, unregistration and unmapping to
+ * `txn_finish_cleanup`, after the caller has released the threads. */
+int repro_hcr_lx_probe_txn_commit_quiesced(void) {
+  return repro_hcr_lx_txn_commit_ex(&repro_hcr_lx_last_txn, 1);
+}
+
+void repro_hcr_lx_probe_txn_finish_cleanup(void) {
+  repro_hcr_lx_finish_direct_patch_cleanup();
+}
+
+/* Discard a prepared transaction that was never committed, e.g. because
+ * quiescence could not be acquired. Threads must be running. */
+void repro_hcr_lx_probe_txn_discard_prepared(void) {
+  repro_hcr_lx_discard_direct_patch();
 }
 
 int repro_hcr_lx_probe_txn_site_count(void) {

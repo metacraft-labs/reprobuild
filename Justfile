@@ -1847,6 +1847,18 @@ integration_hx_s10_a_zero_case_result_is_not_a_pass *args:
     bash tests/integration/test_hx_s10_a_zero_case_result_is_not_a_pass.sh {{args}} \
         2>&1 | tee test-logs/integration_hx_s10_a_zero_case_result_is_not_a_pass.log
 
+# Linux HCR provider, design §6.2 "Deadlock hazards" / §11.2: no claim-map or
+# libc mapping call while tier-2 quiescence holds other threads parked. Runs
+# the production agent compiled whole into a C driver; no Nim needed.
+# A shebang recipe so `pipefail` holds and `tee` cannot turn a red gate green;
+# `.github/workflows/hcr-lanes.yml` runs it in the Linux lane.
+integration_hcr_linux_claim_map_is_never_called_with_threads_parked:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mkdir -p test-logs
+    bash tests/integration/test_hcr_linux_claim_map_is_never_called_with_threads_parked.sh \
+        2>&1 | tee test-logs/integration_hcr_linux_claim_map_is_never_called_with_threads_parked.log
+
 e2e_scoop_adapter_realize_and_launch:
     mkdir -p test-logs build/test-bin build/nimcache
     nim c -r \

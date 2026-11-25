@@ -638,6 +638,8 @@
 ##                                           hold (decisions 171 and 177)
 ## ``restart-success-by-exit-code``        a restart's exit code is taken as
 ##                                           its outcome (round 11, H1)
+## ``secret-put-user-profile-only``
+##     a secret put judges its consumers in the user profile alone (round 15, decision 190)
 ## ``secret-put-unjudged``
 ##     a secret put restarts its consumers on what systemd loaded, unjudged (round 15, decision 190)
 ## ``restore-holds-sysinit``
@@ -2285,6 +2287,7 @@ const
                           # A13 review round 15.
                           "dropin-refusal-before-writes-skipped",
                           "secret-put-unjudged",
+                          "secret-put-user-profile-only",
                           "restore-holds-sysinit",
                           "restore-removes-filled-placeholder",
                           "restore-unbounded",
