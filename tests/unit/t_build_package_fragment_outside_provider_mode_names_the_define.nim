@@ -6,9 +6,11 @@
 ## `buildPackageFragment` and `buildPackageDevEnv` are declared only inside
 ## `when defined(reproProviderMode):` in
 ## `libs/repro_project_dsl/src/repro_project_dsl/runtime_provider.nim`. The
-## engine, the provider binaries and `scripts/check_nim_sources.sh` all compile
-## with that define, and `repro_tests.nim` enrolls every test that reaches
-## these entry points with `defines: @["reproProviderMode"]`. A standalone
+## engine and the provider binaries compile with that define,
+## `scripts/check_nim_sources.sh` checks every library with it (an entrypoint
+## gets it only when its `apps/entrypoints.txt` row carries it, as in the
+## build), and `repro_tests.nim` enrolls every test that reaches these entry
+## points with `defines: @["reproProviderMode"]`. A standalone
 ## compile does not pass it. Before the fix, the reporter of reprobuild-pm
 ## `issues/2026-11-14-test-from-source-custom-convention-does-not-compile-buildpackagefragment-undeclared.md`
 ## ran

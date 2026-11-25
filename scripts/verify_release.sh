@@ -309,6 +309,30 @@ if [[ "$archive_name" == *.zip ]]; then
   hermetic_path="${win_root}/System32:${win_root}:${win_root}/System32/Wbem"
   echo "=== Running smoke test with PATH scrubbed to '${hermetic_path}' ==="
   run_repro() { PATH="$hermetic_path" "$@"; }
+
+  # windows-aarch64: the closure audit, over the archive as it ships. The
+  # manifest above names the DLLs reprobuild loads by name; this walks the
+  # import and delay-load import tables of every image in bin/ and requires
+  # each DLL they name to be in bin/ or part of Windows, and every image in
+  # bin/ to be ARM64. windows/stage-release-dlls.ps1 ran the same audit on
+  # build\bin before packaging; running it again here checks the bytes a user
+  # downloads. Windows PowerShell is named by its absolute path because PATH
+  # is the scrubbed one, so nothing on the build host's PATH can satisfy it.
+  if [[ "$archive_name" == *-windows-aarch64.zip ]]; then
+    if ! command -v cygpath > /dev/null 2>&1; then
+      echo "ERROR: the windows-aarch64 closure audit needs cygpath (Git Bash or MSYS2) to hand Windows paths to PowerShell" >&2
+      exit 1
+    fi
+    audit_ps1=$(cygpath -w "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/windows/audit-release-dll-closure.ps1")
+    audit_bin=$(cygpath -w "$pkg_dir/bin")
+    windows_powershell="${win_root}/System32/WindowsPowerShell/v1.0/powershell.exe"
+    echo "=== Auditing the DLL closure of $pkg_dir/bin with PATH scrubbed to '${hermetic_path}' ==="
+    if ! PATH="$hermetic_path" "$windows_powershell" -NoLogo -NoProfile -NonInteractive \
+        -ExecutionPolicy Bypass -File "$audit_ps1" -BinDir "$audit_bin" -Arch arm64; then
+      echo "ERROR: $archive_name failed the DLL closure audit (see the violations above)" >&2
+      exit 1
+    fi
+  fi
 else
   run_repro() { "$@"; }
 fi

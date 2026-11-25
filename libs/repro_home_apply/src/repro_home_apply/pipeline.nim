@@ -31,6 +31,7 @@ import repro_homebrew_adapter
 import repro_local_store
 import repro_tool_profiles/scoop_removal
 
+import ./adopt_carry
 import ./app_activation
 from ./builtin_adapter import appPlacedItem, isMacosInstallerApp
 import ./dep_graph
@@ -3137,8 +3138,16 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
     # The commands application packages declare become launchers (and
     # part of the generation id); see `addApplicationCommands`.
     addApplicationCommands(applyPlan, packagePreviews)
+    # `repro home adopt` (spec/CLI/home/adopt.md, Carry-forward) touches only
+    # the packages that own the adopted addresses, so a package it does not
+    # claim can neither be refused here nor realized below.
+    let adoptOnly = opts.adoptAddresses.len > 0
+    let adoptedIds = adoptedPackageIds(opts.adoptAddresses)
+    let checkedPreviews =
+      if adoptOnly: packagePreviews.filterIt(it.packageId in adoptedIds)
+      else: packagePreviews
     # GM7: see `refuseClassificationDisagreement` (`runApplyPlan`).
-    refuseClassificationDisagreement(opts, applyPlan, packagePreviews,
+    refuseClassificationDisagreement(opts, applyPlan, checkedPreviews,
       applied, catalog)
     # A package of an applied concern with no realization is refused HERE,
     # before the store is opened (which a first apply creates), the no-op
@@ -3147,7 +3156,7 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
     # every such package, not only the first one step 7 would reach.
     # Resolution and both refusals do not read the store, so they run
     # ahead of step 5.
-    refuseUnrealizablePackages(packagePreviews, owned)
+    refuseUnrealizablePackages(checkedPreviews, owned)
 
     # ---- Step 5: load active generation's manifest (for diff) -----------
     let activeGenIdHex = readCurrentGenerationId(opts.stateDir)
@@ -3168,6 +3177,10 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
         composeDesiredResources(profile, opts.homeDir, opts.targetContext)) &
         concernSeed(applied)
       if opts.adoptAddresses.len > 0:
+        # The generation also carries the active one forward, so its id names
+        # the generation it was made from: adopting a, then b, then a again
+        # must not reuse (and overwrite) the first adopt's generation.
+        resourcesSeed.add("\x00adopt-from:" & activeGenIdHex)
         resourcesSeed.add("\x00adopt:")
         for a in opts.adoptAddresses:
           resourcesSeed.add(a)
@@ -3192,8 +3205,22 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
       for l in applyPlan.launchers:
         if l.fromPackageId in ownedPackageIds:
           ownedLaunchers.add l
+      # `repro home adopt` claims an existing object without changing it
+      # (spec/CLI/home/adopt.md, Carry-forward): it realizes only the
+      # packages that own the adopted addresses, writes no file, block or
+      # launcher of any other package, and carries the active generation's
+      # records over (`adopt_carry`).
+      var packagesToRealize = ownedPackages
+      var launchersToMaterialize = ownedLaunchers
+      var adoptedCommandNames = initHashSet[string]()
+      if adoptOnly:
+        packagesToRealize = ownedPackages.filterIt(it.packageId in adoptedIds)
+        launchersToMaterialize = ownedLaunchers.filterIt(
+          it.fromPackageId in adoptedIds)
+        for l in launchersToMaterialize:
+          adoptedCommandNames.incl(l.commandName)
       let materializedStowEntries =
-        if filesApplied: stowEntries
+        if filesApplied and not adoptOnly: stowEntries
         else: newSeq[StowEntry]()
       if not filesApplied:
         result.notAppliedCount += stowEntries.len
@@ -3202,7 +3229,8 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
             inc result.notAppliedCount
       let prevManifest = readGenerationManifest(opts.stateDir, store,
         activeGenIdHex)
-      if prevManifest.isSome:
+      # An adopt releases nothing: it carries the active generation's records.
+      if prevManifest.isSome and not adoptOnly:
         for r in releasedRecordsOf(prevManifest.get, owned):
           result.released.add(r.category & " " & r.name)
       # No-op detection (spec §"No-Op Detection"): a re-apply is a
@@ -3267,7 +3295,7 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
       # ---- Step 7: realize packages -------------------------------------
       # GM4b: the resolution context `--plan` uses, so the plan and the
       # apply cannot select differently.
-      let realized = realizePlannedPackages(store, ownedPackages,
+      let realized = realizePlannedPackages(store, packagesToRealize,
         resolutionCtx, opts.appTrust)
       if shouldKillAfter(7):
         raiseKilledByTestHook(7)
@@ -3408,7 +3436,7 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
       # synthesize the `StagedFileRecord` from the cached digest and
       # skip the atomic write entirely.
       for g in applyPlan.generatedFiles:
-        if g.sourceKind != pgfsPackageOutput or not filesApplied:
+        if g.sourceKind != pgfsPackageOutput or not filesApplied or adoptOnly:
           continue
         let candidateDigest = digestOf(g.contentBytes)
         var isCacheHit = false
@@ -3457,7 +3485,8 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
         for i, ch in raw:
           result[i] = byte(ord(ch))
       for g in applyPlan.generatedFiles:
-        if g.sourceKind == pgfsPackageOutput and filesApplied:
+        if g.sourceKind == pgfsPackageOutput and filesApplied and
+            not adoptOnly:
           discard storeCasBlob(store, g.contentBytes)
       for entry in materializedStowEntries:
         if fileExists(extendedPath(entry.sourceAbsolutePath)):
@@ -3470,7 +3499,9 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
       let syntheticBlocks = parseSyntheticPackageManagedBlocks(opts.homeDir,
         packageIds)
       for mb in syntheticBlocks:
-        if blocksApplied:
+        if adoptOnly:
+          discard
+        elif blocksApplied:
           appliedManagedBlocks.add(applyManagedBlock(mb))
         else:
           inc result.notAppliedCount
@@ -3484,7 +3515,8 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
       # spec line; M63 deferred the actual deletion work to a later
       # milestone, and we land it under M64 because rollback's
       # symmetry assumes apply already cleaned up.
-      if activeGenIdHex.len > 0 and not opts.recordOnlyGeneratedFiles:
+      if activeGenIdHex.len > 0 and not opts.recordOnlyGeneratedFiles and
+          not adoptOnly:
         let prevPointerFile = pointerPath(opts.stateDir, activeGenIdHex)
         if fileExists(extendedPath(prevPointerFile)):
           var newPaths: seq[string]
@@ -3558,9 +3590,19 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
       # (`app_activation.launcherExecutablePath`); a remote bundle build
       # places nothing, so its launchers keep the store path.
       let launchers = materializeLaunchers(store, perGenBin, realized,
-        ownedLaunchers,
+        launchersToMaterialize,
         if opts.recordOnlyGeneratedFiles: ""
         else: applicationsDir(apsHome, opts.homeDir))
+      if adoptOnly and prevManifest.isSome:
+        # The launchers of every other package are the active generation's,
+        # copied as they are.
+        var written: seq[ExportedCommand]
+        for l in launchers:
+          written.add(ExportedCommand(commandName: l.commandName))
+        copyCarriedLaunchers(
+          generationBinDir(opts.stateDir, activeGenIdHex), perGenBin,
+          carriedCommands(prevManifest.get, written).filterIt(
+            it.commandName notin adoptedCommandNames))
       if shouldKillAfter(9):
         raiseKilledByTestHook(9)
 
@@ -3664,7 +3706,20 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
       # ever produced, regardless of `reconcile`).
       var decisionOpts = DecisionOptions(reconcile: reconcilePolicy,
         enforcePreventDestroy: true)
-      let planReport = composePlan(desiredResources, recordedBindings,
+      # An adopt plans only the addresses it claims: a resource it does not
+      # claim cannot fail it (prevent-destroy, drift), and its binding is
+      # carried over as recorded.
+      var plannedDesired = desiredResources
+      var plannedRecorded = recordedBindings
+      if adoptOnly:
+        plannedDesired = initDesiredSet()
+        plannedRecorded = initOrderedTable[string, RecordedBinding]()
+        for a in opts.adoptAddresses:
+          if a in desiredResources.resources:
+            plannedDesired.resources[a] = desiredResources.resources[a]
+          if a in recordedBindings:
+            plannedRecorded[a] = recordedBindings[a]
+      let planReport = composePlan(plannedDesired, plannedRecorded,
         decisionOpts)
       # M68 Phase B: `repro home adopt` passes one or more resource
       # addresses through `opts.adoptAddresses`. Adopt CLAIMS an
@@ -3709,6 +3764,10 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
               "no existing object found to adopt; `repro home apply` " &
               "would CREATE this resource — run apply instead of adopt")
           appliedResourceBindings.add(rb)
+          continue
+        if adoptOnly:
+          # Not claimed by this adopt: the active generation's binding (if
+          # any) is carried over as recorded; no driver runs.
           continue
         case action.kind
         of rakDriftBlocked:
@@ -4127,46 +4186,67 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
       # the point of no return). The manifest still needs to be sealed
       # into CAS in step 11.
       var manifest = ActivationManifest(schemaVersion: ManifestSchemaVersion)
-      for r in realized:
-        manifest.realizedPackages.add(RealizedPackage(
-          packageId: r.packageId,
-          realizedPrefixId: digestFromKey(r.prefixId),
-          adapter: $r.adapter,
-          provenance: r.provenance))
-      for l in launchers:
-        manifest.exportedCommands.add(ExportedCommand(
-          commandName: l.commandName,
-          launchPlanDigest: l.launchPlanDigest,
-          binDirRelativePath: l.binDirRelativePath,
-          binDirArtifactKind: l.binDirArtifactKind))
-      for sf in stagedFiles:
-        var gf: GeneratedFile
-        gf.absoluteOutputPath = sf.absoluteOutputPath
-        gf.storeContentHash = sf.postWriteDigest
-        gf.ownershipPolicy = sf.ownershipPolicy
-        gf.hasPreWriteDigest = sf.hasPreWriteDigest
-        if sf.hasPreWriteDigest:
-          gf.preWriteDigest = sf.preWriteDigest
-        gf.postWriteDigest = sf.postWriteDigest
-        gf.stowSource = sf.stowSource
-        manifest.generatedFiles.add(gf)
-      # Managed blocks come from the test-hook synthesizer in
-      # Phase A. M68: ResourceBinding records come from the
-      # resource lifecycle layer's `appliedResourceBindings`
-      # sequence built above.
-      for mb in appliedManagedBlocks:
-        manifest.managedBlocks.add(ManagedBlock(
-          hostFilePath: mb.hostFilePath,
-          blockId: mb.blockId,
-          preWriteFileDigest: mb.preWriteFileDigest,
-          postWriteBlockBytes: mb.postWriteBlockBytes,
-          postWriteFileDigest: mb.postWriteFileDigest))
-      manifest.resourceBindings = appliedResourceBindings
+      if adoptOnly:
+        var adoptedRealized: seq[RealizedPackage]
+        for r in realized:
+          adoptedRealized.add(RealizedPackage(
+            packageId: r.packageId,
+            realizedPrefixId: digestFromKey(r.prefixId),
+            adapter: $r.adapter,
+            provenance: r.provenance))
+        var adoptedLaunchers: seq[ExportedCommand]
+        for l in launchers:
+          adoptedLaunchers.add(ExportedCommand(
+            commandName: l.commandName,
+            launchPlanDigest: l.launchPlanDigest,
+            binDirRelativePath: l.binDirRelativePath,
+            binDirArtifactKind: l.binDirArtifactKind))
+        manifest = carryForwardManifest(prevManifest, adoptedIds,
+          adoptedCommandNames, adoptedRealized, adoptedLaunchers,
+          appliedResourceBindings)
+      else:
+        for r in realized:
+          manifest.realizedPackages.add(RealizedPackage(
+            packageId: r.packageId,
+            realizedPrefixId: digestFromKey(r.prefixId),
+            adapter: $r.adapter,
+            provenance: r.provenance))
+        for l in launchers:
+          manifest.exportedCommands.add(ExportedCommand(
+            commandName: l.commandName,
+            launchPlanDigest: l.launchPlanDigest,
+            binDirRelativePath: l.binDirRelativePath,
+            binDirArtifactKind: l.binDirArtifactKind))
+        for sf in stagedFiles:
+          var gf: GeneratedFile
+          gf.absoluteOutputPath = sf.absoluteOutputPath
+          gf.storeContentHash = sf.postWriteDigest
+          gf.ownershipPolicy = sf.ownershipPolicy
+          gf.hasPreWriteDigest = sf.hasPreWriteDigest
+          if sf.hasPreWriteDigest:
+            gf.preWriteDigest = sf.preWriteDigest
+          gf.postWriteDigest = sf.postWriteDigest
+          gf.stowSource = sf.stowSource
+          manifest.generatedFiles.add(gf)
+        # Managed blocks come from the test-hook synthesizer in
+        # Phase A. M68: ResourceBinding records come from the
+        # resource lifecycle layer's `appliedResourceBindings`
+        # sequence built above.
+        for mb in appliedManagedBlocks:
+          manifest.managedBlocks.add(ManagedBlock(
+            hostFilePath: mb.hostFilePath,
+            blockId: mb.blockId,
+            preWriteFileDigest: mb.preWriteFileDigest,
+            postWriteBlockBytes: mb.postWriteBlockBytes,
+            postWriteFileDigest: mb.postWriteFileDigest))
+        manifest.resourceBindings = appliedResourceBindings
       # GM7: the generation records the concerns it applied (schema 3), so
       # rollback releases rather than removes what it did not own.
-      manifest.concernsDeclared = applied.declared
-      if applied.declared:
-        manifest.ownedConcerns = concernNames(owned)
+      # An adopt generation keeps the concerns the active generation recorded.
+      if not adoptOnly:
+        manifest.concernsDeclared = applied.declared
+        if applied.declared:
+          manifest.ownedConcerns = concernNames(owned)
       let manifestBytes = encodeManifest(manifest)
 
       # Build the envelope before rotation; writeGeneration also
@@ -4174,8 +4254,12 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
       var envelope = PointerEnvelope(schemaVersion: 1'u16,
         activationTimestamp: opts.activationTimestamp,
         hostIdentity: opts.host)
-      for r in realized:
-        envelope.realizedPrefixIds.add(digestFromKey(r.prefixId))
+      if adoptOnly:
+        for rp in manifest.realizedPackages:
+          envelope.realizedPrefixIds.add(rp.realizedPrefixId)
+      else:
+        for r in realized:
+          envelope.realizedPrefixIds.add(digestFromKey(r.prefixId))
       envelope.generationId = candidateId
 
       # Step 10 (commit): seal manifest + intent snapshot + RBCG into
@@ -4217,7 +4301,9 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
       # GM4b: the generation is committed and current; serialise what it
       # selected into the home-profile lock. A remote bundle built here is
       # applied elsewhere and records nothing beside this profile.
-      if not opts.recordOnlyGeneratedFiles:
+      # An adopt selects nothing beyond what it claims: the lock stays as it
+      # is until the next apply.
+      if not opts.recordOnlyGeneratedFiles and not adoptOnly:
         recordSelectionsInLock(opts, resolutionCtx, packagePreviews)
 
       result.kind = aokFreshApplied

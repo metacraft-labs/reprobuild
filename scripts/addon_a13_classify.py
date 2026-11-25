@@ -361,7 +361,7 @@ TARGET.update({
     "mutdeadactive": "M-B: a judged service a dead full apply held while it ran",
     "mutlateess": "decision 177(c): an essential trigger systemd links to a judged",
     "mutprefixcall": "round 15: a drop-in on a dashed prefix keeping an instance",
-    "mutsecretput": "decision 190: with carried state on the host a secret put",
+    "mutsecretput": "decision 190 (b): with a generator making the probe root",
     "mutessreq": "decision 192: an apply that would make sshd require",
 })
 
@@ -504,12 +504,11 @@ def on_target_rec(kind, rec):
         return (on_target(kind, steps) and u.get("exit") == 0 and
                 u.get("written") is True and u.get("refused") is False)
     if kind == "mutsecretput":
-        # Red because the put restarted the probe on the root definition,
-        # not for another reason: the premise held and the probe ran as 0.
-        u = rec.get("secretPutJudged", {})
-        return (on_target(kind, steps) and u.get("loadedUserBefore") == "root"
-                and u.get("refused") is False and u.get("restarted") is True
-                and u.get("ranAsRoot") is True)
+        # Red because (b)'s put restarted the probe instead of refusing, not
+        # for another reason: nothing held, reloaded or judged it.
+        u = rec.get("secretPutJudged", {}).get("b", {})
+        return (on_target(kind, steps) and u.get("refused") is False and
+                u.get("restarted") is True)
     if kind == "mutessreq":
         # Red because the apply passed and wrote onto sshd, not for another
         # reason.
