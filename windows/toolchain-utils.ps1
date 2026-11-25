@@ -330,6 +330,86 @@ function Assert-WindowsDllClosure {
   Write-Host "closure audit: operating-system DLLs relied on: $(@($r.SystemUsed) -join ', ')"
 }
 
+function Copy-WindowsImportClosure {
+  ## Stage into $BinDir exactly the DLLs its images need and do not already
+  ## have: walk the import and delay-load import tables of every .exe and .dll
+  ## in $BinDir; each DLL named there that is not an API set, not in $BinDir
+  ## and not an operating-system DLL (windows/release-os-dlls.txt or $OsDlls,
+  ## and present in $SystemDir) is copied from the first of $SourceDirs that
+  ## holds it, checked to be of the $Arch machine; repeat until nothing is
+  ## missing, so a staged DLL's own imports are staged too. An import that no
+  ## source holds is refused by name. This replaces a best-effort list of
+  ## runtime DLLs: nothing is staged that no image imports.
+  ##
+  ## First, every DLL in $BinDir that one of $SourceDirs also holds, other
+  ## than $KeepNames (DLLs the caller stages on purpose, such as the ones
+  ## loaded by name rather than imported), is removed, so a copy left by an
+  ## earlier build on a persistent runner cannot survive unless an image
+  ## imports it. Returns the names copied.
+  param(
+    [Parameter(Mandatory = $true)][string]$BinDir,
+    [Parameter(Mandatory = $true)][string[]]$SourceDirs,
+    [Parameter(Mandatory = $true)][string]$Arch,
+    [string]$SystemDir = "",
+    [string[]]$OsDlls = $null,
+    [string[]]$KeepNames = @()
+  )
+  $osDllNames = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+  if ($null -eq $OsDlls) { $OsDlls = @((Get-WindowsReleaseOsDlls).Keys) }
+  foreach ($n in $OsDlls) { [void]$osDllNames.Add($n) }
+  if ([string]::IsNullOrEmpty($SystemDir)) {
+    if ([string]::IsNullOrEmpty($env:SystemRoot)) { throw "import closure: no -SystemDir and no SystemRoot to find System32 in." }
+    $SystemDir = Join-Path $env:SystemRoot "System32"
+  }
+  if (-not (Test-Path -LiteralPath $SystemDir -PathType Container)) { throw "import closure: the system directory $SystemDir does not exist" }
+  $systemNames = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+  foreach ($f in @(Get-ChildItem -LiteralPath $SystemDir -File)) { [void]$systemNames.Add($f.Name) }
+  $keep = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+  foreach ($n in $KeepNames) { [void]$keep.Add($n) }
+  # Each source DLL by name; the first source to hold a name wins.
+  $sources = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([StringComparer]::OrdinalIgnoreCase)
+  foreach ($dir in $SourceDirs) {
+    if (-not (Test-Path -LiteralPath $dir -PathType Container)) { throw "import closure: source directory $dir does not exist" }
+    foreach ($f in @(Get-ChildItem -LiteralPath $dir -File -Filter *.dll)) {
+      if (-not $sources.ContainsKey($f.Name)) { $sources[$f.Name] = $f.FullName }
+    }
+  }
+  foreach ($f in @(Get-ChildItem -LiteralPath $BinDir -File -Filter *.dll)) {
+    if ($sources.ContainsKey($f.Name) -and -not $keep.Contains($f.Name)) {
+      Remove-Item -LiteralPath $f.FullName -Force
+      Write-Host "  removed $($f.Name) (an earlier staging; re-staged only if an image imports it)"
+    }
+  }
+  $copied = New-Object System.Collections.Generic.List[string]
+  $checked = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+  $pending = New-Object 'System.Collections.Generic.Queue[string]'
+  foreach ($f in @(Get-ChildItem -LiteralPath $BinDir -File | Where-Object { $_.Extension -in @('.exe', '.dll') })) {
+    $pending.Enqueue($f.FullName)
+  }
+  while ($pending.Count -gt 0) {
+    $image = $pending.Dequeue()
+    if (-not $checked.Add($image)) { continue }
+    $imageName = Split-Path -Leaf $image
+    $names = @(Get-PeImportNames -Path $image) + @(Get-PeDelayImportNames -Path $image)
+    foreach ($import in $names) {
+      if ($import -match '^(?i)(api|ext)-ms-win-') { continue }
+      if (Test-Path -LiteralPath (Join-Path $BinDir $import) -PathType Leaf) { continue }
+      if ($osDllNames.Contains($import) -and $systemNames.Contains($import)) { continue }
+      if (-not $sources.ContainsKey($import)) {
+        throw "import closure: $imageName imports $import, which no source holds (sources: $($SourceDirs -join ', '))"
+      }
+      $src = $sources[$import]
+      Assert-PeMachine -Path $src -Arch $Arch -Consumer "import closure"
+      $dest = Join-Path $BinDir $import
+      Copy-Item -LiteralPath $src -Destination $dest -Force
+      Write-Host "  staged $import  <-  $src  (imported by $imageName)"
+      $copied.Add($import)
+      $pending.Enqueue($dest)
+    }
+  }
+  return $copied.ToArray()
+}
+
 function Assert-WindowsArchiveClosure {
   ## The release closure audit over an extracted Windows release archive
   ## ($Root, the directory holding bin/): every PE image anywhere in it --

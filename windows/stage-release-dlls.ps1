@@ -273,45 +273,13 @@ foreach ($dll in @("libcrypto-3-x64.dll", "libssl-3-x64.dll")) {
 }
 Copy-IntoBin -SrcPath (Join-Path $clingoRoot "clingo.dll") -DestName "clingo.dll"
 
-# ── 2b. clingo.dll's MSVC runtime dependencies ───────────────────────────────
-# The conda-forge clingo.dll is MSVC-built. Its import table needs the VC++
-# redistributable -- MSVCP140.dll, VCRUNTIME140.dll and VCRUNTIME140_1.dll (the
-# UCRT api-ms-win-crt-* it also imports are OS components already in System32).
-# The VC++ redist is NOT guaranteed on a minimal windows-diy image --
-# VCRUNTIME140_1.dll in particular is frequently absent -- so
-# `LoadLibrary("clingo.dll")` returns NULL and repro.exe aborts at module init
-# with "could not load: clingo.dll" EVEN THOUGH clingo.dll is present. (This is
-# exactly what the 2026-08-30 release dry-run hit: clingo.dll staged, load still
-# failed.) Bundle the redist beside clingo.dll -- needed at build time (the
-# orchestrating repro.exe loads clingo at module init) AND in the archive
-# (verify_release.sh scrubs PATH to the system dirs, so PATH cannot help).
-#
-# Source: the existing pinned conda-forge vc14_runtime package (the loose, redistributable MSVC
-# runtime). msvcp140.dll pulls in msvcp140_1/2/atomic_wait + concrt140, so stage
-# the whole set to close the transitive class.
-$vcDlls = @(
-    "vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll",
-    "msvcp140_1.dll", "msvcp140_2.dll", "msvcp140_atomic_wait.dll", "concrt140.dll"
-)
-$pkg = Expand-CondaPackage `
-    -Url "https://anaconda.org/conda-forge/vc14_runtime/14.44.35208/download/win-64/vc14_runtime-14.44.35208-h818238b_41.conda" `
-    -Sha256 "ec706fe9368b837fbd05af4851f5ebef12bef8c471a273f4805f7af788407317" `
-    -WorkDir (Join-Path $tmp "vc14_runtime")
-$vcSrcDir = Join-Path $pkg "Library/bin"
-try {
-    foreach ($dll in $vcDlls) {
-        $src = Join-Path $vcSrcDir $dll
-        if (Test-Path -LiteralPath $src -PathType Leaf) {
-            Copy-IntoBin -SrcPath $src -DestName $dll
-        } elseif ($dll -in @("vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll")) {
-            throw "stage-release-dlls: required MSVC runtime DLL $dll missing from pinned archive."
-        } elseif (Test-Path -LiteralPath (Join-Path $binDir $dll)) {
-            Remove-Item -LiteralPath (Join-Path $binDir $dll) -Force
-        }
-    }
-} finally {
-    Remove-Item -LiteralPath (Split-Path -Parent $pkg) -Recurse -Force
-}
+# ── 2b. clingo.dll's MSVC runtime dependencies: see section 6 ───────────────
+# The conda-forge clingo.dll is MSVC-built and imports the VC++ redistributable
+# (MSVCP140.dll, VCRUNTIME140.dll, VCRUNTIME140_1.dll), which a minimal Windows
+# image does not carry: the 2026-08-30 release dry run had clingo.dll staged
+# and still failed "could not load: clingo.dll". Those DLLs are staged in
+# section 6, from the pinned conda-forge vc14_runtime package, by the import
+# walk -- exactly the ones an image imports, not a list.
 
 # These exact preferred members are authenticated against the existing archive pins.
 foreach ($key in @("GCC_LIBZSTD_DLL_SHA256", "NIM_SQLITE_DLL_SHA256")) {
@@ -372,22 +340,27 @@ if (Test-Path -LiteralPath (Join-Path $binDir "cacert.pem")) {
     }
 }
 
-# ── 6. mingw / UCRT runtime DLLs (best-effort insurance) ─────────────────────
-# repro.exe is asserted to statically import only ADVAPI32/KERNEL32/msvcrt, but
-# the OpenSSL DLLs above come from MSYS2 ucrt64 and may carry transitive deps
-# (libgcc_s, libwinpthread, zlib1, libssp). Under verify_release.sh's scrubbed
-# PATH those must resolve from bin/ too. Stage whichever exist in the selected WinLibs gcc
-# bin -- harmless extras if unused, and they close the whole transitive-dep class
-# instead of chasing one missing DLL per CI cycle.
-foreach ($rt in @("libgcc_s_seh-1.dll", "libwinpthread-1.dll", "libstdc++-6.dll", "zlib1.dll", "libssp-0.dll")) {
-    $src = Join-Path $gccDir $rt
-    if (Test-Path -LiteralPath $src -PathType Leaf) {
-        Copy-IntoBin -SrcPath $src -DestName $rt
-    } elseif (Test-Path -LiteralPath (Join-Path $binDir $rt)) {
-        # An optional DLL absent from this selected compiler cannot survive from
-        # an older compiler's build directory.
-        Remove-Item -LiteralPath (Join-Path $binDir $rt) -Force
-    }
+# ── 6. The import closure: the VC++ and WinLibs runtime DLLs bin/ needs ─────
+# Every DLL an image in bin/ imports or delay-loads, and that is neither in
+# bin/ nor part of Windows (windows/release-os-dlls.txt), is copied from the
+# pinned sources: the conda-forge vc14_runtime package (clingo.dll's C++
+# runtime) and the selected WinLibs compiler's bin/ (libgcc_s and
+# libwinpthread for the MSYS2 OpenSSL DLLs), transitively, and nothing else.
+# This replaces the best-effort lists that staged the whole VC++ set and five
+# WinLibs DLLs "in case". A DLL an earlier build
+# staged and no image imports any more is removed. An import that no source
+# holds fails here; verify_release.sh then audits the packaged archive.
+$pkg = Expand-CondaPackage `
+    -Url "https://anaconda.org/conda-forge/vc14_runtime/14.44.35208/download/win-64/vc14_runtime-14.44.35208-h818238b_41.conda" `
+    -Sha256 "ec706fe9368b837fbd05af4851f5ebef12bef8c471a273f4805f7af788407317" `
+    -WorkDir (Join-Path $tmp "vc14_runtime")
+$vcSrcDir = Join-Path $pkg "Library/bin"
+try {
+    $staged = @(Copy-WindowsImportClosure -BinDir $binDir -SourceDirs @($vcSrcDir, $gccDir) -Arch $script:releaseArch `
+        -KeepNames @("libcrypto-3-x64.dll", "libssl-3-x64.dll", "clingo.dll", "libzstd.dll", "sqlite3_64.dll", "sqlite3.dll"))
+    Write-Host "  import closure staged: $(if ($staged.Count) { $staged -join ', ' } else { '(nothing)' })"
+} finally {
+    Remove-Item -LiteralPath (Split-Path -Parent $pkg) -Recurse -Force
 }
 
 Write-Host "=== Runtime DLL staging complete ==="
