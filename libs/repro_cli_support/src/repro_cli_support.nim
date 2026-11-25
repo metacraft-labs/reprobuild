@@ -44769,6 +44769,17 @@ proc parseCloneObjects(raw: string): string =
       raise newException(ValueError,
         "--clone-objects expects shared, private=<non-empty directory>, none or dissociate")
 
+proc cloneObjectsOf(given: Option[string]): string =
+  ## The policy a command line selects: "" (the default, `shared`) when
+  ## `--clone-objects` is absent, else its validated value. A flag given with
+  ## an empty value (`--clone-objects=`) is malformed, not a request for the
+  ## default, so it is refused here like any other bad value. Every verb calls
+  ## this while it converts its configuration, before it resolves a manifest
+  ## or touches the workspace, so the refusal is never hidden behind a later
+  ## one (issue 2026-11-24-workspace-init-refuses-on-the-missing-manifest-
+  ## before-validating-clone-objects).
+  if given.isNone: "" else: parseCloneObjects(given.get)
+
 proc cloneObjectsLabel(policy: string): string =
   if policy.len == 0: "shared" else: policy
 
@@ -45287,8 +45298,7 @@ proc workspaceInitArgsOf(c: ReproCommandLineWorkspaceInit;
   result.toolProvisioning =
     if c.toolProvisioning.len > 0: parseToolProvisioning(c.toolProvisioning)
     else: tpmPathOnly
-  if c.cloneObjects.len > 0:
-    result.cloneObjects = parseCloneObjects(c.cloneObjects)
+  result.cloneObjects = cloneObjectsOf(c.cloneObjects)
   # An opt-in flag. Public-only users pass this when a workspace lists a
   # private manifest layer they cannot fetch; the composer drops the
   # unreachable layer and the init proceeds with the public subset.
@@ -47201,8 +47211,7 @@ proc runWorkspaceInitFromUrl*(c: ReproCommandLineWorkspaceInit;
     toolProvisioning:
       (if c.toolProvisioning.len > 0: parseToolProvisioning(c.toolProvisioning)
        else: tpmPathOnly),
-    cloneObjects:
-      (if c.cloneObjects.len > 0: parseCloneObjects(c.cloneObjects) else: ""))
+    cloneObjects: cloneObjectsOf(c.cloneObjects))
   let resolution = resolveOrgRootRepoUrl(parsed.url, env)
 
   # ``--print-resolved-url``: resolution-only dry run (hermetic, no clone).
@@ -48014,8 +48023,7 @@ proc syncArgsOf[T](c: T): WorkspaceSyncArgs =
   ## ``workspace.toml``) keeps working; the full list drives the scoped-repo
   ## filter in ``resolveWorkspaceSyncProject``.
   result = defaultWorkspaceSyncArgs(c.workspaceRoot)
-  if c.cloneObjects.len > 0:
-    result.cloneObjects = parseCloneObjects(c.cloneObjects)
+  result.cloneObjects = cloneObjectsOf(c.cloneObjects)
   if c.toolProvisioning.len > 0:
     result.toolProvisioning = parseToolProvisioning(c.toolProvisioning)
   result.jobs = syncJobsOf(c.jobs, "--jobs")
@@ -56804,8 +56812,7 @@ proc pullArgsOf[T](c: T): WorkspacePullArgs =
   ## Mirrors ``sync``'s shape: an optional ``<project>`` positional
   ## (single-project mode) plus ``--workspace-root=PATH`` /
   ## ``--tool-provisioning=...``.
-  if c.cloneObjects.len > 0:
-    result.cloneObjects = parseCloneObjects(c.cloneObjects)
+  result.cloneObjects = cloneObjectsOf(c.cloneObjects)
   result.toolProvisioning =
     if c.toolProvisioning.len > 0: parseToolProvisioning(c.toolProvisioning)
     else: tpmPathOnly
@@ -87515,8 +87522,7 @@ proc branchArgsOf*[T](c: T; verb = "repro branch";
     if c.toolProvisioning.len > 0: parseToolProvisioning(c.toolProvisioning)
     else: tpmPathOnly
   result.workspaceRoot = c.workspaceRoot
-  if c.cloneObjects.len > 0:
-    result.cloneObjects = parseCloneObjects(c.cloneObjects)
+  result.cloneObjects = cloneObjectsOf(c.cloneObjects)
   let explicitBranch = c.branch
   result.existingBranch = c.existingBranch
   # ``--from=<role>`` or a shorthand.
@@ -102793,8 +102799,7 @@ proc runWorkspaceEnableCommand*(c: ReproCommandLineWorkspaceEnable): int =
   # `enable`'s real work IS a sync, so the report and the JSON digest
   # describing what happened are that sync's.
   var syncArgs = defaultWorkspaceSyncArgs(workspaceRoot)
-  if c.cloneObjects.len > 0:
-    syncArgs.cloneObjects = parseCloneObjects(c.cloneObjects)
+  syncArgs.cloneObjects = cloneObjectsOf(c.cloneObjects)
   syncArgs.jobs = syncJobsOf(c.jobs, "--jobs")
   syncArgs.jobsNetwork = syncJobsOf(c.jobsNetwork, "--jobs-network")
   syncArgs.jobsCheckout = syncJobsOf(c.jobsCheckout, "--jobs-checkout")
