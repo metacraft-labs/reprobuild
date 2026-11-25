@@ -64,6 +64,13 @@ proc tarballPackage*(dist: Distribution;
   ## would make this producer's output a tarball you can only unpack in
   ## one place, which is not what a tarball is for.
   var tree = stageInstallTree(dist, "tar", site)
+  # The shell completion of each executable with a ``cli:`` description,
+  # under the prefix's ``share/`` (the tree IS the prefix): read by the
+  # shells when the tarball is unpacked into a prefix they search
+  # (``/usr/local``, a profile). A Windows-shaped tree's PowerShell script
+  # is not placed here; Windows packages are a separate change.
+  if dist.targetOs != toWindows:
+    tree.addShellCompletion(prefixShellCompletionLayout(), site)
   let outPath = dist.outputDir & "/" & tarballArtifactName(dist)
   let edge = tarTool(
     create = true,

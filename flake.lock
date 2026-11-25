@@ -1213,17 +1213,17 @@
     "io-mon-src": {
       "flake": false,
       "locked": {
-        "lastModified": 1795474122,
-        "narHash": "sha256-aiIUljMFLYTTGeuXbBDSNunqBgB5u/siGdgwjf3fnfU=",
+        "lastModified": 1795564975,
+        "narHash": "sha256-rmvg5vre73K5rYhqbe2rCXgpqoyvuG2AIpV88f8sUIA=",
         "owner": "metacraft-labs",
         "repo": "io-mon",
-        "rev": "1365943692eedfb0699ce90e59c4602d90317561",
+        "rev": "0220662775e1c79028522d2d1787fa4d9ce7479a",
         "type": "github"
       },
       "original": {
         "owner": "metacraft-labs",
         "repo": "io-mon",
-        "rev": "1365943692eedfb0699ce90e59c4602d90317561",
+        "rev": "0220662775e1c79028522d2d1787fa4d9ce7479a",
         "type": "github"
       }
     },
@@ -1278,7 +1278,7 @@
           "nixos-modules",
           "nixpkgs"
         ],
-        "spectrum": "spectrum"
+        "spectrum": []
       },
       "locked": {
         "lastModified": 1778369133,
@@ -2156,11 +2156,11 @@
         "vscode-server": "vscode-server"
       },
       "locked": {
-        "lastModified": 1795265436,
-        "narHash": "sha256-nsjsWqquf7vedBRUXaeo3xGsOUp3PA3qsq529cRUo/Y=",
+        "lastModified": 1795494009,
+        "narHash": "sha256-g1UcoPq/8FDeL8tbGIzjbRrODY6koTNjcB7/cgah4Tc=",
         "owner": "metacraft-labs",
         "repo": "devops-modules",
-        "rev": "613b282bc2597b4af008c5b6c7e9f2c9609bdb3d",
+        "rev": "1d79a7b65ba071a2aab18e3ec547e94cf372fe72",
         "type": "github"
       },
       "original": {
@@ -2657,11 +2657,11 @@
         "runquota-package-catalog": "runquota-package-catalog"
       },
       "locked": {
-        "lastModified": 1795497045,
-        "narHash": "sha256-t/hgCyWNeQcL30zX1cWOnvAVVZbquE6lO05gKD6xUkw=",
+        "lastModified": 1795498935,
+        "narHash": "sha256-7Q7UokDVA6Uea1FYnPWDy+wxkmVKq7W1EQv/cYosfOU=",
         "owner": "metacraft-labs",
         "repo": "runquota",
-        "rev": "83d89e581d01c96eadb157bee48cecab6aba1866",
+        "rev": "f766cf21f2ccfb7f7904446f04888d92520d9644",
         "type": "github"
       },
       "original": {
@@ -2724,22 +2724,6 @@
         "owner": "andreymatin",
         "repo": "scss-reset",
         "type": "github"
-      }
-    },
-    "spectrum": {
-      "flake": false,
-      "locked": {
-        "lastModified": 1772189877,
-        "narHash": "sha256-i1p90Rgssb//aNiTDFq46ZG/fk3LmyRLChtp/9lddyA=",
-        "ref": "refs/heads/main",
-        "rev": "fe39e122d898f66e89ffa17d4f4209989ccb5358",
-        "revCount": 1255,
-        "type": "git",
-        "url": "https://spectrum-os.org/git/spectrum"
-      },
-      "original": {
-        "type": "git",
-        "url": "https://spectrum-os.org/git/spectrum"
       }
     },
     "stackable-hooks-macos-tools": {

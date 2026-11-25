@@ -16856,11 +16856,19 @@ proc unobservableRootImageNote(action: BuildAction;
   ## declares `uses: "gcc"`. On a macOS Nix dev shell the clang wrapper on
   ## PATH supplies `cc`, `clang`, `c++`, `ar` and `ld` and NOT `gcc`, so the
   ## bare name resolves to `/usr/bin/gcc` — Apple's SIP-protected xcrun shim.
-  ## The shipped example's link edge therefore published no record on any
-  ## build and relinked every time. Its compile edge runs the SAME image and
-  ## escapes only because its `-MD` depfile is a second evidence channel; its
-  ## `ar` archive edge escapes because `ar` IS in the wrapper. So the
-  ## asymmetry is per TOOL NAME, not per member kind.
+  ## Until io-mon dropped `gcc` and `g++` into the invocation's sandbox-tools
+  ## directory like the other `xcode_select` shims (MacOS-Monitoring.md
+  ## §"Apple toolchain drop-ins"), the root rewrite had nothing to redirect
+  ## that image to, so the shipped example's link edge published no record on
+  ## any build and relinked every time. Its compile edge was unaffected for a
+  ## different reason: it declares a depfile policy, not a monitor policy, so
+  ## it has no monitor evidence to lose.
+  ##
+  ## The note cannot see whether io-mon redirected the image: the drop-in
+  ## lives in the invocation's sandbox, which the engine does not inspect. So
+  ## the text states the condition ("while io-mon has no drop-in for it")
+  ## rather than asserting it. A redirected image whose edge still lost
+  ## evidence lost it for some other reason, and the advice does not apply.
   ##
   ## The prefix predicate is `sip_propagation.isSipProtected`, the same one
   ## io-mon uses, for the reason `resolveNonSipShell` gives: the engine and
@@ -16873,10 +16881,14 @@ proc unobservableRootImageNote(action: BuildAction;
     if image.len > 0 and sip_propagation.isSipProtected(image):
       return "The action's root image is " & image & ", which is " &
         "SIP-protected: macOS strips DYLD_INSERT_LIBRARIES when it execs a " &
-        "platform binary, so the monitor shim cannot load and this edge can " &
-        "never publish a cache record. Point the edge's tool name at a " &
-        "non-SIP image (on a Nix/Homebrew macOS host the clang wrapper's " &
-        "`cc`/`clang` rather than `/usr/bin/gcc`), or declare the edge " &
+        "platform binary, so the monitor shim cannot load in it. io-mon " &
+        "observes such an image only by running a non-SIP drop-in in its " &
+        "place: Apple's toolchain shims (`cc`, `gcc`, `clang`, `ld`, ...) " &
+        "when the active developer directory provides them, and shells and " &
+        "core tools with a non-SIP copy on PATH. While io-mon has no drop-in " &
+        "for this image, this edge can never publish a cache record. Point " &
+        "the edge's tool name at a non-SIP image (a Nix/Homebrew build of " &
+        "the tool on PATH ahead of /usr/bin), or declare the edge " &
         "`cacheable = false` so the permanent re-run is stated rather than " &
         "discovered."
     return ""

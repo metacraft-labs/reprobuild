@@ -11,6 +11,16 @@
     # Follow this flake itself so consumers retain one Reprobuild pin while
     # the module and Nixpkgs revisions remain independently pinned.
     nixos-modules.inputs.reprobuild.follows = "";
+    # microvm.nix, reached through this module input, locks `spectrum` from
+    # spectrum-os.org. microvm reads it only in its `cloud-hypervisor-graphics`
+    # overlay, which nothing here evaluates. While that host is down, every
+    # consumer that fetches all locked inputs (`nix flake archive`) fails.
+    # devops-modules drops the input from its own `microvm` and from its pin
+    # of this flake for that reason, and its
+    # `scripts/ci/check_flake_lock_sources.py` denies the host. A consumer
+    # that reaches this flake through `builtins.getFlake` uses this lock as is
+    # and cannot override the input, so it is dropped here too.
+    nixos-modules.inputs.microvm.inputs.spectrum.follows = "";
     nixpkgs.follows = "nixos-modules/nixpkgs-unstable";
     flake-parts.follows = "nixos-modules/flake-parts";
     git-hooks.follows = "nixos-modules/git-hooks-nix";
@@ -411,7 +421,12 @@
       # `libc.so.6` and the loader, as io-mon's builder's does. The range
       # also records each path-resolution observation once per process
       # (3d3077a).
-      url = "github:metacraft-labs/io-mon/1365943692eedfb0699ce90e59c4602d90317561";
+      # Bumped 13659436 -> 02206627 (2026-11-25, io-mon `agents`): on macOS
+      # `gcc` and `g++` get a toolchain drop-in like `cc` and `clang`, so a
+      # monitored edge whose bare `gcc` resolves to the SIP-protected
+      # `/usr/bin/gcc` shim (the C conventions' link edge on a Nix host) is
+      # observed and can be cached instead of re-running on every build.
+      url = "github:metacraft-labs/io-mon/0220662775e1c79028522d2d1787fa4d9ce7479a";
       flake = false;
     };
     nim-shm-gset-src = {

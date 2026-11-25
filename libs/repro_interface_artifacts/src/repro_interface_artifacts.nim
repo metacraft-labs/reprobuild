@@ -380,6 +380,13 @@ type
       ## unchanged; carried across lock-pinned fetches on the interface so a
       ## non-standard layout is known from the fetched interface alone.
     location*: SourceLocation
+    sourceGitlinks*: seq[GitlinkSourceRequirement]
+      ## Cross-Repo-Source-Consumption §4.2a.2a: the gitlinks the exported
+      ## source requires. Carried from v39 on, after ``location``; a v<39
+      ## payload decodes it empty, and a nonempty value is never written at
+      ## a version that cannot carry it (``writeLibrary`` refuses), so a
+      ## reader that cannot honour the requirement refuses the envelope by
+      ## version instead of compiling against source missing those trees.
 
   InterfaceResourceDeterminism* = enum
     ## RP4: the determinism class carried on an ``InterfaceResource``,
@@ -1332,8 +1339,19 @@ proc `==`*(a, b: InterfaceToolUse): bool {.noSideEffect.} =
 
 const
   EnvelopeMagic = [byte(ord('R')), byte(ord('B')), byte(ord('S')), byte(ord('Z'))]
-  EnvelopeVersion = 38'u16
-    ## v38 (current): ``ProjectInterface`` retains ``pinnedSiblings`` (the
+  EnvelopeVersion = 39'u16
+    ## v39 (current): ``InterfaceLibrary`` retains ``sourceGitlinks``
+    ##                (Cross-Repo-Source-Consumption §4.2a.2a), a ``u32``
+    ##                count plus one string per required gitlink path,
+    ##                appended after the row's ``location``. v38 and older
+    ##                payloads decode it empty. The requirement is mandatory
+    ##                source semantics, so the version is the refusal: a v38
+    ##                reader rejects every v39 envelope, and a nonempty
+    ##                declaration is never encoded at v<39 (``writeLibrary``
+    ##                raises) where it would be dropped. The fingerprint
+    ##                projection writes the block only when it is non-empty,
+    ##                so no fingerprint of a library declaring none moves.
+    ## v38: ``ProjectInterface`` retains ``pinnedSiblings`` (the
     ##                recipe's ``pinned:`` block, Unified-Locking-And-Hooks.md
     ##                §14.2 item 4), a string list after
     ##                ``provisioningContributions``. v37 and older payloads
@@ -2063,6 +2081,9 @@ proc readExecutable(bytes: openArray[byte]; pos: var int): InterfaceExecutable =
   for i in 0 ..< count:
     result.commands[i] = readCommand(bytes, pos)
 
+const FirstEnvelopeVersionWithSourceGitlinks = 39'u16
+  ## The first envelope version whose library rows carry ``sourceGitlinks``.
+
 proc writeLibrary(outp: var seq[byte]; lib: InterfaceLibrary;
                   version = EnvelopeVersion; forFingerprint = false) =
   outp.writeString(lib.name)
@@ -2072,6 +2093,20 @@ proc writeLibrary(outp: var seq[byte]; lib: InterfaceLibrary;
   if version >= 11'u16:
     outp.writeString(lib.exportedPath)
   outp.writeLocation(lib.location, forFingerprint)
+  # v39 (§4.2a.2a): ``sourceGitlinks`` at the row's tail. A version that
+  # cannot carry a nonempty requirement refuses instead of dropping it: the
+  # empty default is for a NEW reader decoding an old payload, never for an
+  # old payload standing in for a new mandatory requirement.
+  if version < FirstEnvelopeVersionWithSourceGitlinks:
+    if lib.sourceGitlinks.len > 0:
+      raiseEnvelopeError(eeMalformed, "interface library '" & lib.name &
+        "' declares sourceGitlinks, which interface envelope version " &
+        $version & " cannot carry (they need version " &
+        $FirstEnvelopeVersionWithSourceGitlinks & " or later)")
+  elif not forFingerprint or lib.sourceGitlinks.len > 0:
+    outp.writeU32Le(uint32(lib.sourceGitlinks.len))
+    for req in lib.sourceGitlinks:
+      outp.writeString(req.relativePath)
 
 proc readLibrary(bytes: openArray[byte]; pos: var int;
                  version = EnvelopeVersion): InterfaceLibrary =
@@ -2085,6 +2120,13 @@ proc readLibrary(bytes: openArray[byte]; pos: var int;
   if version >= 11'u16:
     result.exportedPath = readString(bytes, pos)
   result.location = readLocation(bytes, pos)
+  # v39 (§4.2a.2a). v<39 rows have none: decode the empty default.
+  if version >= FirstEnvelopeVersionWithSourceGitlinks:
+    let count = readElementCount(bytes, pos, 4)
+    result.sourceGitlinks = newSeq[GitlinkSourceRequirement](count)
+    for i in 0 ..< count:
+      result.sourceGitlinks[i] = GitlinkSourceRequirement(
+        relativePath: readString(bytes, pos))
 
 proc writeResource(outp: var seq[byte]; res: InterfaceResource;
                    forFingerprint = false) =
@@ -3697,7 +3739,8 @@ proc toProjectInterface*(pkg: PackageDef;
       name: lib.name,
       kind: lib.kind,
       exportedPath: lib.exportedPath,
-      location: SourceLocation(file: lib.sourceFile, line: lib.sourceLine)))
+      location: SourceLocation(file: lib.sourceFile, line: lib.sourceLine),
+      sourceGitlinks: lib.sourceGitlinks))
   # RP4 (Provider-Runtime-Protocol-v1 §5): fold every ``resourceType``
   # declaration into the interface. Resource types are declared at
   # module scope (like ``registerResourceProvider``), not lexically
@@ -7217,6 +7260,18 @@ proc writeReproLibFingerprintMemo(path: string; stamps: openArray[FileStamp];
     let tmp = path & "." & $getCurrentProcessId() & ".tmp"
     writeFile(extendedPath(tmp), toByteString(payload))
     moveFile(extendedPath(tmp), extendedPath(path))
+  except CatchableError, OSError:
+    discard
+
+proc dropReproLibFingerprintMemo(workDir: string) =
+  ## Remove this process's memo of ``workDir``'s library fingerprint, if it
+  ## keeps one, so the next ``reproLibSourceFingerprint`` re-hashes the
+  ## sources. Used when a memoized answer is found not to match them.
+  if reproLibFingerprintMemoDir.len == 0:
+    return
+  try:
+    removeFile(extendedPath(reproLibFingerprintMemoPath(
+      reproLibFingerprintMemoDir, workDir)))
   except CatchableError, OSError:
     discard
 
@@ -11999,6 +12054,19 @@ type
       ## Human-readable explanation. Non-empty whenever ``fresh`` is false,
       ## and also on the ``reconciled`` path. Always names the specific input,
       ## path or digest that produced the verdict.
+    foreignFingerprint*: bool
+      ## True when the artifact is internally consistent (right interface,
+      ## right binary path, binary bytes as described) but records a
+      ## ``providerFingerprint`` that is neither the planned one nor the one
+      ## the inputs produce now: it describes a compile of a DIFFERENT input
+      ## set. Only a cache or an earlier run can leave such an artifact.
+      ## ``verifyProviderCompileEdge`` recompiles a SERVED artifact on any
+      ## rejection, this one included; the flag tells this verdict apart
+      ## from the identity and self-consistency rejections above it.
+    recompiled*: bool
+      ## Set by ``verifyProviderCompileEdge`` when ``fresh`` was reached by
+      ## re-running the edge without the cache after its served outputs were
+      ## rejected. ``detail`` then says what was rejected and why.
 
 proc describeStampChange(before: FileStamp; after: FileStamp): string =
   if before.kind != after.kind:
@@ -12093,22 +12161,50 @@ proc providerCompileConsistencyAfterExecution*(plan: ProviderCompilePlan;
     return ProviderCompileConsistency(fresh: true)
 
   let changed = changedFingerprintInputs(plan)
+  # "Now" is read from the files themselves, never from the library
+  # fingerprint memo or the per-computation source-list scope
+  # (``reproLibSourceFingerprint``). Both of those answer "the same as last
+  # time" whenever the stamps they trust are unchanged, so a "now" taken
+  # through them equals the plan BY CONSTRUCTION whenever the plan came from
+  # them too -- and the verdict then reported "planned == now" for an input
+  # set nobody had re-read, and rejected an artifact that matched the sources
+  # as they are. The compile child never uses the memo, so this is the same
+  # reading it made.
   var currentFingerprint: ContentDigest
   var currentReadable = true
+  var currentLibFingerprint = ""
   try:
+    currentLibFingerprint = hashReproLibSources(
+      reproLibSourcesUncached(plan.workDir))
     currentFingerprint = providerFingerprintFor(plan.inputSources,
-      plan.interfaceFingerprint, plan.workDir)
+      plan.interfaceFingerprint, plan.workDir,
+      libFingerprint = currentLibFingerprint)
   except CatchableError:
     currentReadable = false
+  # A plan whose library fingerprint the sources no longer produce while no
+  # recorded stamp moved was planned from a memo that has gone stale. Drop
+  # the memo, so the next plan re-reads the sources instead of planning the
+  # same wrong key again.
+  let libMemoStale = currentReadable and
+    plan.frontendRuntimeIdentity.len > 0 and
+    plan.frontendRuntimeIdentity != currentLibFingerprint
+  if libMemoStale:
+    dropReproLibFingerprintMemo(plan.workDir)
+  let libNote =
+    if libMemoStale:
+      "  the plan's reprobuild library fingerprint is not the one its " &
+        "sources hash to now (" & plan.workDir & "); its memo was dropped\n"
+    else: ""
   if currentReadable and currentFingerprint == cached.providerFingerprint:
     return ProviderCompileConsistency(fresh: true, reconciled: true,
-      detail: "provider-compile inputs changed while the compile ran; the " &
-        "artifact matches the inputs as they stand now and was accepted\n" &
-        renderChangedInputs(changed))
+      detail: "provider-compile inputs changed while the compile ran, or " &
+        "the plan was computed from a stale memo; the artifact matches the " &
+        "inputs as they stand now and was accepted\n" &
+        renderChangedInputs(changed) & libNote)
 
-  ProviderCompileConsistency(fresh: false,
+  ProviderCompileConsistency(fresh: false, foreignFingerprint: true,
     detail: "the artifact does not match the sources it was compiled from\n" &
-      renderChangedInputs(changed) &
+      renderChangedInputs(changed) & libNote &
       "  providerFingerprint planned:  " &
         toHex(plan.providerFingerprint.bytes) & "\n" &
       "  providerFingerprint recorded: " &
@@ -12116,6 +12212,81 @@ proc providerCompileConsistencyAfterExecution*(plan: ProviderCompilePlan;
       "  providerFingerprint now:      " &
         (if currentReadable: toHex(currentFingerprint.bytes)
          else: "<a provider-compile input could not be read>") & "\n")
+
+type
+  ProviderCompileEdgeRun* = object
+    ## What one execution of the provider-compile edge did, as
+    ## ``verifyProviderCompileEdge`` needs to know it.
+    compiled*: bool
+      ## The edge launched a compile in this run. False when its outputs
+      ## were restored from a cache or accepted as already up to date.
+    provenance*: string
+      ## Where the outputs came from, for diagnostics: the engine's status,
+      ## cache decision and reason for the edge.
+
+  ProviderCompileEdgeRunner* = proc (forceRebuild: bool): ProviderCompileEdgeRun
+    ## Runs the provider-compile edge once, leaving its artifact at the path
+    ## given to ``verifyProviderCompileEdge``. ``forceRebuild`` asks for a
+    ## compile that no cache may satisfy. It raises on a failed edge.
+
+proc indentDetail(detail: string): string =
+  for line in detail.splitLines:
+    if line.len > 0:
+      result.add("  " & line & "\n")
+
+proc verifyProviderCompileEdge*(plan: ProviderCompilePlan;
+                                artifactPath: string;
+                                runEdge: ProviderCompileEdgeRunner):
+    ProviderCompileConsistency =
+  ## Run the provider-compile edge and check what it left with
+  ## ``providerCompileConsistencyAfterExecution``. When the outputs were
+  ## SERVED (no compile ran) and the check rejects them, the edge is run
+  ## again with ``forceRebuild`` and checked again, instead of failing the
+  ## build.
+  ##
+  ## Why a rejected served artifact is recompiled rather than reported: the
+  ## check has just established that the artifact describes some other
+  ## compile, and whatever cache entry or earlier run left it will serve it
+  ## again on every later build. Reporting it would fail every build until
+  ## somebody found and cleared that entry by hand, which the build itself
+  ## can do: a compile the cache cannot satisfy replaces both the artifact
+  ## and the entry.
+  ##
+  ## An artifact the edge COMPILED in this run is not retried: the same
+  ## compile of the same inputs would record the same thing. The verdict's
+  ## ``detail`` then says the edge compiled, and names how both runs
+  ## arrived at their outputs when there were two, so the source of a bad
+  ## artifact is in the error rather than left to be guessed.
+  let first = runEdge(false)
+  result = providerCompileConsistencyAfterExecution(plan, artifactPath)
+  if result.fresh:
+    return
+  if first.compiled:
+    result.detail.add("  the edge compiled the provider in this run (" &
+      first.provenance & "), so a recompile would record the same " &
+      "fingerprint\n")
+    return
+  let rejected = result
+  # Nothing of the rejected artifact may survive into the second run: it is
+  # neither an input nor something the forced compile should find in place.
+  try:
+    removeFile(extendedPath(artifactPath))
+  except CatchableError, OSError:
+    discard
+  let second = runEdge(true)
+  result = providerCompileConsistencyAfterExecution(plan, artifactPath)
+  if result.fresh:
+    result.recompiled = true
+    result.detail = "the provider-compile edge's outputs were served " &
+      "without a compile (" & first.provenance & ") and do not describe " &
+      "this compile, so the provider was recompiled without the cache:\n" &
+      indentDetail(rejected.detail) & result.detail
+    return
+  result.detail = "the provider-compile edge's outputs were served without " &
+    "a compile (" & first.provenance & ") and were rejected:\n" &
+    indentDetail(rejected.detail) &
+    "recompiling without the cache (" & second.provenance & ") left an " &
+    "artifact that is rejected too:\n" & indentDetail(result.detail)
 
 proc readFreshProviderCompileArtifact*(artifactPath, modulePath,
                                        outputBinaryPath: string;

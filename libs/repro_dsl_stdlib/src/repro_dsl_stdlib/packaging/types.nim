@@ -605,6 +605,21 @@ type
       ## property uniform: every format's timestamps come from this one
       ## number, and a recipe that wants a different one changes it
       ## once. ``DefaultSourceDateEpoch`` explains the value.
+    omitShellCompletion*: bool
+      ## The opt-out from the shell completion files every producer adds
+      ## on its own.
+      ##
+      ## When an ``executable`` component is built by a Nim compile of an
+      ## executable whose ``repro.nim`` declaration has a ``cli:`` section,
+      ## each producer installs that executable's Bash, Zsh and Fish
+      ## completion scripts (PowerShell where the format has a place for
+      ## it) at the locations the format's shells read, with nothing
+      ## declared by the recipe: the scripts are generated from the
+      ## description by the executable's completion edge, never by running
+      ## the executable, so a package built for another machine gets them
+      ## too (``runtime_contract.addShellCompletion``). ``true`` ships none.
+      ## ``false`` (the default, and what an object literal leaves it at)
+      ## ships them.
 
 const
   DefaultPrivateLibSubdir* = "lib"
@@ -1016,7 +1031,12 @@ const
     "usr/lib/systemd", "usr/lib/systemd/system", "usr/lib/systemd/user",
     "usr/share/man", "usr/share/doc", "usr/share/applications",
     "usr/share/licenses", "usr/share/bash-completion",
-    "usr/share/bash-completion/completions"
+    "usr/share/bash-completion/completions",
+    # The shells' completion directories (``addShellCompletion``): the
+    # shells' own packages own them, as bash-completion owns its own.
+    "usr/share/zsh", "usr/share/zsh/site-functions",
+    "usr/share/zsh/vendor-completions", "usr/share/fish",
+    "usr/share/fish/vendor_completions.d"
   ]
     ## Root-relative directories a package must never claim OWNERSHIP
     ## of, however many of its files land in them.
