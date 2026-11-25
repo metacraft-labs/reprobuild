@@ -176,8 +176,16 @@ jobs:
           Remove-Item -LiteralPath (Join-Path $bin 'foreign.dll')
           $o = Invoke-Audit; $rc = $LASTEXITCODE; $o
           if ($rc -ne 0) { $failures += "(d) exit $rc" }
+          # (e) W5L1: an image outside bin/ is audited too. An x86 DLL in lib/
+          # fails the whole-archive audit; the tree passes again without it.
+          Copy-Item -LiteralPath $x86 -Destination (Join-Path $pkg 'lib\foreign.dll')
+          $o = & $winps -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File ./windows/audit-release-dll-closure.ps1 -ArchiveRoot $pkg -Arch arm64 2>&1; $rc = $LASTEXITCODE; $o
+          if ($rc -ne 1 -or -not (($o -join "`n") -match 'lib.foreign\.dll is a PE image for machine 0x014C')) { $failures += "(e) exit $rc" }
+          Remove-Item -LiteralPath (Join-Path $pkg 'lib\foreign.dll')
+          $o = & $winps -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File ./windows/audit-release-dll-closure.ps1 -ArchiveRoot $pkg -Arch arm64 2>&1; $rc = $LASTEXITCODE; $o
+          if ($rc -ne 0) { $failures += "(e') exit $rc" }
           if ($failures.Count) { throw "negative controls failed: $($failures -join '; ')" }
-          'negative controls: all four behaved as expected'
+          'negative controls: all behaved as expected'
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -185,3 +193,42 @@ jobs:
           path: evidence/
           if-no-files-found: warn
           retention-days: 30
+
+  # W5L1: the x64 archive runs the same audit. No build: the published
+  # v0.2.35 x64 archive is audited on an x64 Windows host, under its real
+  # System32, with Windows PowerShell as verify_release.sh runs it.
+  x64-archive:
+    runs-on: [self-hosted, windows, x64]
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: powershell -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File {0}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Audit the published v0.2.35 windows-x86_64 archive
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ProgressPreference = 'SilentlyContinue'
+          "runner: $env:RUNNER_NAME  PROCESSOR_ARCHITECTURE: $env:PROCESSOR_ARCHITECTURE"
+          $w = Join-Path $env:RUNNER_TEMP 'wam3-x64'
+          if (Test-Path -LiteralPath $w) { Remove-Item -LiteralPath $w -Recurse -Force }
+          New-Item -ItemType Directory -Path $w | Out-Null
+          $zip = Join-Path $w 'reprobuild-0.2.35-windows-x86_64.zip'
+          Invoke-WebRequest -Uri 'https://github.com/metacraft-labs/reprobuild/releases/download/v0.2.35/reprobuild-0.2.35-windows-x86_64.zip' -OutFile $zip
+          (Get-FileHash -Algorithm SHA256 $zip).Hash
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          [System.IO.Compression.ZipFile]::ExtractToDirectory($zip, (Join-Path $w 'x'))
+          $pkg = @(Get-ChildItem -LiteralPath (Join-Path $w 'x') -Directory)[0].FullName
+          $winps = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+          $failures = @()
+          $ErrorActionPreference = 'Continue'
+          $o = & $winps -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File ./windows/audit-release-dll-closure.ps1 -ArchiveRoot $pkg -Arch x64 2>&1; $rc = $LASTEXITCODE; $o
+          if ($rc -ne 0) { $failures += "x64 archive: exit $rc" }
+          # Negative control: an x86 DLL in lib/ fails the x64 audit.
+          Copy-Item -LiteralPath (Join-Path $env:SystemRoot 'SysWOW64\version.dll') -Destination (Join-Path $pkg 'lib\foreign.dll')
+          $o = & $winps -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File ./windows/audit-release-dll-closure.ps1 -ArchiveRoot $pkg -Arch x64 2>&1; $rc = $LASTEXITCODE; $o
+          if ($rc -ne 1 -or -not (($o -join "`n") -match 'lib.foreign\.dll is a PE image for machine 0x014C')) { $failures += "x64 negative control: exit $rc" }
+          if ($failures.Count) { throw ($failures -join '; ') }
+          'x64 archive audit: passed, and the negative control was refused'
