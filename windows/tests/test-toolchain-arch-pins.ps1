@@ -295,21 +295,31 @@ try {
   # in a child process, as the release runs it, and answers by exit code.
   $auditScript = Join-Path $windowsDir "audit-release-dll-closure.ps1"
   $shell = (Get-Process -Id $PID).Path
+  function Invoke-AuditScript {
+    ## Run the entry point in a child shell; return its output as strings.
+    ## The child reports a refusal on stderr. Windows PowerShell 5.1 turns
+    ## each redirected stderr line into an error record, which this file's
+    ## "Stop" preference would raise before the exit code could be checked.
+    param([string]$Bin)
+    $ErrorActionPreference = "Continue"
+    $out = & $shell -NoProfile -NonInteractive -File $auditScript -BinDir $Bin -Arch arm64 -SystemDir $synthSys 2>&1
+    return @($out | ForEach-Object { "$_" })
+  }
   Check "the archive audit entry point accepts a closed bin/" {
-    $out = & $shell -NoProfile -NonInteractive -File $auditScript -BinDir $synthBin -Arch arm64 -SystemDir $synthSys 2>&1
+    $out = Invoke-AuditScript -Bin $synthBin
     if ($LASTEXITCODE -ne 0) { throw "exit $LASTEXITCODE`n$($out -join "`n")" }
     if (-not (($out -join "`n") -match 'closure audit: 3 image\(s\)')) { throw "no audit summary in:`n$($out -join "`n")" }
   }
   Check "the archive audit entry point refuses an open bin/ with exit 1" {
     Remove-Item -LiteralPath (Join-Path $synthBin "libbar.dll")
-    $out = & $shell -NoProfile -NonInteractive -File $auditScript -BinDir $synthBin -Arch arm64 -SystemDir $synthSys 2>&1
+    $out = Invoke-AuditScript -Bin $synthBin
     if ($LASTEXITCODE -ne 1) { throw "exit $LASTEXITCODE, expected 1`n$($out -join "`n")" }
     if (-not (($out -join "`n") -match 'delay-loads libbar\.dll')) { throw "violation not named in:`n$($out -join "`n")" }
   }
   Check "the archive audit entry point refuses a bin/ with no images" {
     $empty = Join-Path $synth "empty"
     New-Item -ItemType Directory -Path $empty | Out-Null
-    $out = & $shell -NoProfile -NonInteractive -File $auditScript -BinDir $empty -Arch arm64 -SystemDir $synthSys 2>&1
+    $out = Invoke-AuditScript -Bin $empty
     if ($LASTEXITCODE -ne 1) { throw "exit $LASTEXITCODE, expected 1`n$($out -join "`n")" }
   }
 } finally {
