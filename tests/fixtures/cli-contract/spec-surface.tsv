@@ -1142,6 +1142,7 @@ flag	repro workspace pull	--write-report
 command	repro workspace new
 flag	repro workspace new	--branch
 flag	repro workspace new	--clone-objects
+flag	repro workspace new	--except
 flag	repro workspace new	--existing-branch
 flag	repro workspace new	--fetch
 flag	repro workspace new	--from
@@ -1243,6 +1244,7 @@ flag	repro pull	--write-report
 command	repro branch
 flag	repro branch	--branch
 flag	repro branch	--clone-objects
+flag	repro branch	--except
 flag	repro branch	--existing-branch
 flag	repro branch	--fetch
 flag	repro branch	--from
