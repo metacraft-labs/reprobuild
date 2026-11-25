@@ -23,8 +23,9 @@
 ## 3c. **The re-assert sees the host's table** (A11 audit session 2, G4).
 ##    A reboot of the healthy host: the re-assert reports ``ok``, with no
 ##    finding about the table. Then the table is deleted and the re-assert
-##    run again: it reports the table ``missing`` (drift), not
-##    ``unreadable``. The observer unit then loads it again.
+##    run again (``reassert --boot``): it sees the table missing, not
+##    ``unreadable``, and reloads the observer, which loads it again (§13
+##    decision 187).
 ## 3d. **A re-pin reloads the table** (A11 review round 2). The cache
 ##    origin is a name in the base's ``/etc/hosts``; it moves to another
 ##    address and ``agent-repin`` applies the new plan: ``egress.nft``, the
@@ -44,7 +45,8 @@
 ##    observer deletes the table and leaves the observer active. ``verify``,
 ##    ``infra plan`` and the egress check leave it missing (read-only), and
 ##    the check's ``egress-observer-missing`` reaches the sink; the next
-##    agent apply reloads the observer and the table is back; a flush by
+##    apply (the operator's ``repro infra apply`` of the same profile)
+##    reloads the observer and the table is back; a flush by
 ##    hand, then the boot re-assertion (``repro-addon-reassert.service``
 ##    restarted: ``reassert --boot``), likewise.
 ## 4. **Uninstall removes it.** After uninstall the table is gone and the
@@ -216,16 +218,22 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
   record["reassertHealthy"] = %healthy
   step("a healthy reboot: the re-assert is ok, nothing about the table (G4)",
        "repro-addon reassert: ok" in healthy and
-         "nftTable" notin healthy, healthy)
+         "nftTable" notin healthy and "was missing" notin healthy, healthy)
   discard g.exec("nft delete table inet repro_addon_egress")
   discard g.exec("systemctl restart repro-addon-reassert.service",
                  timeoutSec = 900)
   let removed = g.exec("cat /var/lib/repro/system/addon/reassert-report").stdout
   record["reassertRemoved"] = %removed
-  step("the table deleted: the re-assert reports it missing (G4)",
-       "nftTable inet repro_addon_egress: missing" in removed, removed)
-  discard g.exec("systemctl restart repro-addon-egress.service")
-  step("the observer unit loads the table again",
+  # Since §13 decision 187 the boot re-assertion does not stop at reporting
+  # a missing table: it reloads the observer, which loads it again, and
+  # says so. Seeing it missing at all is what G4 needs: a re-assert that
+  # listed its own private namespace would also find it "missing" on the
+  # healthy reboot above.
+  step("the table deleted: the re-assert sees it missing and reloads it (G4)",
+       "egress table inet repro_addon_egress was missing; reloaded" in removed and
+         "nftTable inet repro_addon_egress: missing" notin removed,
+       removed)
+  step("the observer unit loaded the table again",
        "table inet repro_addon_egress" in g.exec("nft list tables").stdout, "")
   # 3d. A re-pin reloads the kernel's table (A11 review round 2): the cache
   # name moves to another address, `agent-repin` re-renders the fetch unit
@@ -353,13 +361,15 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
                     since = sinceMissing),
        g.exec("journalctl -q -o cat -u repro-addon-egress-check.service | " &
               "tail -20").stdout)
-  discard producer.publish(PublishSpec(sequence: 2,
-    profileText: canonicalFile("/etc/repro/a11-egress", "y\n")))
-  let t2 = g.tickUnits()
+  # The operator's apply of the same profile (`repro infra apply`, which
+  # runs the add-on's apply on an add-on host): every committed apply
+  # converges the missing table.
+  let ap = g.exec(repro & " infra apply --profile /var/tmp/a11-egress.profile",
+                  timeoutSec = 1800)
+  record["applyAfterFlush"] = %(ap.stdout & ap.stderr)
   step("3f: the next apply reloads the observer and the table is back",
-       t2.outcome == "aoApplied" and tableLoaded() and
-         observerState() == "active",
-       $t2 & " / " & g.exec("nft list tables").stdout)
+       ap.exitCode == 0 and tableLoaded() and observerState() == "active",
+       ap.stdout & ap.stderr & " / " & g.exec("nft list tables").stdout)
   discard g.exec("nft delete table inet repro_addon_egress")
   step("3f: a flush while the observer is active deletes the table again",
        not tableLoaded() and observerState() == "active", observerState())
