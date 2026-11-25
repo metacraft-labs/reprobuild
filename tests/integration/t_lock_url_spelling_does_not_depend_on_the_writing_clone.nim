@@ -150,7 +150,7 @@ suite "a committed lock's url spelling does not depend on the writing clone":
       let refreshed = readFile(fx.app / "repro.lock")
       checkpoint("lock after that refresh:\n" & refreshed)
       check fx.sameExceptOwnHead(refreshed, written)
-      check "ref = " notin linePrefixed(refreshed, "deps = [")
+      check "ref = " notin linePrefixed(refreshed, "deps = ")
       discard fx.git(fx.app, "add repro.lock")
       discard fx.git(fx.app, "commit -q -m refreshed")
 

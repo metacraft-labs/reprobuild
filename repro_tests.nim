@@ -9385,6 +9385,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_libs_repro_lock_tests_g01",
     singleReason: ""),
   TestSpec(
+    source: "libs/repro_lock/tests/t_a_lock_writes_one_dependency_per_line.nim",
+    binary: "build/test-bin/t_a_lock_writes_one_dependency_per_line",
+    defines: @[],
+    requiresReproBinary: false,
+    requiresMonitorShim: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_libs_repro_lock_tests_g01",
+    singleReason: ""),
+  TestSpec(
     source: "libs/repro_lock/tests/t_a_store_pin_carries_its_archive_through_the_lock.nim",
     binary: "build/test-bin/t_a_store_pin_carries_its_archive_through_the_lock",
     defines: @[],
