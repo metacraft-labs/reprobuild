@@ -327,6 +327,18 @@ EXPECT.update({
     # essential trigger's failure is dropped and the apply passes.
     "mutlateess": ("e2e_addon_to_reproos_conversion_keeps_state", "red",
                    "engine build late-essential-report-dropped"),
+    # A13 review round 15: the refusal of a drop-in that re-points triggers
+    # is not called before writes.
+    "mutprefixcall": ("e2e_addon_to_reproos_conversion_keeps_state", "red",
+                      "engine build dropin-refusal-before-writes-skipped"),
+    # §13 decision 190 (2026-11-25): a secret put restarts its consumer on
+    # the root definition the operator left loaded.
+    "mutsecretput": ("e2e_addon_adopt_hand_configured_service", "red",
+                     "add-on build secret-put-unjudged"),
+    # §13 decision 192 (2026-11-25): an apply that gives sshd the restore
+    # requirement is not refused.
+    "mutessreq": ("e2e_addon_to_reproos_conversion_keeps_state", "red",
+                  "engine build essential-restore-requirement-allowed"),
 })
 TARGET.update({
     "mutliveset": "a switch that changes only a service's credential judges it",
@@ -348,6 +360,9 @@ TARGET.update({
     "mutbootblock": "M4: at boot the re-assertion queues the start",
     "mutdeadactive": "M-B: a judged service a dead full apply held while it ran",
     "mutlateess": "decision 177(c): an essential trigger systemd links to a judged",
+    "mutprefixcall": "round 15: a drop-in on a dashed prefix keeping an instance",
+    "mutsecretput": "decision 190: with carried state on the host a secret put",
+    "mutessreq": "decision 192: an apply that would make sshd require",
 })
 
 ROUND4_PROBES = ["account", "timer", "pathfloored", "path", "host"]
@@ -482,12 +497,32 @@ def on_target_rec(kind, rec):
                 u.get("staged") not in (None, "active") and
                 u.get("active") not in (None, "active") and
                 u.get("recordLeft") == "")
+    if kind == "mutprefixcall":
+        # Red because the drop-in was written and the apply passed, not for
+        # another reason.
+        u = rec.get("prefixDropInRefused", {})
+        return (on_target(kind, steps) and u.get("exit") == 0 and
+                u.get("written") is True and u.get("refused") is False)
+    if kind == "mutsecretput":
+        # Red because the put restarted the probe on the root definition,
+        # not for another reason: the premise held and the probe ran as 0.
+        u = rec.get("secretPutJudged", {})
+        return (on_target(kind, steps) and u.get("loadedUserBefore") == "root"
+                and u.get("refused") is False and u.get("restarted") is True
+                and u.get("ranAsRoot") is True)
+    if kind == "mutessreq":
+        # Red because the apply passed and wrote onto sshd, not for another
+        # reason.
+        u = rec.get("essentialRequirementRefused", {})
+        return (on_target(kind, steps) and u.get("exit") == 0 and
+                u.get("refused") is False and u.get("written", "") != "")
     if kind == "mutlateess":
         # Red because the apply passed with the late essential trigger
         # linked, not for another reason: the probe could be staged (no
         # sshd.socket on the base) and nothing held it.
         u = rec.get("lateEssentialTrigger", {})
         return (on_target(kind, steps) and u.get("sshdSocketBefore") == "not-found" and
+                u.get("activeBefore") == "active" and
                 u.get("exit") == 0 and u.get("held") == "" and
                 u.get("named") is False)
     if kind == "mutdeadactive":
@@ -677,6 +712,9 @@ def on_target_rec(kind, rec):
                 dead_hold_order(rec.get("deadJudgedActive", {})) == "after-release" and
                 rec.get("essentialHostTrigger", {}).get("ok") is True and
                 rec.get("lateEssentialTrigger", {}).get("ok") is True and
+                rec.get("lateEssentialTrigger", {}).get("active") == "active" and
+                rec.get("prefixDropInRefused", {}).get("ok") is True and
+                rec.get("essentialRequirementRefused", {}).get("ok") is True and
                 rec.get("decisionEssential", {}).get("exit", 0) != 0 and
                 rec.get("decisionEssential", {}).get("refused") is True and
                 rec.get("decisionEssential", {}).get("dropInWritten") is False)
@@ -1035,6 +1073,11 @@ def green_incomplete(kind, rec):
                 or lc.get("exit") in (0, None)):
             return "liveCrossCheck %r, expected refused, not started, not root" % (
                 {k: lc.get(k) for k in ("exit", "started", "ranAsRoot")})
+        # §13 decision 190: a secret put with carried state on the host
+        # judges its consumer and refuses rather than restart it as root.
+        sp = rec.get("secretPutJudged")
+        if not isinstance(sp, dict) or sp.get("ok") is not True:
+            return "secretPutJudged %r, expected ok" % (sp,)
     return None
 
 

@@ -16458,6 +16458,26 @@ proc msvcInheritedSearchLists(action: BuildAction;
   else:
     discard
 
+proc withheldSeededSourceRoots*(): seq[string] =
+  ## ``NAME=`` for every source root this process seeded for its own nested
+  ## compiles (``repro_core/source_root.seededSourceRootNames``): an empty
+  ## value, because an action's environment is layered over this process's
+  ## and a layer can replace a variable but not remove it. Empty reads as
+  ## unset to every consumer, an inner ``repro`` included, which seeds its
+  ## own roots again.
+  ##
+  ## WHY. An action inherited them, and to a project's ``config.nims`` a set
+  ## ``IO_MON_SRC`` or ``CODETRACER_TRACE_FORMAT_NIM_SRC`` is a pinned tree
+  ## the caller chose: codetracer's takes it ahead of the workspace sibling.
+  ## So a project built by a packaged ``repro`` compiled against the copies
+  ## REPROBUILD was built against, whenever its caller had left the variable
+  ## unset (reprobuild-specs issue 2026-11-25-a-daemon-hosted-codetracer-
+  ## build-compiles-print-trace-against-a-trace-format-copy-without-
+  ## formarkerevent). A caller's own value is not a seed and still reaches
+  ## the action; a value the action declares is appended later and wins.
+  for name in seededSourceRootNames():
+    result.add(name & "=")
+
 proc launchChildEnv(action: BuildAction;
                     config: BuildEngineConfig): seq[string] =
   ## Nested-build resource model: an action's child process tree may itself
@@ -16491,6 +16511,9 @@ proc launchChildEnv(action: BuildAction;
   ## never invoke ``repro``. Any explicit ``action.env`` entry wins (appended
   ## after).
   result = @["REPROBUILD_NO_RUNQUOTA=1", "IO_MON_MUTE=1"]
+  # The engine's OWN source roots stay out of the action
+  # (``withheldSeededSourceRoots``).
+  result.add(withheldSeededSourceRoots())
   # In-Process-Monitor-Hosting P6 — **``PWD`` is the action's working
   # directory, on every launch path**, because otherwise the LAUNCHER's
   # working directory leaks into the ACTION's dependency evidence.
@@ -19863,6 +19886,15 @@ when not defined(windows):
     ## The variables that decide where the helper's ``nix`` reads its
     ## configuration and keeps its caches and temporary files.
 
+  proc nixHelperMountNamespace*(): string =
+    ## The mount namespace of this process, as ``mnt:[<inode>]`` (Linux), or
+    ## ``""`` where it cannot be read (other platforms, a hidden ``/proc``).
+    ## It names the filesystem view the caller's paths are resolved in.
+    try:
+      expandSymlink("/proc/self/ns/mnt")
+    except OSError, IOError:
+      ""
+
   proc nixDaemonHelperKey*(daemonExe: string): string =
     ## The identity of the helper this process would START: a digest of the
     ## resolved helper file's bytes, or ``""`` when only a bare name (a PATH
@@ -19888,12 +19920,21 @@ when not defined(windows):
     ## helper every other process then shared; once that caller deleted its
     ## directory, every fetch through the helper failed with ``could not find
     ## repository at '<deleted>/nix/tarball-cache-v2'`` until it idled out.
+    ##
+    ## THE FILESYSTEM VIEW IS PART OF THE IDENTITY. The caller sends paths
+    ## (workspace roots, recipe directories) that the helper must open, and
+    ## the helper sees only the mount namespace it was started in. A sandbox
+    ## shares ``/tmp`` -- so the socket -- with the host but has its own view
+    ## of ``$HOME``: a helper started in one answered the other with ``No
+    ## such file or directory`` for a directory that exists for the caller.
+    ## One helper per mount namespace keeps the sharing that is valid.
     if daemonExe.len == 0 or not fileExists(daemonExe):
       return ""
     try:
       var identity = readFile(daemonExe)
       for name in NixHelperEnvironment:
         identity.add("\0" & name & "=" & getEnv(name))
+      identity.add("\0mnt=" & nixHelperMountNamespace())
       toHex(weakFingerprintFromText(identity).bytes)[0 ..< 16]
     except IOError, OSError:
       ""
@@ -23940,9 +23981,25 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       buildPressure.takeReport(now))
 
   proc failRunningAction(index: int; message: string) =
+    # A QUEUED ACTION THAT FAILS GIVES ITS LEASE BACK. Nothing else would:
+    # the teardown skips a failed entry, and the daemon would later grant the
+    # still-queued lease to nobody, leaving it GRANTED with no child until the
+    # session close is refused ("session still owns leases", reprobuild-specs
+    # issue 2026-11-04-repro-build-fails-with-session-still-owns-leases-after-
+    # every-action-executed). A lease the daemon already removed (a denial)
+    # is not active, and a release that fails changes nothing about the
+    # failure this entry reports.
+    var withdrawal = ""
+    if running[index].processKind == rpkInlineRunQuotaPending:
+      try:
+        var queued = running[index].queuedRunQuotaProcess
+        cancelQueued(queued)
+        running[index].queuedRunQuotaProcess = queued
+      except CatchableError as err:
+        withdrawal = "; withdrawing its queued lease also failed: " & err.msg
     buildPressure.noteWithdrawn(running[index].id, pressureNowMicros())
     running[index].inlineFailure = inlineRunQuotaFailureResult(
-      running[index].id, message)
+      running[index].id, message & withdrawal)
     running[index].processKind = rpkInlineRunQuotaFailed
 
   # RunQuota queue-wait observability and bounds. See ``tickRunQuotaQueue``.
@@ -23980,16 +24037,26 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       # and with it ``repro exec`` -- with nothing on screen. A short window
       # keeps the loop turning; ``tickRunQuotaQueue`` owns the clock that
       # tells a quiet daemon from a wedged one.
-      let polled = pollRunQuotaGrantsBounded(inlineRunQuotaSession, 20)
+      var polled = pollRunQuotaGrantsBounded(inlineRunQuotaSession, 20)
       if polled.frameReceived:
         runQuotaLastAliveMs = engineNowMs()
-      for grant in polled.grants:
+      # EVERY DECISION OF THE BATCH IS CONSUMED. The daemon delivers each
+      # grant once and puts a reload's denials ahead of it in the same batch,
+      # so returning at the first failed entry dropped the grant behind it:
+      # its action waited forever for a grant already sent, and its lease
+      # stayed granted to nobody. The first failed entry is returned after
+      # the loop; a grant no pending action claims is released.
+      for grant in polled.grants.mitems:
+        var claimed = false
         for j in 0 ..< running.len:
           if running[j].processKind != rpkInlineRunQuotaPending:
             continue
           if running[j].queuedRunQuotaProcess.candidateId != grant.candidateId:
             continue
+          claimed = true
           if not grant.active or grant.queued:
+            # The daemon removed a denied lease from its table already.
+            running[j].queuedRunQuotaProcess.active = false
             # FOLLOWUP per docs/runquota-policy.md: a late denial on an
             # already-queued lease MUST delay-and-retry, not surface as
             # an asFailed ActionResult.  The proper fix is to re-offer
@@ -24001,7 +24068,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             # explicitly calls this out as a known gap.
             failRunningAction(j, "runquota denied queued lease: " &
               grant.diagnostic)
-            return j
+            if result < 0: result = j
+            break
           frontier.noteQueuedGrant(engineNowMs() - running[j].queuedAtMs)
           buildPressure.noteGranted(running[j].id, pressureNowMicros())
           try:
@@ -24012,9 +24080,19 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             running[j].processKind = rpkInlineRunQuota
             runResult.trace(running[j].id, "launched", "runquota-grant")
           except CatchableError as err:
+            # `startGrantedWithRunQuota` resolved the lease before raising
+            # (finished and released); nothing is left to withdraw.
+            running[j].queuedRunQuotaProcess.active = false
             failRunningAction(j, "runquota inline process failed: " & err.msg)
-            return j
+            if result < 0: result = j
           break
+        if not claimed:
+          try:
+            releaseUnclaimedGrant(grant)
+          except CatchableError:
+            # The lease is the session's; the close names it if it is still
+            # held then.
+            discard
     except CatchableError as err:
       for j in 0 ..< running.len:
         if running[j].processKind == rpkInlineRunQuotaPending:

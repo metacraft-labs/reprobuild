@@ -255,6 +255,16 @@ type
     lkBoth          ## Both static and shared (rare)
     lkHeaderOnly    ## No compile/link — just header export
 
+  GitlinkSourceRequirement* = object
+    ## Cross-Repo-Source-Consumption §4.2a.2a: one gitlink a library's
+    ## exported Nim source requires. ``relativePath`` is the normalized
+    ## repository-relative path of the gitlink (``src/isonim/layout/yoga``).
+    ## It is the WHOLE requirement on purpose: the source URL and commit are
+    ## derived from the selected source's ``.gitmodules`` and its mode-160000
+    ## tree entry, never restated here, and no action, command, script, pool,
+    ## environment, output, branch or revision override exists to set.
+    relativePath*: string
+
   LibraryDef* = object
     name*: string
     kind*: LibraryKind
@@ -268,6 +278,11 @@ type
       ## Empty means the convention default ``"src"`` (resolved at the splice
       ## seam), so an existing bare ``library foo`` exports ``<root>/src``
       ## unchanged; a non-standard layout sets it explicitly.
+    sourceGitlinks*: seq[GitlinkSourceRequirement]
+      ## Cross-Repo-Source-Consumption §4.2a.2a: the gitlinks the exported
+      ## source requires (``sourceGitlinks:`` in the ``library`` body). Empty
+      ## for every library that does not declare them, which keeps SC-12's
+      ## plain source projection.
     sourceFile*: string
     sourceLine*: int
 
@@ -2614,6 +2629,53 @@ proc sharedServiceReplaceRefusal*(): string =
     "decided. Write `append`, `appendOverride` or `appendForce` -- an " &
     "append at a high priority is authoritative and still not " &
     "destructive."
+
+proc gitlinkRequirementPathProblem*(path: string): string =
+  ## Cross-Repo-Source-Consumption §4.2a.2a, scope rule 1: why ``path`` is
+  ## not a normalized repository-relative gitlink path, or "" when it is.
+  ##
+  ## Lexical only, so the DSL parser can refuse a bad literal at macro time
+  ## and the engine can refuse the same value again when it reads a fetched
+  ## interface: absolute paths, drive letters, backslashes, empty, ``.`` or
+  ## ``..`` components and trailing separators are refused. Whether the path
+  ## lies inside the exported root, names a real gitlink and resolves
+  ## without a symlink escape is the engine's to check against the source.
+  if path.len == 0:
+    return "is empty"
+  if path[0] == '/':
+    return "is absolute"
+  if path.len >= 2 and path[1] == ':':
+    return "names a drive"
+  for ch in path:
+    if ch == '\\':
+      return "contains a backslash; use '/' separators"
+    if ch == '\0' or ord(ch) < 0x20:
+      return "contains a control character"
+  if path[^1] == '/':
+    return "ends with a separator"
+  var start = 0
+  for i in 0 .. path.len:
+    if i == path.len or path[i] == '/':
+      let part = path[start ..< i]
+      if part.len == 0:
+        return "contains an empty component"
+      if part == ".":
+        return "contains a '.' component"
+      if part == "..":
+        return "traverses with '..'"
+      if part == ".git":
+        return "names Git metadata"
+      start = i + 1
+  ""
+
+proc gitlinkPortableCaseKey*(path: string): string =
+  ## The key two gitlink paths collide under on a case-insensitive
+  ## filesystem (§4.2a.2a rule 1, "portable case collisions"): ASCII
+  ## lower-case. Two declared paths with one key are refused, because they
+  ## would compose onto the same directory on macOS and Windows.
+  result = newString(path.len)
+  for i, ch in path:
+    result[i] = if ch in {'A' .. 'Z'}: chr(ord(ch) + 32) else: ch
 
 func pinnedSiblingNameProblem*(name: string): string =
   ## Why ``name`` cannot be an entry of a package's ``pinned:`` block, or ""

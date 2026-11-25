@@ -198,7 +198,14 @@ suite "packaging: reprobuild's own distribution":
     var fromWrapper: seq[(string, string)] = @[]
     for (name, value) in reprobuildToolWrapperValues(reprobuildSample()):
       if value.startsWith(srcPrefix):
-        fromWrapper.add((name, value[srcPrefix.len .. ^1]))
+        # The wrapper sets the project-visible roots under their private
+        # spelling; the archive seeds the public name directly, recorded as
+        # a seed. Both name the same tree.
+        var seeded = name
+        for public in ProjectVisibleSourceRootNames:
+          if name == engineSourceRootName(public):
+            seeded = public
+        fromWrapper.add((seeded, value[srcPrefix.len .. ^1]))
     check fromWrapper == @InstalledSourcePackageTrees
     check InstalledSourceRootSubdir == ReprobuildSourceRootSubdir
     check InstalledSourceTreesSubdir == ReprobuildSourceSubdir

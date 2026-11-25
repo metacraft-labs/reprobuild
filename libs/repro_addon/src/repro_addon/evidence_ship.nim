@@ -70,6 +70,10 @@ type
     dpkgLog*: string
     bootIdPath*: string
     harvestStateDir*: string  ## the apt hook cursor's directory ("": stateDir)
+    dropDir*: string
+      ## The egress check's root drop directory (§13 decision 188), emptied
+      ## into the outbox by the privileged harvest; "" where nothing may
+      ## read it (the dynamic user's own view).
     confined*: bool
       ## The host's site as root sees it: a shipping run or credential
       ## check for it runs in the shipping unit's confinement, as its
@@ -109,7 +113,7 @@ proc defaultShipSite*(): ShipSite =
     credentialKey: EvidenceCredentialKeyPath, stateDir: EvidenceShipStateDir,
     harvestStateDir: EvidenceStateDir, confined: true,
     outbox: EvidenceOutboxPath, aptHookLog: AptHookLogPath,
-    dpkgLog: "/var/log/dpkg.log",
+    dpkgLog: "/var/log/dpkg.log", dropDir: EgressDropDir,
     bootIdPath: "/proc/sys/kernel/random/boot_id")
 
 proc unitShipSite*(): ShipSite =
@@ -126,6 +130,7 @@ proc unitShipSite*(): ShipSite =
   result.outbox = EvidenceShipUnitStateDir / "outbox"
   result.aptHookLog = ""
   result.harvestStateDir = ""
+  result.dropDir = ""
 
 proc parseEvidenceConf*(text: string): EvidenceConf =
   ## ``key = value`` lines (``generation0.renderEvidenceConf``).
@@ -222,6 +227,22 @@ proc harvestHookWrapperEvents*(site: ShipSite; host: string): int =
     r.senderPid = int32(getCurrentProcessId())
     writeOutboxRecord(site.outbox, r, parts[1])
     inc result
+
+proc harvestDropEntries*(dropDir, outbox: string): int =
+  ## The egress check's entries in its root drop directory, each moved into
+  ## the outbox (§13 decision 188): run as root, by the shipping unit's
+  ## privileged first step and by a root caller before its confined run.
+  ## ``takeDropEntries`` follows no link, takes regular files only, each
+  ## under ``DropEntryMaxBytes``, and removes anything else unread, which
+  ## is printed. Returns the count moved.
+  if dropDir.len == 0: return
+  var moved = 0
+  for refused in takeDropEntries(dropDir, DropEntryMaxBytes,
+      take = proc (e: DropEntry) =
+        writeOutboxEntry(outbox, e.name, e.bytes)
+        inc moved):
+    stderr.write("repro-addon evidence: drop entry " & refused & "\n")
+  moved
 
 const
   StaleOutboxMs* = 60_000'i64
@@ -613,6 +634,7 @@ proc shipFor*(site: ShipSite; conf: EvidenceConf; host: string;
     s.confined = false
     return runEvidenceShip(s, conf, host, forceHeartbeat)
   result.hookEvents = harvestHookWrapperEvents(site, host)
+  discard harvestDropEntries(site.dropDir, site.outbox)
   var cmd = @["evidence-ship", "--no-backoff"]
   if forceHeartbeat: cmd.add("--heartbeat")
   let r = runConfined(conf, cmd)
@@ -632,11 +654,17 @@ proc inConfinedRun(): bool =
 proc runEvidenceHarvestCommand*(): int =
   ## ``repro system addon evidence-harvest``: the shipping unit's
   ## privileged ``ExecStartPre=+`` step. Turns the apt hook wrapper's
-  ## events in root's log into outbox entries; reads nothing from the
-  ## network.
+  ## events in root's log into outbox entries, and moves the egress check's
+  ## entries from its root drop directory into the outbox (§13 decision
+  ## 188); reads nothing from the network.
   try:
-    let n = harvestHookWrapperEvents(defaultShipSite(), readHost())
+    let site = defaultShipSite()
+    let n = harvestHookWrapperEvents(site, readHost())
     if n > 0: stdout.write("evidence: " & $n & " apt hook event(s)\n")
+    # The egress check's entries (§13 decision 188).
+    let m = harvestDropEntries(site.dropDir, site.outbox)
+    if m > 0: stdout.write("evidence: " & $m & " egress check entr" &
+                           (if m == 1: "y" else: "ies") & "\n")
     0
   except CatchableError as e:
     stderr.write("repro system addon evidence-harvest: " & e.msg & "\n")

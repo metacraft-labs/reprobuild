@@ -976,11 +976,15 @@ proc triggerDropInRefusal*(p: SystemProfile): seq[string] =
   ## check refuses before it writes anything (the owner decision "refuse
   ## Service=/Unit= there", 2026-11-18, §13 decision 177; A13 review round
   ## 14): a drop-in on a dashed prefix (``systemd-.socket``, which applies
-  ## to ``systemd-networkd.socket`` and every unit the prefix names), on a
-  ## template (``foo@.socket``) or type-wide (``socket.d``) that sets
-  ## ``Service=``, ``Unit=`` or ``Sockets=`` -- it re-points triggers this
-  ## check cannot enumerate, an essential one among them. One line each,
-  ## naming the drop-in, its unit and the key.
+  ## to ``systemd-networkd.socket`` and every unit the prefix names; also
+  ## one that keeps an instance, ``app-@x.socket``, which applies to every
+  ## ``app-*@x.socket``, A13 review round 15) or on a template
+  ## (``foo@.socket``) that sets ``Service=``, ``Unit=`` or ``Sockets=`` --
+  ## it re-points triggers this check cannot enumerate, an essential one
+  ## among them. One line each, naming the drop-in, its unit and the key.
+  ## A type-wide drop-in (``socket.d``) never reaches here: the profile's
+  ## unit-name validation (``posix_system_parse.systemdUnitNameError``)
+  ## refuses a drop-in unit without a unit name.
   when ApplyMutation == "prefix-trigger-dropins-allowed":
     # FALSIFYING MUTATION: such a drop-in is let through.
     return
@@ -989,8 +993,12 @@ proc triggerDropInRefusal*(p: SystemProfile): seq[string] =
     let u = r.diUnit
     let dot = u.rfind('.')
     let stem = if dot > 0: u[0 ..< dot] else: ""
-    let typeWide = dot < 0 and u in ["socket", "timer", "path", "service"]
-    if not (typeWide or stem.endsWith("-") or stem.endsWith("@")): continue
+    # systemd reads ``<prefix>-@<instance>.<type>.d`` for every
+    # ``<prefix>-*@<instance>``: the part before any ``@`` is the prefix
+    # (``dropInApplies`` agrees).
+    let at = stem.find('@')
+    let prefixPart = if at >= 0: stem[0 ..< at] else: stem
+    if not (prefixPart.endsWith("-") or stem.endsWith("@")): continue
     var keys: seq[string]
     for line in systemdLogicalLines(r.diContent):
       let t = line.strip()
@@ -1554,6 +1562,32 @@ proc essentialInHoldSet*(units, requirers, triggers: openArray[string];
     names.add(unitIds(host, triggers))
   essentialHeld(names)
 
+when defined(posix):
+  proc essentialRequirementRefusal*(p: SystemProfile; dir, root: string;
+                                    host: LiveHost): seq[string] =
+    ## §13 decision 192 (the owner's "refuse such applies", 2026-11-25): while
+    ## carried state is installed, an apply whose restore-requirement set
+    ## (``carriedRequirementRoutes``) would include an essential unit
+    ## (``EssentialUnits``, decision 177) is refused before it writes
+    ## anything. A requirement on an essential unit would keep remote access
+    ## down at every boot whose restore fails, and waiting at every boot
+    ## whose restore hangs. Each unit is matched by its systemd ``Id=``
+    ## (``unitId``: an alias is the unit it names, a template is read through
+    ## its observation instance, and an instance through its template, as
+    ## decision 177 resolves them). One message per essential unit, naming it
+    ## and the route that gives it the requirement; empty when none.
+    when ApplyMutation == "essential-restore-requirement-allowed":
+      # FALSIFYING MUTATION: the requirement is written on an essential unit.
+      return
+    for r in carriedRequirementRoutes(p, dir, root):
+      let id = unitId(host, r.unit)
+      if not (isEssentialUnit(r.unit) or isEssentialUnit(id)): continue
+      let named = if id != r.unit: r.unit & " (" & id & ")" else: r.unit
+      result.add("ECarriedStatePending: " & named & " is essential and would " &
+        "require the carried-state restore: " & r.route & "; while carried " &
+        "state is installed such an apply is refused, so that remote access " &
+        "never waits on the restore (§13 decision 192)")
+
 proc postReloadRequirers*(refused, held: openArray[string]; host: LiveHost):
     tuple[hold, essential: seq[string]] =
   ## After the drivers' reload: the units systemd's effective dependencies
@@ -1985,11 +2019,11 @@ when defined(posix):
     let ess = essentialInHoldSet(result.units & result.adopted,
                                  result.requirers, result.triggers, host)
     if ess.len > 0: raise essentialRefusal(ess)
-    # And a drop-in that re-points triggers it cannot list (the owner
-    # decision "refuse Service=/Unit= there", 2026-11-18).
-    let dropIns = triggerDropInRefusal(p)
-    if dropIns.len > 0:
-      raise newException(ECarriedStatePending, dropIns.join("; "))
+    # (A drop-in that re-points triggers the check cannot list is refused
+    # once, before the apply does anything: ``triggerDropInRefusal`` reads
+    # only the generation, which nothing between there and here changes, so
+    # a second refusal here could never be the one that acts -- A13 review
+    # round 15.)
     for u in result.adoptedActive:
       if u notin result.wasActive: result.wasActive.add(u)
     for u in result.requirers & result.adopted:
@@ -2288,10 +2322,30 @@ proc runInfraApply*(profileText: string; opts: ApplyOptions): ApplyResult =
       let essProfile = parseSystemProfile(essText)
       if liveReachUnits(essProfile, essDir, essRoot).len > 0:
         let refused = triggerDropInRefusal(essProfile)
-        if refused.len > 0:
-          raise newException(ECarriedStatePending, refused.join("; "))
+        when ApplyMutation == "dropin-refusal-before-writes-skipped":
+          # FALSIFYING MUTATION: the refusal's only call site is skipped.
+          discard refused
+        else:
+          if refused.len > 0:
+            raise newException(ECarriedStatePending, refused.join("; "))
       let ess = essentialRefusalBeforeWrites(essText, essDir, essRoot)
       if ess.len > 0: raise essentialRefusal(ess)
+  # Before anything at all, too, while carried state is installed: an
+  # essential unit the generation would make require the restore refuses
+  # the apply (§13 decision 192). After the two refusals above, which
+  # name a more specific reason when they apply.
+  when defined(posix):
+    if not opts.carriedStateChecked:
+      let reqDir = if opts.carriedStateDir.len > 0: opts.carriedStateDir
+                   else: CarriedStateDir
+      let reqRoot = if opts.carriedStateRoot.len > 0: opts.carriedStateRoot
+                    else: "/"
+      if carriedStateInstalled(reqDir):
+        let host = if reqRoot == "/": liveHost() else: LiveHost()
+        let refused = essentialRequirementRefusal(
+          parseSystemProfile(profileText), reqDir, reqRoot, host)
+        if refused.len > 0:
+          raise newException(ECarriedStatePending, refused.join("; "))
   # Before any mutation: an add-on switch interrupted on this host (its
   # pending marker present, its owner gone) is recovered first, under the
   # lock this apply already holds, and the apply refuses if it cannot be.

@@ -227,3 +227,30 @@ proc producerChannelContent*(selector: string;
     result.digest = toHex(blake3DomainDigest(
       walk.payload.toOpenArrayByte(0, walk.payload.high),
       hdActionFingerprint).bytes)
+
+proc treeContentDigest*(label, dir: string): ProducerChannelContent =
+  ## The same Merkle-style content identity as ``producerChannelContent``,
+  ## for ONE tree framed by ``label`` instead of by its absolute path, so two
+  ## copies of one tree in different places have one digest. The gitlink
+  ## source composition (§4.2a.2a) uses it to bind the snapshot it took to
+  ## the source it took it from: the source tree and its copy are digested
+  ## under the same label and must agree, or the source changed underneath
+  ## the snapshot. ``.git`` entries are skipped exactly as above.
+  var walk = ChannelWalk(complete: true)
+  walk.record(ProducerChannelContentVersion, "tree", label)
+  let path = extendedPath(dir)
+  var exists = false
+  try:
+    exists = dirExists(path) or fileExists(path) or symlinkExists(path)
+  except CatchableError as err:
+    walk.fail(dir, "cannot be stat'ed: " & err.msg)
+  if not exists:
+    walk.record("absent")
+  else:
+    walk.recordEntry(dir, "")
+  result.complete = walk.complete
+  result.failure = walk.failure
+  if walk.complete:
+    result.digest = toHex(blake3DomainDigest(
+      walk.payload.toOpenArrayByte(0, walk.payload.high),
+      hdActionFingerprint).bytes)

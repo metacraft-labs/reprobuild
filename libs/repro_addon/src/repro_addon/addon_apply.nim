@@ -89,6 +89,7 @@ import repro_local_store/store
 
 import ./agent_record
 import ./collision
+import ./egress_converge
 import ./own_profile
 import ./boot_holds
 import ./contain_marker
@@ -307,6 +308,9 @@ type
       ## the host's namespaces after step 6.
     retentionDropped*: seq[string] ## generations whose store roots the
                                    ## retention policy released
+    egressConverged*: seq[string]  ## what the apply did about a missing
+                                   ## egress table (§13 decision 187,
+                                   ## ``egress_converge``)
     planId*: string                ## the add-on plan id (spec §7.1): the
                                    ## digest of everything the plan was
                                    ## computed from (``planIdOf``)
@@ -9345,12 +9349,29 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
   ## nothing and record nothing.
   inc applyDepth
   defer: dec applyDepth
-  if applyDepth > 1 or opts.planOnly or opts.recordOnly:
-    return applyGenerationUnrecorded(opts)
   let stateDir = if opts.stateDir.len > 0: opts.stateDir else: DefaultStateDir
+  if applyDepth > 1 or opts.planOnly or opts.recordOnly:
+    result = applyGenerationUnrecorded(opts)
+    if opts.planOnly and applyDepth == 1:
+      # A plan is read-only: a missing egress table is reported, never
+      # reloaded (§13 decision 187).
+      try:
+        result.egressConverged =
+          readOnlyMustNotReload(readLedger(ledgerCopyPath(stateDir)))
+      except CatchableError: discard
+    return
   try:
     result = applyGenerationUnrecorded(opts)
   except CatchableError as e:
     recordApplyEvidence(opts, stateDir, AddonApplyResult(), e)
     raise
   recordApplyEvidence(opts, stateDir, result, nil)
+  # §13 decision 187: an apply converges a live lcNftTable "missing" drift
+  # (a start of nftables.service, or any flush, while the observer is
+  # active) by reloading the observer unit; PID 1 does the load.
+  when not mutated("apply-skips-egress-reload"):
+    try:
+      result.egressConverged =
+        convergeEgressTable(readLedger(ledgerCopyPath(stateDir)))
+    except CatchableError as e:
+      result.egressConverged.add("the egress table was not checked: " & e.msg)
