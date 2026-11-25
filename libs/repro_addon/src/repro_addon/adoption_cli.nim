@@ -27,27 +27,48 @@ import ./state_sets
 const
   RestoreUnitName* = CarriedRestoreUnit
 
+const RestoreStartTimeout* = "90min"
+  ## The restore unit's start timeout (§13 decision 191). A oneshot has no
+  ## start timeout by default, so a hung extraction would leave the boot
+  ## reporting the restore as starting for ever. 90 minutes is §7.7's bound
+  ## on a boot-time recovery, and covers the largest archive a conversion is
+  ## expected to carry: a validator's or a beacon node's data directory of a
+  ## few hundred GB, read and verified at disk speed (well over 100 MB/s on
+  ## the hosts the add-on supports). A restore that needs longer fails at
+  ## every boot until an operator runs ``repro system state restore`` by
+  ## hand, which has no timeout.
+
 proc stateRestoreUnitText*(repro: string; carried: seq[string] = @[]): string =
   ## The first-boot unit a conversion installs with the carried directory
-  ## (spec §11.1). Ordered before ``sysinit.target``, so every service with
-  ## default dependencies starts after the restore, and ``Before=`` each
-  ## carried unit by name, so one without default dependencies does too;
-  ## after ``local-fs.target``, so ``/var`` and ``/srv`` are mounted. No
-  ## condition on the manifest: ``restore --boot`` decides, and fails when
-  ## carried state was installed here but its manifest is gone.
+  ## (spec §11.1). Ordered ``Before=`` each carried unit by name, so one
+  ## without default dependencies waits for it too, and every carried unit
+  ## requires it by its own drop-in; after ``local-fs.target``, so ``/var``
+  ## and ``/srv`` are mounted. Not before ``sysinit.target`` (§13 decision
+  ## 191, the owner's "both", 2026-11-25): a hung restore held every unit
+  ## with default dependencies -- sshd among them -- with no way in; the
+  ## units decision 60 leaves out of the requirement now run beside the
+  ## restore, which therefore refuses a target that fills while it runs
+  ## (``restoreStateSet``). Bounded by ``RestoreStartTimeout``: a restore
+  ## that does not finish fails, its carried units stay down, and the boot
+  ## goes on. No condition on the manifest: ``restore --boot`` decides, and
+  ## fails when carried state was installed here but its manifest is gone.
   let before = (when mutated("restore-unordered"): newSeq[string]()
                 else: carried)
+  let sysinit = (when mutated("restore-holds-sysinit"): "sysinit.target "
+                 else: "")
   "[Unit]\n" &
     "Description=Restore carried service state (Reprobuild)\n" &
     "DefaultDependencies=no\n" &
     "Wants=local-fs.target\n" &
     "After=local-fs.target\n" &
-    "Before=sysinit.target shutdown.target" &
+    "Before=" & sysinit & "shutdown.target" &
       (if before.len > 0: " " & before.join(" ") else: "") & "\n" &
     "Conflicts=shutdown.target\n" &
     "\n[Service]\n" &
     "Type=oneshot\n" &
     "RemainAfterExit=yes\n" &
+    (when mutated("restore-unbounded"): ""
+     else: "TimeoutStartSec=" & RestoreStartTimeout & "\n") &
     "ExecStart=" & repro & " system state restore --boot\n" &
     "\n[Install]\n" &
     "WantedBy=sysinit.target\n"

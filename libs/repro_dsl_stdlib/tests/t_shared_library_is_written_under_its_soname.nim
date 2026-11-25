@@ -38,6 +38,16 @@
 ## file>`` (``Library.linkDir``), and runs the generated gcc consumer link
 ## far enough to see ld open ``lib/libgreet.so``.
 ##
+## ``nim_library`` also ignored ``linkKind``: it always passed ``--app:lib``,
+## so a library declaring ``linkKind static`` came out as a shared library
+## with a SONAME. ``c_library`` writes ``lib/lib<soname>.a`` for it, and the
+## auto-lift contract (Reprobuild-Standard-Library.md, "Every Layer 1
+## constructor") takes the install path from ``declaredLinkKind``. The
+## "nim_library: linkKind static" suites hold it to that: an archive built
+## with ``--app:staticlib`` that a C program links, no SONAME, no symlink,
+## and a refusal under a zig target, where nim would archive with whatever
+## ``llvm-ar`` the host has.
+##
 ## WHAT IS EXERCISED, AND WHAT IS MOCKED. Nothing is mocked. Each case opens
 ## a real ``build:`` frame for a registered package whose ``library`` block
 ## declares the ``api:``, calls ``c_library`` as a recipe does, and reads the
@@ -47,7 +57,9 @@
 ## linked with ``-lgreet`` and started. It is skipped, by name, on a host
 ## without ``gcc`` and ``readelf`` on ``PATH``. The last ``nim_library`` case
 ## does the same with the ``nim c --app:lib`` edge, and is skipped, by name,
-## without ``nim``, ``gcc`` and ``readelf``.
+## without ``nim``, ``gcc`` and ``readelf``; the last case of all runs the
+## ``nim c --app:staticlib`` edge and links a C program against the archive,
+## and is skipped, by name, without ``nim`` and ``gcc``.
 
 import std/[os, osproc, sequtils, strtabs, strutils, unittest]
 
@@ -101,6 +113,11 @@ package sonameFixture:
   library archived:
     api:
       soname "archived"
+      sover "1"
+      linkKind static
+  library nimarchived:
+    api:
+      soname "nimarchived"
       sover "1"
       linkKind static
 
@@ -515,4 +532,88 @@ suite "a real nim c --app:lib run of the nim_library edge":
       check "Shared library: [libnimgreet.so.1]" in needed
       let (_, startCode) = uncontrolledExecCmdEx("./main", workingDir = root,
         env = newStringTable({"LD_LIBRARY_PATH": root / "lib"}))
+      check startCode == 0
+
+suite "nim_library: linkKind static builds a static archive":
+
+  test "native: --app:staticlib to lib/lib<soname>.a, no SONAME, no symlink":
+    withTarget("", proc() =
+      inBuild(proc() =
+        let lib = nim_library(into = "nimarchived",
+                              source = "src/nimarchived.nim")
+        let a = args(lib.install)
+        checkpoint("args(lib.install) was " & $a)
+        check lib.install.call.packageName == "nim"
+        check "appStaticLib=true" in a
+        check "appLib=true" notin a
+        check ("output=" & ("lib" / "libnimarchived.a")) in a
+        check lib.install.outputs == @["lib" / "libnimarchived.a"]
+        check passLValues(lib.install).allIt(not it.contains("-soname"))
+        check lib.linkKind == llkStatic
+        # A consumer's link searches the directory the archive is in.
+        check lib.linkDir == "lib"
+        check lib.linkTimeName.id.len == 0
+        check registeredBuildActions().allIt(
+          not it.id.startsWith("nim-library-link-time-name-"))))
+
+  test "zig target: refused, naming the library and the reason":
+    withTarget(ZigTriple, proc() =
+      inBuild(proc() =
+        try:
+          discard nim_library(into = "nimarchived",
+                              source = "src/nimarchived.nim")
+          checkpoint("nim_library accepted linkKind static under " & ZigTriple)
+          fail()
+        except ValueError as e:
+          checkpoint(e.msg)
+          check "nimarchived" in e.msg
+          check "linkKind static" in e.msg
+          check "llvm-ar" in e.msg
+        # Refused before the target's wrapper edge is registered.
+        check registeredBuildActions().len == 0))
+
+suite "a real nim c --app:staticlib run of the nim_library edge":
+
+  test "lib/libnimarchived.a is an archive a C program links and runs":
+    let nimExe = uncontrolledFindExe("nim")
+    let gcc = uncontrolledFindExe("gcc")
+    if nimExe.len == 0 or gcc.len == 0:
+      skip("needs nim and gcc on PATH (nim='" & nimExe & "', gcc='" & gcc &
+        "')")
+    else:
+      let root = getTempDir() / ("t_nim_staticlib_" & $getCurrentProcessId())
+      removeDir(root)
+      createDir(root / "src")
+      defer: removeDir(root)
+      writeFile(root / "src/nimarchived.nim",
+        "proc greet*(): cint {.exportc, cdecl.} = 42\n")
+      # An archive does not start the Nim runtime from a loader
+      # constructor, so its consumer calls ``NimMain()`` first (Nim.md,
+      # "Libraries (`nim_library`)").
+      writeFile(root / "main.c",
+        "int greet(void);\nvoid NimMain(void);\n" &
+        "int main(void) { NimMain(); return greet() == 42 ? 0 : 1; }\n")
+      proc run(argv: seq[string]): (string, int) =
+        checkpoint("$ " & argv.join(" "))
+        result = uncontrolledExecCmdEx(quoteShellCommand(argv), workingDir = root)
+        checkpoint(result[0])
+      var lib: Library
+      withTarget("", proc() =
+        inBuild(proc() =
+          lib = nim_library(into = "nimarchived",
+                            source = "src/nimarchived.nim")))
+      createDir(root / "lib")
+      let profile = PathOnlyToolProfile(resolvedExecutablePath: nimExe)
+      check run(argvForCall(lib.install.call, profile))[1] == 0
+      check fileExists(root / "lib/libnimarchived.a")
+      check not fileExists(root / "lib/libnimarchived.so.1")
+      if fileExists(root / "lib/libnimarchived.a"):
+        # The ``ar`` magic: a static archive, not a renamed shared object.
+        check readFile(root / "lib/libnimarchived.a").startsWith("!<arch>\n")
+      # ``-static`` is not asked for: an archive is the only file ``-l``
+      # can find, so a link that succeeds linked the archive.
+      check run(@[gcc, "-o", "main", "main.c", "-Llib", "-lnimarchived",
+                  "-lm"])[1] == 0
+      let (_, startCode) = uncontrolledExecCmdEx(
+        "." & DirSep & "main", workingDir = root)
       check startCode == 0

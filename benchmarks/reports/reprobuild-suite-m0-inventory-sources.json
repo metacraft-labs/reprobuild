@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 36,
-    "nimTestBinaries": 3259,
+    "nimTestBinaries": 3260,
     "pureUnitConsolidationGroups": 96,
     "pureUnitTests": 852,
     "staticallyDetectedRuntimeCompilerFlowTests": 163,
-    "testEntries": 3318
+    "testEntries": 3319
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1862,7 +1862,7 @@
       "integration": 1835,
       "platform/destructive": 206,
       "pure unit": 852,
-      "unclassified": 396
+      "unclassified": 397
     },
     "graphOwnedTestArtifacts": [
       {
@@ -2082,9 +2082,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 3259,
+    "nimTestBinaryCount": 3260,
     "pythonTestFileCount": 59,
-    "testEntryCount": 3318
+    "testEntryCount": 3319
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -6183,7 +6183,7 @@
             "workRoot",
             "wrapped"
           ],
-          "line": 1448,
+          "line": 1457,
           "path": "tests/integration/t_every_launch_path_is_monitored.nim",
           "patterns": [
             "cc"
@@ -10095,8 +10095,8 @@
       "owner": "libs/repro_addon",
       "requiresReproBinary": false,
       "source": "libs/repro_addon/tests/t_addon_carried_state_fails_closed.nim",
-      "sourceSuiteCount": 34,
-      "staticCaseCount": 192,
+      "sourceSuiteCount": 37,
+      "staticCaseCount": 201,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -20275,6 +20275,26 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_packaging_wrapper_keeps_project_source_roots_private",
+      "class": "unclassified",
+      "classificationReason": "mutates the process environment",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_build_engine",
+        "repro_dsl_stdlib",
+        "repro_interface_artifacts",
+        "repro_project_dsl"
+      ],
+      "owner": "libs/repro_dsl_stdlib",
+      "requiresReproBinary": false,
+      "source": "libs/repro_dsl_stdlib/tests/t_packaging_wrapper_keeps_project_source_roots_private.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 3,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_pinned_fetch",
       "class": "integration",
       "classificationReason": "subprocess or repro CLI invocation in test body",
@@ -20499,8 +20519,8 @@
       "owner": "libs/repro_dsl_stdlib",
       "requiresReproBinary": false,
       "source": "libs/repro_dsl_stdlib/tests/t_shared_library_is_written_under_its_soname.nim",
-      "sourceSuiteCount": 5,
-      "staticCaseCount": 18,
+      "sourceSuiteCount": 7,
+      "staticCaseCount": 21,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

@@ -1213,17 +1213,17 @@
     "io-mon-src": {
       "flake": false,
       "locked": {
-        "lastModified": 1795604940,
-        "narHash": "sha256-rv2tLRiEjfAQNZlLBlYb94czx/N7AHNE4H13Fa3vBK8=",
+        "lastModified": 1795614547,
+        "narHash": "sha256-yKPDv3YuTqtNgj3RPRZ65AUohjsiZGyBHHJ36J+BkLE=",
         "owner": "metacraft-labs",
         "repo": "io-mon",
-        "rev": "02ec141006286d268c0fa7dfabab5a94fc69c23e",
+        "rev": "1c1aa6783ff56eb46161b5c30ebc91b430e17200",
         "type": "github"
       },
       "original": {
         "owner": "metacraft-labs",
         "repo": "io-mon",
-        "rev": "02ec141006286d268c0fa7dfabab5a94fc69c23e",
+        "rev": "1c1aa6783ff56eb46161b5c30ebc91b430e17200",
         "type": "github"
       }
     },
@@ -1484,17 +1484,17 @@
     "nim-stackable-hooks-src": {
       "flake": false,
       "locked": {
-        "lastModified": 1795603945,
-        "narHash": "sha256-dKFuQRhx0s7eszg4/9+6tvMgtoGtqqOVxNeLPYXe+Xo=",
+        "lastModified": 1795613584,
+        "narHash": "sha256-ZIaKguffm9UQ6encIHN9+AveHiswb6UAK03J4huOwcM=",
         "owner": "metacraft-labs",
         "repo": "nim-stackable-hooks",
-        "rev": "0ada76e5f62ba63753a2cadbdcc4249b91482f2e",
+        "rev": "ec6b02d45180735d08611c5cece842d57f941966",
         "type": "github"
       },
       "original": {
         "owner": "metacraft-labs",
         "repo": "nim-stackable-hooks",
-        "rev": "0ada76e5f62ba63753a2cadbdcc4249b91482f2e",
+        "rev": "ec6b02d45180735d08611c5cece842d57f941966",
         "type": "github"
       }
     },

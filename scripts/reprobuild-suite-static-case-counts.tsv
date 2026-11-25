@@ -40,7 +40,7 @@ libs/repro_addon/tests/t_addon_agent_split.nim	nim	25
 libs/repro_addon/tests/t_addon_agent_staging_copy_streams.nim	nim	4
 libs/repro_addon/tests/t_addon_apt_hook_and_base_identity.nim	nim	21
 libs/repro_addon/tests/t_addon_boot_hold_and_gen0_upgrade.nim	nim	23
-libs/repro_addon/tests/t_addon_carried_state_fails_closed.nim	nim	192
+libs/repro_addon/tests/t_addon_carried_state_fails_closed.nim	nim	201
 libs/repro_addon/tests/t_addon_collision.nim	nim	38
 libs/repro_addon/tests/t_addon_confinement_probe_never_ships.nim	nim	5
 libs/repro_addon/tests/t_addon_contain_quiesces_before_record.nim	nim	7
@@ -585,6 +585,7 @@ libs/repro_dsl_stdlib/tests/t_packaging_shipped_payload.nim	nim	21
 libs/repro_dsl_stdlib/tests/t_packaging_source_root_stagers.nim	nim	3
 libs/repro_dsl_stdlib/tests/t_packaging_third_party_producer.nim	nim	6
 libs/repro_dsl_stdlib/tests/t_packaging_windows_loader_closure.nim	nim	8
+libs/repro_dsl_stdlib/tests/t_packaging_wrapper_keeps_project_source_roots_private.nim	nim	3
 libs/repro_dsl_stdlib/tests/t_pinned_fetch.nim	nim	5
 libs/repro_dsl_stdlib/tests/t_playwright_windows_realization.nim	nim	4
 libs/repro_dsl_stdlib/tests/t_prefix_layout.nim	nim	7
@@ -596,7 +597,7 @@ libs/repro_dsl_stdlib/tests/t_rust_nix_arm_realizes_release_archive.nim	nim	7
 libs/repro_dsl_stdlib/tests/t_rust_windows_arm64_tarball_arms.nim	nim	8
 libs/repro_dsl_stdlib/tests/t_s7_nim_c_declares_its_nimcache_as_derived.nim	nim	5
 libs/repro_dsl_stdlib/tests/t_sevenzip_bootstrap_matches_stdlib_catalog.nim	nim	2
-libs/repro_dsl_stdlib/tests/t_shared_library_is_written_under_its_soname.nim	nim	18
+libs/repro_dsl_stdlib/tests/t_shared_library_is_written_under_its_soname.nim	nim	21
 libs/repro_dsl_stdlib/tests/t_shell_entropy_is_not_blessed.nim	nim	5
 libs/repro_dsl_stdlib/tests/t_shell_extra_env.nim	nim	4
 libs/repro_dsl_stdlib/tests/t_sized_typed_tools.nim	nim	12
