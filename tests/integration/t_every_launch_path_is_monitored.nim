@@ -904,6 +904,9 @@ proc capabilitySurfaces(): seq[CapabilitySurface] =
                "finishCompleted", "cancelAndWait", "openRunQuotaSession",
                "close", "maxOfferBatchSize", "pollRunQuotaGrants",
                "cancelQueued", "defaultRunQuotaWindowsPipePath",
+               # A ReleaseLease on the session's connection for a grant no
+               # queued process claimed; it starts nothing.
+               "releaseUnclaimedGrant",
                "probeWindowsPipeOwner", "terminateStalePipeOwner",
                # The two halves of the terminate PRECONDITION.
                # ``terminateStalePipeOwner`` no longer takes a PID; it

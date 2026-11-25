@@ -68,6 +68,7 @@ import repro_infra/systemd_syntax
 import repro_infra/start_holds
 from repro_test_support import testCaseScratchSlug
 import repro_elevation
+from repro_elevation/posix_system_parse import systemdUnitNameError
 import repro_addon/[addon_apply, adoption_cli, reassert, state_sets, transitions]
 import repro_addon/agent_checks
 
@@ -151,6 +152,39 @@ proc carriedDir(): string =
 
 proc refusal(text: string; root: string): string =
   carriedStateRefusal(parseSystemProfile(text), carriedDir(), root)
+
+const PendingPrefix = "ECarriedStatePending: carried state is not restored yet: " &
+  "/var/lib/ethereum/validator ("
+
+proc pendingDecision(text, why, resource, reason: string): bool =
+  ## The oracle both refusal helpers share. ``why`` is ``refusal``'s answer;
+  ## ``refusal`` itself is called outside any ``try``, so a parse or fixture
+  ## error propagates and fails the test instead of counting as a refusal
+  ## (or, through ``check not``, as an admission).
+  ##
+  ## Admission is an empty answer, and only that. Any other answer must be a
+  ## pending refusal of the carried path ``/var/lib/ethereum/validator``,
+  ## naming a resource the case itself declares; anything else is an error
+  ## the case did not intend, and raises. ``resource`` (``kind:name``) and
+  ## ``reason`` pin the refusal further: when given, a refusal of another
+  ## resource or for another reason is not the one the case asserts.
+  checkpoint "refusal: " & why
+  if why.len == 0: return false
+  if not why.startsWith(PendingPrefix):
+    raise newException(ValueError, "not a carried-state refusal: " & why)
+  let named = why[PendingPrefix.len .. ^1]
+  let colon = named.find(':')
+  if colon < 0:
+    raise newException(ValueError, "a refusal naming no resource: " & why)
+  var stop = colon + 1
+  while stop < named.len and named[stop] notin {':', ')'}: inc stop
+  let name = named[colon + 1 ..< stop]
+  if ("\"" & name & "\"") notin text:
+    raise newException(ValueError, "a refusal of " & named[0 ..< stop] &
+      ", which the case does not declare: " & why)
+  if resource.len > 0 and named[0 ..< stop] != resource: return false
+  if reason.len > 0 and reason notin named[stop .. ^1]: return false
+  true
 
 suite "carried state fails closed":
   test "a directory replaced in place is pending, whatever its inode":
@@ -433,16 +467,18 @@ suite "carried state fails closed":
     check not dirExists(src / "out2")
 
 suite "reach is default-deny":
-  proc refused(text: string): bool =
-    var why = ""
-    try: why = refusal(text, fresh("dst-dd"))
-    except CatchableError as e: why = "PARSE: " & e.msg
-    checkpoint "refusal: " & why
-    why.startsWith("ECarriedStatePending")
+  proc refused(text: string; resource = ""; reason = ""): bool =
+    pendingDecision(text, refusal(text, fresh("dst-dd")), resource, reason)
 
   proc confinedWith(name, extra: string): string =
     unit(name, "[Service]\nProtectSystem=strict\nNoNewPrivileges=yes\nUser=app\n" & extra &
       "ExecStart=/bin/true\n")
+
+  test "this suite's helper lets a parse error through, as a failure":
+    # An unterminated stanza is the parser's error, not a decision: it must
+    # neither count as a refusal nor, through ``check not``, as admission.
+    expect ESystemProfileInvalid:
+      discard refused("systemd.systemUnit {\n  name = \"m.service\"\n")
 
   test "an optional (-) path reaches as the plain form does":
     # The gate's round-6 probes widen a unit to the carried directory with
@@ -578,16 +614,14 @@ suite "reach is default-deny":
 # (t_rev_a13r5_probe.nim, F1-F6), plus each host drop-in source.
 # ---------------------------------------------------------------------------
 
-proc pendingRefused(text: string; prepare: proc (root: string) = nil): bool =
+proc pendingRefused(text: string; prepare: proc (root: string) = nil;
+                    resource = ""; reason = ""): bool =
   ## Whether an apply of ``text`` is refused while the validator's carried
   ## directory is pending, on a scratch host ``prepare`` may add files to.
+  ## ``pendingDecision`` says what counts.
   let root = fresh("dst-r4")
   if prepare != nil: prepare(root)
-  var why = ""
-  try: why = refusal(text, root)
-  except CatchableError as e: why = "PARSE: " & e.msg
-  checkpoint "refusal: " & why
-  why.startsWith("ECarriedStatePending") or why.startsWith("PARSE")
+  pendingDecision(text, refusal(text, root), resource, reason)
 
 proc confinedR(name, extra: string): string =
   unit(name, "[Service]\nProtectSystem=strict\nNoNewPrivileges=yes\nUser=app\n" & extra &
@@ -597,6 +631,35 @@ proc hostFile(root, path, content: string) =
   createDir((root & path).parentDir)
   writeFile(root & path, content)
 
+suite "the refusal oracle counts only the refusal a case intends":
+  # A malformed profile: the parser rejects it before any carried-state
+  # decision. It must fail the case, never pass for a refusal or admission.
+  const Malformed = "systemd.systemUnit {\n  name = \"m.service\"\n  content = \"x\"\n"
+
+  test "an unrelated parse error propagates through both helpers":
+    # The parser's own error, so the case cannot pass on some other failure.
+    expect ESystemProfileInvalid:
+      discard pendingRefused(Malformed)
+    expect ESystemProfileInvalid:
+      discard pendingDecision(Malformed, refusal(Malformed, fresh("dst-or")), "", "")
+
+  test "a genuine refusal counts only for its own resource and reason":
+    let text = unit("or1.service",
+      "[Service]\nDynamicUser=yes\nNoNewPrivileges=yes\nUser=root\nExecStart=/bin/true\n")
+    check pendingRefused(text)
+    check pendingRefused(text, resource = "systemUnit:or1.service",
+                         reason = "runs as root (root)")
+    check not pendingRefused(text, resource = "systemUnit:other.service")
+    check not pendingRefused(text, reason = "holds the root group")
+
+  test "admission is an empty answer, and any other answer is an error":
+    let text = unit("or2.service", "[Service]\nExecStart=/bin/true\n")
+    check not pendingDecision(text, "", "", "")
+    expect ValueError:
+      discard pendingDecision(text, "ESomethingElse: no", "", "")
+    expect ValueError:
+      discard pendingDecision(text, PendingPrefix & "systemUnit:undeclared.service)", "", "")
+
 suite "reach judges the account systemd will use (round 4)":
   test "control: a confined unit of a non-root account elsewhere is let in":
     check not pendingRefused(confinedR("c0.service",
@@ -604,20 +667,25 @@ suite "reach judges the account systemd will use (round 4)":
 
   test "F1: DynamicUser=yes with User=root runs as root":
     check pendingRefused(unit("f1.service",
-      "[Service]\nDynamicUser=yes\nNoNewPrivileges=yes\nUser=root\nExecStart=/bin/true\n"))
+      "[Service]\nDynamicUser=yes\nNoNewPrivileges=yes\nUser=root\nExecStart=/bin/true\n"),
+      resource = "systemUnit:f1.service", reason = "runs as root (root)")
 
   test "F1b: DynamicUser=yes with Group=root holds gid 0":
     check pendingRefused(unit("f1b.service",
-      "[Service]\nDynamicUser=yes\nNoNewPrivileges=yes\nUser=app\nGroup=root\nExecStart=/bin/true\n"))
+      "[Service]\nDynamicUser=yes\nNoNewPrivileges=yes\nUser=app\nGroup=root\nExecStart=/bin/true\n"),
+      resource = "systemUnit:f1b.service", reason = "holds the root group (root)")
 
   test "F2: User=%U is the system manager's uid, 0":
     check pendingRefused(unit("f2.service",
-      "[Service]\nProtectSystem=strict\nNoNewPrivileges=yes\nUser=%U\nExecStart=/bin/true\n"))
+      "[Service]\nProtectSystem=strict\nNoNewPrivileges=yes\nUser=%U\nExecStart=/bin/true\n"),
+      resource = "systemUnit:f2.service", reason = "runs as root (0)")
 
   test "F2b: a template's User=%i names no account (DefaultInstance=root)":
     check pendingRefused(unit("f2b@.service",
       "[Service]\nProtectSystem=strict\nNoNewPrivileges=yes\nUser=%i\nExecStart=/bin/true\n" &
-      "[Install]\nWantedBy=multi-user.target\nDefaultInstance=root\n"))
+      "[Install]\nWantedBy=multi-user.target\nDefaultInstance=root\n"),
+      resource = "systemUnit:f2b@.service",
+      reason = "its account does not resolve: User=%i")
 
   test "a uid alias of root, and an account the host does not have, reach everything":
     check pendingRefused(confinedR("al.service", "ReadWritePaths=/var/lib/other\n"),
@@ -638,14 +706,17 @@ suite "reach reads every drop-in systemd applies (round 4)":
       "  content = \"[Timer]\nOnActiveSec=1\nUnit=c0.service\n\"\n}\n" &
       confinedR("c0.service", "") &
       "systemd.systemDropIn {\n  unit = \"t3.timer\"\n  name = \"20-retarget\"\n" &
-      "  content = \"[Timer]\nUnit=apt-daily.service\n\"\n}\n")
+      "  content = \"[Timer]\nUnit=apt-daily.service\n\"\n}\n",
+      resource = "systemTimer:t3.timer",
+      reason = "it starts apt-daily.service, which the profile does not define")
 
   test "F3b: a profile timer's drop-in with a section not understood":
     check pendingRefused("systemd.systemTimer {\n  name = \"t4.timer\"\n" &
       "  content = \"[Timer]\nOnActiveSec=1\nUnit=c0.service\n\"\n}\n" &
       confinedR("c0.service", "") &
       "systemd.systemDropIn {\n  unit = \"t4.timer\"\n  name = \"20-x\"\n" &
-      "  content = \"[X-Unknown]\nFoo=bar\n\"\n}\n")
+      "  content = \"[X-Unknown]\nFoo=bar\n\"\n}\n",
+      resource = "systemTimer:t4.timer", reason = "[X-Unknown] Foo= (not understood here)")
 
   test "control: a profile timer on a confined profile service is let in":
     check not pendingRefused("systemd.systemTimer {\n  name = \"t5.timer\"\n" &
@@ -724,7 +795,8 @@ suite "a path unit reaches the paths it watches (round 4)":
   test "F4: MakeDirectory= creates inside the carried directory":
     check pendingRefused(unit("f4.path",
       "[Path]\nDirectoryNotEmpty=/var/lib/ethereum/validator/spool\n" &
-      "MakeDirectory=yes\nUnit=c0.service\n") & confinedR("c0.service", ""))
+      "MakeDirectory=yes\nUnit=c0.service\n") & confinedR("c0.service", ""),
+      resource = "systemUnit:f4.path")
 
   test "a glob reaches the directory it is anchored in":
     check pendingRefused(unit("g.path",
@@ -3140,3 +3212,39 @@ Service=genalias.service
     check acceptTemplateOf("foo@x.socket", accept) == "foo@.service"
     check acceptTemplateOf("foo.socket", accept) == "foo@.service"
     check acceptTemplateOf("foo.socket", {"Accept": "no"}.toTable) == ""
+
+  # --- A13 review round 15 (the reviewer's probes P1-P10 as cases) ------
+  proc di15(unit, body: string): string =
+    "systemd.systemDropIn {\n  unit = \"" & unit & "\"\n  name = \"p\"\n  content = \"" & body & "\"\n}\n"
+  const Gen15 = "systemd.systemUnit {\n  name = \"gen.service\"\n  content = \"[Service]\nExecStart=/bin/true\n\"\n}\n"
+  proc refusal15(unit, body: string): seq[string] =
+    triggerDropInRefusal(parseSystemProfile(Gen15 & di15(unit, body)))
+
+  test "round 15: prefix and template drop-ins that re-point triggers are refused, -.socket, timers and paths included":
+    check refusal15("-.socket", "[Socket]\nService=gen.service\n").len == 1
+    check refusal15("systemd-.service", "[Service]\nSockets=sshd.socket\n").len == 1
+    check refusal15("bk-.timer", "[Timer]\nUnit=gen.service\n").len == 1
+    check refusal15("pp-.path", "[Path]\nUnit=gen.service\n").len == 1
+    check refusal15("pp@.path", "[Path]\nUnit=gen.service\n").len == 1
+    check refusal15("systemd-.socket", "[Socket]\nService = gen.service\n").len == 1
+
+  test "round 15: resource limits, comments and a named unit's drop-in are not refused here":
+    check refusal15("systemd-.service", "[Service]\nMemoryMax=1G\nCPUQuota=50%\n").len == 0
+    check refusal15("app@.service", "[Service]\nLimitNOFILE=4096\n").len == 0
+    check refusal15("x-.socket", "[Socket]\nBacklog=16\n# Service=gen.service\n").len == 0
+    check refusal15("ssh.socket", "[Socket]\nService=gen.service\n").len == 0
+
+  test "round 15: a type-wide drop-in is refused by the unit-name validation, never reaching the refusal":
+    check systemdUnitNameError("u", "socket").len > 0
+    check systemdUnitNameError("u", "-.socket").len == 0
+
+  test "P9: a dashed prefix that keeps an instance (app-@x.socket) setting Service= is refused":
+    check dropInApplies("app-@x.socket", "app-a@x.socket")
+    let r = refusal15("app-@x.socket", "[Socket]\nService=gen.service\n")
+    checkpoint $r
+    check r.len == 1 and "app-@x.socket sets Service=" in r[0]
+
+  test "P10: the same for Sockets= on gen-@x.service":
+    let r = refusal15("gen-@x.service", "[Service]\nSockets=sshd.socket\n")
+    checkpoint $r
+    check r.len == 1 and "gen-@x.service sets Sockets=" in r[0]

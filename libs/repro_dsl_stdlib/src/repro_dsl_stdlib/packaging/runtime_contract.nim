@@ -1957,6 +1957,163 @@ proc publicEntryPoints*(tree: StagedTree): seq[StagedFile] =
     if f.isPublicEntryPoint: result.add(f)
 
 # ---------------------------------------------------------------------------
+# Shell completion files.
+#
+# An executable whose ``repro.nim`` declaration has a ``cli:`` section and
+# that a Nim compile builds has a completion edge, which writes its Bash,
+# Zsh, Fish and PowerShell scripts from the description into the build tree
+# without running the executable (``repro_project_dsl``'s
+# ``cliCompletionFilesOf``). Every producer installs those files at the
+# places its format's shells read them, with nothing declared by the recipe:
+# the producer names a layout, and ``addShellCompletion`` stages the files
+# of each ``crExecutable`` component that has them, as ordinary install
+# edges whose inputs are the edge's outputs. ``Distribution.
+# omitShellCompletion`` is the opt-out.
+#
+# The scripts complete, and are named after, the name the package installs
+# the executable under (the component's install name), since that is the
+# command a user types.
+# ---------------------------------------------------------------------------
+
+type
+  ShellCompletionLayout* = object
+    ## Where a format puts each shell's completion file, as directories
+    ## relative to the staged tree's ROOT (``usr/share/...`` for a payload
+    ## rooted at ``/``, ``share/...`` for one rooted at the prefix). An
+    ## empty directory means the format ships no file for that shell.
+    bashDir*: string
+      ## ``<dir>/<program>``: bash-completion loads it on demand by the
+      ## command's name, so it carries no suffix.
+    zshDir*: string
+      ## ``<dir>/_<program>``: a directory on zsh's default ``fpath``.
+    fishDir*: string
+      ## ``<dir>/<program>.fish``.
+    powershellDir*: string
+      ## ``<dir>/<program>.ps1``. No Linux format has a place PowerShell
+      ## loads a script from by itself, so the Linux layouts leave it empty.
+
+  StagedCompletionFile* = object
+    ## One completion file a producer staged.
+    program*: string
+    shell*: string
+    rootRelPath*: string
+
+proc prefixShellCompletionLayout*(prefixToRoot: string = ""):
+    ShellCompletionLayout =
+  ## The layout of a tree that IS a prefix, or holds one at
+  ## ``prefixToRoot`` (root-relative, ``usr`` for an AppDir): the shells'
+  ## upstream directories under the prefix's ``share/``, which is also what
+  ## nixpkgs' ``installShellCompletion`` writes into a package's ``$out``.
+  let base =
+    (if prefixToRoot.len > 0: prefixToRoot.strip(chars = {'/'}) & "/"
+     else: "") & "share/"
+  ShellCompletionLayout(
+    bashDir: base & "bash-completion/completions",
+    zshDir: base & "zsh/site-functions",
+    fishDir: base & "fish/vendor_completions.d")
+
+proc systemShellCompletionLayout*(zshDir = "usr/share/zsh/site-functions"):
+    ShellCompletionLayout =
+  ## The layout of a native Linux package rooted at ``/``: the system
+  ## locations under ``/usr/share``, whatever the package's prefix, because
+  ## those are the directories the distribution's shells read (as systemd
+  ## units go under ``/lib/systemd`` whatever the prefix). ``zshDir`` is the
+  ## one that differs between distributions (Debian's
+  ## ``/usr/share/zsh/vendor-completions``).
+  ShellCompletionLayout(
+    bashDir: "usr/share/bash-completion/completions",
+    zshDir: zshDir,
+    fishDir: "usr/share/fish/vendor_completions.d")
+
+proc completionInstallName(shell, program: string): string =
+  case shell
+  of "bash": program
+  of "zsh": "_" & program
+  of "fish": program & ".fish"
+  of "powershell": program & ".ps1"
+  else: ""
+
+proc completionDirFor(layout: ShellCompletionLayout; shell: string): string =
+  case shell
+  of "bash": layout.bashDir
+  of "zsh": layout.zshDir
+  of "fish": layout.fishDir
+  of "powershell": layout.powershellDir
+  else: ""
+
+proc componentCompletionFiles*(component: DistComponent;
+                               site = noSite()): CliCompletionFileSet =
+  ## The completion files of ``component`` when it is an executable with a
+  ## ``cli:`` description that a Nim compile of the package builds, as the
+  ## package's completion edge writes them for the component's install name;
+  ## empty otherwise. Only the provider builds completion edges, so outside
+  ## it (a unit test calling a producer directly) this is always empty.
+  when defined(reproProviderMode):
+    if component.role == crExecutable:
+      result = cliCompletionFilesOf(site.packageName, component.buildPath,
+        defaultInstallName(component))
+  else:
+    discard component
+    discard site
+
+proc addShellCompletion*(tree: var StagedTree; layout: ShellCompletionLayout;
+                         site = noSite()): seq[StagedCompletionFile]
+    {.discardable.} =
+  ## Stage the completion files of every executable component of
+  ## ``tree.dist`` that has them (``componentCompletionFiles``) at
+  ## ``layout``'s places, mode 0644, after the completion edge that writes
+  ## them; nothing when ``tree.dist.omitShellCompletion``. A producer calls
+  ## this after ``stageInstallTree`` and before anything that lists the
+  ## tree's files (an rpm ``%files``, an Arch ``.MTREE``). Returns what it
+  ## staged.
+  if tree.dist.omitShellCompletion:
+    return
+  let posix = tree.dist.targetOs != toWindows
+  for component in tree.dist.components:
+    let set = componentCompletionFiles(component, site)
+    if set.program.len == 0:
+      continue
+    for file in set.files:
+      let dir = completionDirFor(layout, file.shell)
+      if dir.len == 0:
+        continue
+      let rootRel = dir.strip(chars = {'/'}) & "/" &
+        completionInstallName(file.shell, set.program)
+      var already = false
+      for staged in tree.files:
+        if staged.rootRelPath == rootRel:
+          already = true
+      if already:
+        # Two components installed under one name: the first one's file
+        # stands, as the first one's binary does.
+        continue
+      let target = tree.root & "/" & rootRel
+      let idHint = sanitizeIdPart(rootRel)
+      let edge =
+        if posix:
+          let e = installTool(
+            mode = "0644",
+            createParents = true,
+            preserveTimestamps = true,
+            source = file.path,
+            target = target,
+            actionId = tree.idPrefix & "completion-" & idHint,
+            # ``source`` is the tool's declared input, so a changed
+            # description (a changed script) re-stages the file.
+            after = @[set.edge])
+          declareProducerTool(site, e.id, InstallSelector)
+          e
+        else:
+          dslfs.copyFile(file.path, target,
+            actionId = tree.idPrefix & "completion-copy-" & idHint,
+            after = @[set.edge])
+      tree.files.add(StagedFile(rootRelPath: rootRel, edge: edge,
+        role: crDataFile, isPublicEntryPoint: false))
+      tree.terminal.add(edge)
+      result.add(StagedCompletionFile(program: set.program,
+        shell: file.shell, rootRelPath: rootRel))
+
+# ---------------------------------------------------------------------------
 # The reprobuild instance of the contract.
 # ---------------------------------------------------------------------------
 

@@ -51,6 +51,24 @@ Check "the arm64 C toolchain is pinned" {
     if ([string]::IsNullOrWhiteSpace($pins[$key])) { throw "$key missing" }
   }
 }
+Check "the arm64 clingo is pinned" {
+  foreach ($key in @("CLINGO_WIN_ARM64_URL", "CLINGO_WIN_ARM64_SHA256")) {
+    if ([string]::IsNullOrWhiteSpace($pins[$key])) { throw "$key missing" }
+  }
+}
+# §7.1: CLINGO_VERSION is shared by both legs, so the arm64 asset must be a
+# build of exactly that version. The producer encodes it in the release tag
+# and in the asset name; ensure-clingo.ps1 refuses a mismatched name at
+# install time, and this catches it before a host ever downloads.
+Check "the arm64 clingo asset is a producer build of CLINGO_VERSION" {
+  $version = [regex]::Escape($pins["CLINGO_VERSION"])
+  $pattern = ('^https://github\.com/metacraft-labs/reprobuild/releases/download/' +
+              'producer/clingo-windows-arm64/v' + $version + '-[1-9][0-9]*/' +
+              'clingo-' + $version + '-windows-arm64-[0-9a-f]{12}\.zip$')
+  if ($pins["CLINGO_WIN_ARM64_URL"] -notmatch $pattern) {
+    throw "CLINGO_WIN_ARM64_URL '$($pins['CLINGO_WIN_ARM64_URL'])' does not match $pattern"
+  }
+}
 
 Write-Host "Get-ToolchainArchPin"
 $table = @{

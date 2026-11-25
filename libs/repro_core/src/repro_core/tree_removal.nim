@@ -15,6 +15,8 @@ when defined(windows):
     stdcall, dynlib: "kernel32", importc: "RemoveDirectoryW".}
   proc noFollowSetFileAttributesW(path: WideCString; attrs: DWORD): WINBOOL {.
     stdcall, dynlib: "kernel32", importc: "SetFileAttributesW".}
+else:
+  import std/posix
 
 proc removeTreeNoFollow*(path: string) =
   ## Deletes `path` and everything below it WITHOUT FOLLOWING LINKS: a link
@@ -42,6 +44,21 @@ proc removeTreeNoFollow*(path: string) =
       raiseOSError(osLastError(), path)
   else:
     removeDir(path)
+
+proc removeEmptyDirNoFollow*(path: string): bool =
+  ## Removes `path` only if it is a real, EMPTY directory, and reports whether
+  ## it did. A link, a file, a missing path or a directory with anything in it
+  ## is left alone and answers false; nothing is recursed into. For a
+  ## directory the caller created but that something else may since have put
+  ## content in, this is the only safe removal.
+  if symlinkExists(path) or not dirExists(path):
+    return false
+  when defined(windows):
+    # RemoveDirectoryW refuses a non-empty directory.
+    noFollowRemoveDirectoryW(newWideCString(path)) != 0
+  else:
+    # rmdir(2) refuses a non-empty directory.
+    rmdir(path.cstring) == 0
 
 proc removePathNoFollow*(path: string) =
   ## Removes whatever is at `path` WITHOUT FOLLOWING A LINK: a symlink (or,

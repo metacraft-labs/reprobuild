@@ -60,9 +60,33 @@
 ##  16. ``t_branch_fork_rejects_invalid_declared_baseline`` — the same
 ##      target-only path fails when the manifest-declared branch is absent;
 ##      it does not fall back to the remote's default branch or repair source.
-##      The root and another member remain materialized; the text summary
-##      reports an incomplete fork, never a preflight refusal claiming that
-##      nothing was created. No mocks are needed for this failure boundary.
+##      Target init had materialized the root and another member, but no
+##      branch exists anywhere, so the run removes what it created; the text
+##      summary says so, never a preflight refusal claiming that nothing was
+##      created and never "left in place". The report goes to the SOURCE.
+##  17. ``t_branch_fork_json_abort_leaves_no_destination`` — the incident
+##      itself (``--json``, no ``--write-report``, run inside the source):
+##      exit 1, the destination does not exist afterwards, stdout carries
+##      ``destinationState = "removed"``, ``branch-failure-report.json`` is in
+##      the SOURCE workspace, and the source is otherwise untouched.
+##  18. ``t_branch_fork_abort_removes_parent_directories_it_created`` — a
+##      destination whose parents were missing (``a/b/fork``) is removed from
+##      the topmost directory the run created (``a``).
+##  19. ``t_branch_fork_abort_empties_a_pre_existing_empty_destination`` — an
+##      empty destination directory is emptied and kept.
+##  20. ``t_branch_fork_abort_rerun_finds_no_leftover`` — a second identical
+##      run finds nothing at the destination and fails the same way, writing
+##      nothing there.
+##  21. ``t_branch_fork_abort_keeps_a_pre_existing_partial_fork`` — a
+##      destination that already held a fork of this workspace is never
+##      removed: ``destinationState = "kept"``, the ``rm -rf`` remedy names it,
+##      and the report goes to the source rather than into the kept tree.
+##  22. ``t_branch_fork_abort_never_removes_what_its_root_clone_did_not_make``
+##      — a destination spelled ``missing/../occupied`` looks absent before
+##      the run, but resolves to an operator directory with content once the
+##      root clone creates ``missing``. The clone refuses it, and the run must
+##      not remove it: only a root clone that succeeded makes the tree the
+##      run's.
 ##
 ## Real components (NO mocks): the real ``git`` binary, real bare repos on the
 ## real filesystem, and the real engine-built ``build/bin/repro`` spawned as a
@@ -91,12 +115,19 @@
 ##   - If target materialization silently fell back from an invalid declared
 ##     branch to remote HEAD, case 16 would produce a lib-b checkout and pass
 ##     the branch stage instead of failing materialization.
+##   - If an abort that created no branch left its materialization behind,
+##     cases 16-20 find the destination (or its created parents) on disk; if
+##     the cleanup reached a destination that pre-existed with content, case
+##     21 finds its root clone gone, and case 22 finds the operator's file
+##     gone. If the failure report were written into
+##     the destination, cases 16, 17 and 21 find it missing from the source.
 ##
 ## Skip rule: ``git`` missing on PATH (same convention as M9–M16).
 
 import std/[json, options, os, osproc, strutils, tempfiles, unittest]
 
 import repro_test_support
+import repro_test_support/reasoned_skip
 import repro_workspace_manifests
 
 proc q(value: string): string = quoteShell(value)
@@ -269,15 +300,54 @@ proc invokeFork(fx: M27Fixture; branch, path: string;
     runShell(shellCommand(argv))
 
 proc readForkReport(root: string): JsonNode =
+  ## The ``--write-report`` record under ``root``. A missing file fails the
+  ## check and yields an EMPTY object rather than raising, so a case that reads
+  ## it with ``{}`` keeps reporting its remaining assertions — the report
+  ## landing in the wrong workspace is itself one of the defects under test.
   let reportPath = root / ".repro" / "build" / "reports" / "branch-report.json"
   check fileExists(reportPath)
-  parseFile(reportPath)
+  if fileExists(reportPath): parseFile(reportPath) else: newJObject()
 
 proc entryByPath(report: JsonNode; path: string): JsonNode =
   for entry in report["repos"]:
     if entry["path"].getStr() == path:
       return entry
   newJNull()
+
+proc declareUnavailableLibB(gitBin: string; fx: M27Fixture) =
+  ## The incident shape: publish a root-manifest revision that declares a lib-b
+  ## branch its (readable) remote does not advertise, and remove lib-b from the
+  ## source. lib-b then resolves only in the TARGET, where target init cannot
+  ## clone it — after the root and lib-a are already materialized, and before
+  ## the branch pass has created a branch anywhere.
+  writeFile(fx.workspaceRoot / "repos" / "lib-b.toml",
+    libBFragmentToml.replace("mainline = \"main\"",
+      "mainline = \"missing-declared\""))
+  discard requireGit(q(gitBin) & " -C " & q(fx.workspaceRoot) &
+    " add repos/lib-b.toml")
+  discard requireGit(q(gitBin) & " -C " & q(fx.workspaceRoot) &
+    " commit -m \"declare unavailable fixture branch\"")
+  discard requireGit(q(gitBin) & " -C " & q(fx.workspaceRoot) &
+    " push origin main")
+  removeDir(fx.workspaceRoot / "lib-b")
+
+proc invokeForkJson(fx: M27Fixture; branch, path: string): CmdSplitResult =
+  ## The incident's own invocation: `--json` with no `--write-report`, run
+  ## from inside the source workspace. stdout is kept apart from stderr so it
+  ## parses as the JSON report.
+  runShellSplit(shellCommand(@[fx.reproBin, "branch", "--json", path,
+    "--branch=" & branch, "--workspace-root=" & fx.workspaceRoot]),
+    cwd = fx.workspaceRoot)
+
+proc sourceSnapshot(gitBin: string; fx: M27Fixture): seq[string] =
+  ## Branch + HEAD of every source checkout, and its local branch list: what a
+  ## fork must never change in the workspace it was cut from.
+  for rel in [".", "lib-a"]:
+    let path = fx.workspaceRoot / rel
+    result.add(rel & " " & currentBranch(gitBin, path) & " " &
+      headSha(gitBin, path))
+    result.add(requireGit(q(gitBin) & " -C " & q(path) &
+      " for-each-ref " & q("--format=%(refname)") & " refs/heads").strip())
 
 suite "M27/WV-6 — repro branch <path> forks a new workspace":
 
@@ -770,47 +840,254 @@ suite "M27/WV-6 — repro branch <path> forks a new workspace":
   test "t_branch_fork_rejects_invalid_declared_baseline":
     let gitBin = findExe("git")
     if gitBin.len == 0:
-      skip()
+      skip("git is not on PATH")
     else:
       let fx = setupFixture(gitBin, "invalid-declared-baseline")
       defer: removeDirEventually(fx.scratch)
-
-      # Publish a root-manifest revision that declares a branch the readable
-      # lib-b remote does not advertise. The target root clone therefore sees
-      # the same invalid bill of materials as source resolution does.
-      writeFile(fx.workspaceRoot / "repos" / "lib-b.toml",
-        libBFragmentToml.replace("mainline = \"main\"",
-          "mainline = \"missing-declared\""))
-      discard requireGit(q(gitBin) & " -C " & q(fx.workspaceRoot) &
-        " add repos/lib-b.toml")
-      discard requireGit(q(gitBin) & " -C " & q(fx.workspaceRoot) &
-        " commit -m \"declare unavailable fixture branch\"")
-      discard requireGit(q(gitBin) & " -C " & q(fx.workspaceRoot) &
-        " push origin main")
-
-      removeDir(fx.workspaceRoot / "lib-b")
-      check not dirExists(fx.workspaceRoot / "lib-b")
+      declareUnavailableLibB(gitBin, fx)
 
       let forkPath = fx.scratch / "invalid-declared-fork"
       let res = invokeFork(fx, "feature-no-fallback", forkPath)
       checkpoint("output: " & res.output)
       check res.code == 1
 
-      check dirExists(forkPath / ".git")
-      check dirExists(forkPath / "lib-a" / ".git")
-      check res.output.contains("workspace branch: INCOMPLETE")
-      check res.output.contains(forkPath)
-      check res.output.contains("re-run the same command")
-      check not res.output.contains("workspace branch: ABORTED")
-      check not res.output.contains("nothing had been created")
-
       # A fallback to the remote's default `main` would leave a valid checkout
-      # here and proceed to cut `feature-no-fallback`. The failed clone is
-      # cleaned up, and the source remains absent.
-      check not dirExists(forkPath / "lib-b" / ".git")
+      # and proceed to cut `feature-no-fallback`, exiting 0. The source stays
+      # absent: it is an input, never a repair target.
       check not dirExists(fx.workspaceRoot / "lib-b")
 
-      let report = readForkReport(forkPath)
-      check report["exitCode"].getInt() == 1
-      check report["repos"].len == 1
-      check report["repos"][0]["outcome"].getStr() == "clone_failed"
+      # Target init materialized the root and lib-a before lib-b failed, but
+      # no branch was created anywhere, so the run removed what it made. The
+      # summary says exactly that: neither "nothing had been created" (the
+      # pre-flight refusal wording, false here) nor "left in place; re-run"
+      # (false once the tree is gone).
+      check not dirExists(forkPath)
+      check res.output.contains("no branch 'feature-no-fallback' was created")
+      check res.output.contains(forkPath & " was removed")
+      check not res.output.contains("workspace branch: ABORTED")
+      check not res.output.contains("nothing had been created")
+      check not res.output.contains("left in place")
+
+      # The report was written to the SOURCE workspace, not the destination.
+      let report = readForkReport(fx.workspaceRoot)
+      check report{"exitCode"}.getInt() == 1
+      let repos = report{"repos"}.getElems()
+      check repos.len == 1
+      if repos.len == 1:
+        check repos[0]{"outcome"}.getStr() == "clone_failed"
+      check report{"destination"}.getStr() == forkPath
+      check report{"destinationState"}.getStr() == "removed"
+      check not report.hasKey("destinationRemedy")
+
+  test "t_branch_fork_json_abort_leaves_no_destination":
+    # The incident: `repro branch --json <dest>` aborted with no branch created
+    # and left a root clone at <dest>, carrying the run's failure report and
+    # prompt cache. Driven exactly as the incident was: `--json`, no
+    # `--write-report`, run from inside the source workspace.
+    let gitBin = findExe("git")
+    if gitBin.len == 0:
+      skip("git is not on PATH")
+    else:
+      let fx = setupFixture(gitBin, "json-abort")
+      defer: removeDirEventually(fx.scratch)
+      declareUnavailableLibB(gitBin, fx)
+      let before = sourceSnapshot(gitBin, fx)
+
+      let forkPath = fx.scratch / "manager"
+      let res = invokeForkJson(fx, "agent-upgrades", forkPath)
+      checkpoint("stdout: " & res.stdout & "\nstderr: " & res.stderr)
+      check res.code == 1
+      check not dirExists(forkPath)
+      check not fileExists(forkPath)
+
+      let doc = parseJson(res.stdout)
+      check doc{"form"}.getStr() == "fork"
+      check doc{"exitCode"}.getInt() == 1
+      check doc{"destination"}.getStr() == forkPath
+      check doc{"destinationState"}.getStr() == "removed"
+      check not doc.hasKey("destinationRemedy")
+      for entry in doc{"repos"}.getElems():
+        check not entry["outcome"].getStr().startsWith("branched")
+
+      # The failure report is the operator's only post-mortem; it lands where
+      # the command was run.
+      let failurePath = fx.workspaceRoot / ".repro" / "build" / "reports" /
+        "branch-failure-report.json"
+      check fileExists(failurePath)
+      if fileExists(failurePath):
+        let failure = parseFile(failurePath)
+        check failure{"exitCode"}.getInt() == 1
+        check failure{"report", "destinationState"}.getStr() == "removed"
+
+      # Apart from that report the source is untouched: no new branch, no
+      # moved HEAD, lib-b still absent.
+      check sourceSnapshot(gitBin, fx) == before
+      check not localBranchExists(gitBin, fx.workspaceRoot, "agent-upgrades")
+      check not localBranchExists(gitBin, fx.workspaceRoot / "lib-a",
+        "agent-upgrades")
+      check not dirExists(fx.workspaceRoot / "lib-b")
+
+  test "t_branch_fork_abort_removes_parent_directories_it_created":
+    # `git clone` creates missing parents of its destination, so the run owns
+    # those too: removing only the leaf would leave `scratch/a/b` behind.
+    let gitBin = findExe("git")
+    if gitBin.len == 0:
+      skip("git is not on PATH")
+    else:
+      let fx = setupFixture(gitBin, "abort-parents")
+      defer: removeDirEventually(fx.scratch)
+      declareUnavailableLibB(gitBin, fx)
+
+      let forkPath = fx.scratch / "a" / "b" / "fork"
+      check not dirExists(fx.scratch / "a")
+      let res = invokeFork(fx, "feature-parents", forkPath)
+      checkpoint("output: " & res.output)
+      check res.code == 1
+      check not dirExists(fx.scratch / "a")
+      # The scratch directory that already existed is not the run's to remove.
+      check dirExists(fx.scratch)
+      check dirExists(fx.workspaceRoot / ".git")
+      let report = readForkReport(fx.workspaceRoot)
+      check report{"destinationState"}.getStr() == "removed"
+
+  test "t_branch_fork_abort_empties_a_pre_existing_empty_destination":
+    # An empty directory the operator made is theirs: the run removes what it
+    # put inside and keeps the directory itself.
+    let gitBin = findExe("git")
+    if gitBin.len == 0:
+      skip("git is not on PATH")
+    else:
+      let fx = setupFixture(gitBin, "abort-empty-dest")
+      defer: removeDirEventually(fx.scratch)
+      declareUnavailableLibB(gitBin, fx)
+
+      let forkPath = fx.scratch / "prepared"
+      createDir(forkPath)
+      let res = invokeFork(fx, "feature-empty", forkPath)
+      checkpoint("output: " & res.output)
+      check res.code == 1
+      check dirExists(forkPath)
+      var leftovers: seq[string]
+      if dirExists(forkPath):
+        for kind, path in walkDir(forkPath):
+          leftovers.add(path)
+      check leftovers.len == 0
+      let report = readForkReport(fx.workspaceRoot)
+      check report{"destinationState"}.getStr() == "removed"
+      check report{"destination"}.getStr() == forkPath
+
+  test "t_branch_fork_abort_rerun_finds_no_leftover":
+    # Before the fix the first run's leftover made the second run a "resume":
+    # it was taken for a fork under way and the second report was written into
+    # it. Now each run starts from the same empty destination and fails the
+    # same way, writing nothing there.
+    let gitBin = findExe("git")
+    if gitBin.len == 0:
+      skip("git is not on PATH")
+    else:
+      let fx = setupFixture(gitBin, "abort-rerun")
+      defer: removeDirEventually(fx.scratch)
+      declareUnavailableLibB(gitBin, fx)
+
+      let forkPath = fx.scratch / "rerun-fork"
+      var outcomes: seq[string]
+      for attempt in 1 .. 2:
+        let res = invokeForkJson(fx, "feature-rerun", forkPath)
+        checkpoint("attempt " & $attempt & " stdout: " & res.stdout &
+          "\nstderr: " & res.stderr)
+        check res.code == 1
+        check not dirExists(forkPath)
+        let doc = parseJson(res.stdout)
+        check doc{"destinationState"}.getStr() == "removed"
+        var line = ""
+        for entry in doc{"repos"}.getElems():
+          line.add(entry["path"].getStr() & "=" & entry["outcome"].getStr() &
+            ";")
+        outcomes.add(line)
+      check outcomes.len == 2
+      if outcomes.len == 2:
+        check outcomes[0] == outcomes[1]
+      check not dirExists(forkPath / ".repro")
+
+  test "t_branch_fork_abort_keeps_a_pre_existing_partial_fork":
+    # A destination that already held a fork of this workspace when the run
+    # started is the resumable case: it was not made by this run, so it is
+    # never removed. The report names it and says how to remove it, and goes
+    # to the SOURCE workspace rather than into the kept tree.
+    let gitBin = findExe("git")
+    if gitBin.len == 0:
+      skip("git is not on PATH")
+    else:
+      let fx = setupFixture(gitBin, "abort-keep-partial")
+      defer: removeDirEventually(fx.scratch)
+      declareUnavailableLibB(gitBin, fx)
+
+      let forkPath = fx.scratch / "partial-fork"
+      discard requireGit(q(gitBin) & " clone " & q(fileUrl(fx.rootBare)) &
+        " " & q(forkPath))
+      let rootShaBefore = headSha(gitBin, forkPath)
+
+      let res = invokeFork(fx, "feature-keep", forkPath)
+      checkpoint("output: " & res.output)
+      check res.code == 1
+      check dirExists(forkPath / ".git")
+      check headSha(gitBin, forkPath) == rootShaBefore
+      check res.output.contains(forkPath)
+      check res.output.contains("rm -rf")
+      check res.output.contains("re-run the same command")
+
+      check not fileExists(forkPath / ".repro" / "build" / "reports" /
+        "branch-report.json")
+      check not fileExists(forkPath / ".repro" / "build" / "reports" /
+        "branch-failure-report.json")
+      check fileExists(fx.workspaceRoot / ".repro" / "build" / "reports" /
+        "branch-failure-report.json")
+      let report = readForkReport(fx.workspaceRoot)
+      check report{"exitCode"}.getInt() == 1
+      check report{"destination"}.getStr() == forkPath
+      check report{"destinationState"}.getStr() == "kept"
+      check report{"destinationRemedy"}.getStr() == "rm -rf " & forkPath
+
+  test "t_branch_fork_abort_never_removes_what_its_root_clone_did_not_make":
+    # Whether the destination is the run's cannot be decided from a look at
+    # the path before the clone alone. `missing/../occupied` does not resolve
+    # while `missing` is absent, so it looks free; `git clone` then creates
+    # `missing`, finds `occupied` (the operator's, with content) and refuses.
+    # A run that removed "the destination it created" at that point would
+    # delete the operator's directory. Only a root clone that succeeded makes
+    # the tree the run's.
+    let gitBin = findExe("git")
+    if gitBin.len == 0:
+      skip("git is not on PATH")
+    else:
+      let fx = setupFixture(gitBin, "abort-unresolved-dest")
+      defer: removeDirEventually(fx.scratch)
+
+      let occupied = fx.scratch / "occupied"
+      createDir(occupied)
+      writeFile(occupied / "precious.txt", "operator content\n")
+      # Spelled out rather than joined with `/`, which would normalize the
+      # `..` away and hand the run the plain, occupied path (a refusal).
+      let forkPath = fx.scratch & DirSep & "missing" & DirSep & ".." &
+        DirSep & "occupied"
+      check not dirExists(fx.scratch / "missing")
+      check not dirExists(forkPath)
+
+      let res = invokeFork(fx, "feature-unresolved", forkPath)
+      checkpoint("output: " & res.output)
+      check res.code == 1
+      check fileExists(occupied / "precious.txt")
+      if fileExists(occupied / "precious.txt"):
+        check readFile(occupied / "precious.txt") == "operator content\n"
+
+      let report = readForkReport(fx.workspaceRoot)
+      check report{"exitCode"}.getInt() == 1
+      let repos = report{"repos"}.getElems()
+      check repos.len == 1
+      if repos.len == 1:
+        check repos[0]{"outcome"}.getStr() == "root_clone_failed"
+      # The run did not make what is there and was not resuming it, so it
+      # neither claims to have removed it nor offers an `rm -rf` for it.
+      check report{"destinationState"}.getStr() == ""
+      check not report.hasKey("destinationRemedy")
+      check not res.output.contains("rm -rf")

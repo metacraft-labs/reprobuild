@@ -47,8 +47,8 @@ Usage
 The surface is located the same way `libs/ct_test_surface` locates it:
 `$CT_TEST`, then `ct-test` on PATH, then `ct`. Point `$CT_TEST` at a specific
 build to record a reproducible identity — the dev shell's `ct-test` tracks the
-`codetracer-src` flake input, which the workspace `.envrc` auto-overrides to a
-`../codetracer` sibling when one exists, so on a workspace host it is not
+CodeTracer pin unless the `codetracer-src` flake input overrides it, which the
+workspace `.envrc` does for a `../codetracer` sibling when one exists, so on a workspace host it is not
 necessarily the pinned revision.
 """
 

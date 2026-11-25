@@ -63,6 +63,11 @@
 ##      a program exited 127. The negative control adds one such satellite to the edge's shim and must
 ##      make the subject fail to start.
 ##
+## The same edge under a zig glibc target, where `zig cc` links the shim, is
+## covered by `libs/repro_dsl_stdlib/tests/
+## t_zig_cross_monitor_shim_needs_only_libc.nim`: its `repro graph` needs the
+## target's libraries cross-built first, so it is emitted in process there.
+##
 ## Mocks and fabrications, and why (per the repository policy on justifying
 ## every mock): NO mocks — the compiler, the linker wrapper, the loader, the
 ## monitor and the shim are all real. Three inputs are fabricated from real

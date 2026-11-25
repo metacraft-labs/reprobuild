@@ -5,8 +5,10 @@ built with WiX v3 on Windows, installs repro's PowerShell completion script at
 actions that register it; and the Scoop manifest's hooks, run the way Scoop
 runs them, leave a fresh Windows PowerShell 5.1 and PowerShell 7 session
 completing `repro`, registered once, and take it away again. The host-neutral
-part (the .wxs, an MSI built with msitools, the manifest's text) is
-tests/unit/test_release_native_packages.py.
+part (the .wxs, the package's tables built from it through a WiX stand-in over
+msitools, the manifest's text) is tests/unit/test_release_native_packages.py;
+only this check builds the MSI with the real WiX v3 and WixUtilExtension, whose
+quiet-exec DLL wixl cannot link.
 
   powershell -NoProfile -ExecutionPolicy Bypass -File tools\multi-distro-harness\tests\m8c_windows_packages_carry_completion.ps1 -FetchWix
 
@@ -30,9 +32,13 @@ needs no administrator rights and writes only under one scratch directory
     PowerShell profiles. A negative control rebuilds the same authoring
     without the completion script's component and checks that the assertion
     rejects it.
-  * The MSI's two deferred custom actions are run as the installed package
-    runs them, the administrative image's bin\repro.exe with each action's
-    own arguments, plus repro's internal --system-root, which re-roots every
+  * The MSI's two deferred custom actions are WiX's quiet exec
+    (WixQuietExec64 from WixUtilExtension's WixCA binary), each given its
+    command line, "[BINDIR]repro.exe" and its arguments, by an immediate
+    type-51 action; the check reads all four back with their types. The
+    actions' command lines are run as the installed package runs them, the
+    administrative image's bin\repro.exe with each action's own arguments,
+    plus repro's internal --system-root, which re-roots every
     system path (each PowerShell's $PSHOME included) under the scratch
     directory, and with a PATH that reaches only scratch PowerShell
     installations (pwsh.exe beside System.Management.Automation.dll, and
@@ -83,6 +89,13 @@ $CustomActions = @{
   'ReproCompletionEnsure' = 'hooks ensure --shell-autocomplete --system'
   'ReproCompletionRemove' = 'hooks uninstall --shell-autocomplete --system'
 }
+# The quiet-exec actions (msidbCustomActionTypeDll + BinaryData 1,
+# ContinueOnError 64, InScript 1024, NoImpersonate 2048) and the type-51
+# actions that set their command lines
+# (https://learn.microsoft.com/windows/win32/msi/custom-action-types).
+$QuietExecType = 1 + 64 + 1024 + 2048
+$SetterType = 51
+$QuietExecCommand = '"[BINDIR]repro.exe" '
 # WiX v3.14.1, as the package catalogue pins it.
 $WixUrl = 'https://github.com/wixtoolset/wix3/releases/download/wix3141rtm/wix314-binaries.zip'
 $WixSha256 = '6ac824e1642d6f7277d0ed7ea09411a508f6116ba6fae0aa5f2c7daa2ff43d31'
@@ -97,20 +110,31 @@ $Tmp = Join-Path $Work 'tmp'
 $Neutral = Join-Path $Work 'cwd'
 New-Item -ItemType Directory -Force -Path $Tmp, $Neutral | Out-Null
 
-# The rows of one table of an MSI database, each a string array.
+# The rows of one table of an MSI database, each a string array. A binary
+# stream column (type 'v'/'V' in View.ColumnInfo(1),
+# https://learn.microsoft.com/windows/win32/msi/view-columninfo and
+# https://learn.microsoft.com/windows/win32/msi/column-definition-format) is
+# read as its length in bytes, Record.DataSize
+# (https://learn.microsoft.com/windows/win32/msi/record-datasize): the
+# object refuses Record.StringData on a stream ("StringData,Field"), which is
+# what the Binary table's Data column is.
 function Get-MsiRows {
   param([string]$Msi, [string]$Table)
   $installer = New-Object -ComObject WindowsInstaller.Installer
   $db = $installer.GetType().InvokeMember('OpenDatabase', 'InvokeMethod', $null, $installer, @($Msi, 0))
   $view = $db.GetType().InvokeMember('OpenView', 'InvokeMethod', $null, $db, @("SELECT * FROM ``$Table``"))
   $view.GetType().InvokeMember('Execute', 'InvokeMethod', $null, $view, $null) | Out-Null
-  $cols = $view.GetType().InvokeMember('ColumnInfo', 'GetProperty', $null, $view, @(0))
+  $cols = $view.GetType().InvokeMember('ColumnInfo', 'GetProperty', $null, $view, @(1))
   $n = $cols.GetType().InvokeMember('FieldCount', 'GetProperty', $null, $cols, $null)
+  $types = @(foreach ($k in 1..$n) { $cols.GetType().InvokeMember('StringData', 'GetProperty', $null, $cols, @($k)) })
   $rows = @()
   while ($true) {
     $rec = $view.GetType().InvokeMember('Fetch', 'InvokeMethod', $null, $view, $null)
     if ($null -eq $rec) { break }
-    $row = @(foreach ($k in 1..$n) { $rec.GetType().InvokeMember('StringData', 'GetProperty', $null, $rec, @($k)) })
+    $row = @(foreach ($k in 1..$n) {
+        $prop = if ($types[$k - 1] -cmatch '^[vV]') { 'DataSize' } else { 'StringData' }
+        [string]$rec.GetType().InvokeMember($prop, 'GetProperty', $null, $rec, @($k))
+      })
     $rows += , $row
   }
   $view.GetType().InvokeMember('Close', 'InvokeMethod', $null, $view, $null) | Out-Null
@@ -146,10 +170,12 @@ function Get-MsiContents {
   $actions = @{}
   foreach ($r in (Get-MsiRows $Msi 'CustomAction')) { $actions[$r[0]] = @([int]$r[1], $r[2], $r[3]) }
   $sequence = @{}
-  foreach ($r in (Get-MsiRows $Msi 'InstallExecuteSequence')) { $sequence[$r[0]] = $r[1] }
+  foreach ($r in (Get-MsiRows $Msi 'InstallExecuteSequence')) { $sequence[$r[0]] = @($r[1], [int]$r[2]) }
+  # Binary names whose stream is not empty.
+  $binaries = @(foreach ($r in (Get-MsiRows $Msi 'Binary')) { if ([long]$r[1] -gt 0) { $r[0] } })
   $script = Get-ChildItem -LiteralPath $image -Recurse -File -Filter 'repro.ps1' |
     Where-Object { $_.FullName -match '[\\/]Reprobuild[\\/]share[\\/]repro[\\/]completions[\\/]repro\.ps1$' } | Select-Object -First 1
-  return [pscustomobject]@{ Files = $files; Actions = $actions; Sequence = $sequence; Script = $script }
+  return [pscustomobject]@{ Files = $files; Actions = $actions; Sequence = $sequence; Binaries = $binaries; Script = $script }
 }
 
 # Throws when the package does not carry the completion as specified.
@@ -160,11 +186,18 @@ function Assert-MsiCompletion {
   if ($null -eq $Contents.Script) { throw 'the administrative image holds no Reprobuild\share\repro\completions\repro.ps1' }
   $bytes = [IO.File]::ReadAllBytes($Contents.Script.FullName)
   if ([Convert]::ToBase64String($bytes) -ne [Convert]::ToBase64String($ArchiveScript)) { throw 'the installed repro.ps1 differs from the archive''s' }
+  if ($Contents.Binaries -notcontains 'WixCA') { throw 'the package carries no non-empty WixCA binary (WixUtilExtension) for its quiet-exec actions' }
   foreach ($a in $CustomActions.Keys) {
     if (-not $Contents.Actions.ContainsKey($a)) { throw "no custom action $a" }
     $row = $Contents.Actions[$a]
-    if ($row[0] -ne 3154 -or $row[1] -ne 'fil_repro_exe' -or $row[2] -ne $CustomActions[$a]) { throw "custom action $a is $($row -join ' | ')" }
-    if (-not $Contents.Sequence.ContainsKey($a)) { throw "custom action $a is not sequenced" }
+    if ($row[0] -ne $QuietExecType -or $row[1] -ne 'WixCA' -or $row[2] -ne 'WixQuietExec64') { throw "custom action $a is $($row -join ' | '), not WiX quiet exec" }
+    $setter = "Set$a"
+    if (-not $Contents.Actions.ContainsKey($setter)) { throw "no custom action $setter" }
+    $row = $Contents.Actions[$setter]
+    if ($row[0] -ne $SetterType -or $row[1] -ne $a -or $row[2] -ne ($QuietExecCommand + $CustomActions[$a])) { throw "custom action $setter is $($row -join ' | ')" }
+    foreach ($x in @($a, $setter)) { if (-not $Contents.Sequence.ContainsKey($x)) { throw "custom action $x is not sequenced" } }
+    if ($Contents.Sequence[$setter][1] -ge $Contents.Sequence[$a][1]) { throw "$setter is not sequenced before $a" }
+    if ($Contents.Sequence[$setter][0] -ne $Contents.Sequence[$a][0]) { throw "$setter and $a run under different conditions" }
   }
 }
 
@@ -270,7 +303,7 @@ try {
     if (Test-Path -LiteralPath $msi) {
       try {
         Assert-MsiCompletion (Get-MsiContents -Msi $msi -Tag 'good') $archiveScript
-        Pass "MSI: installs $CompletionPath byte-identical to the archive's, repro.exe, and both custom actions (type 3154, sequenced)"
+        Pass "MSI: installs $CompletionPath byte-identical to the archive's, repro.exe, and both custom actions (WiX quiet exec, type $QuietExecType, each after its type-$SetterType setter)"
       } catch { Fail "MSI: $($_.Exception.Message)" }
       try { Test-MsiActionsRegister -Image (Join-Path $Work 'admin-good') } catch { Fail "MSI actions: $($_.Exception.Message)" }
       # Negative control: the authoring without the completion script's
@@ -285,8 +318,8 @@ try {
         [IO.File]::WriteAllText($mw, $mutant)
         $src = Join-Path $Work 'msi-src'
         [System.IO.Compression.ZipFile]::ExtractToDirectory($zip, $src)
-        $candle = Invoke-NativeCommand -FilePath (Join-Path $Wix3Bin 'candle.exe') -ArgumentList @('-nologo', '-arch', 'x64', "-dSourceDir=$src", '-out', (Join-Path $Work 'mutant.wixobj'), $mw)
-        $light = if ($candle.Code -eq 0) { Invoke-NativeCommand -FilePath (Join-Path $Wix3Bin 'light.exe') -ArgumentList @('-nologo', '-sval', '-out', (Join-Path $Work 'mutant.msi'), (Join-Path $Work 'mutant.wixobj')) } else { $null }
+        $candle = Invoke-NativeCommand -FilePath (Join-Path $Wix3Bin 'candle.exe') -ArgumentList @('-nologo', '-arch', 'x64', '-ext', 'WixUtilExtension', "-dSourceDir=$src", '-out', (Join-Path $Work 'mutant.wixobj'), $mw)
+        $light = if ($candle.Code -eq 0) { Invoke-NativeCommand -FilePath (Join-Path $Wix3Bin 'light.exe') -ArgumentList @('-nologo', '-sval', '-ext', 'WixUtilExtension', '-out', (Join-Path $Work 'mutant.msi'), (Join-Path $Work 'mutant.wixobj')) } else { $null }
         if ($candle.Code -ne 0 -or $light.Code -ne 0) {
           # A control package that was never built would be "rejected" for
           # the wrong reason.

@@ -39,6 +39,7 @@ import repro_cli_support/stdin_terminal
 # The content identity of a producer's channel directories, folded into the
 # keys of consumer actions whose reads nothing observes (§4.3 rule 2).
 import repro_cli_support/producer_channel_content
+import repro_cli_support/producer_gitlink_sources
 # repro's own command line: the generated parser, help and completion.
 import repro_cli_support/cli_program
 # The role processes whose command lines test binaries also serve.
@@ -5863,6 +5864,21 @@ var producerMaterializedSourceRoots: Table[string, string] =
   ## Provenance of the cached channels. A later consumer must validate the
   ## source actually reused, which may differ from its freshly discovered root.
 
+var producerComposedSourceRequirements: Table[string, seq[string]] =
+  initTable[string, seq[string]]()
+  ## Cross-Repo-Source-Consumption §4.2a.2a: selector -> the
+  ## ``<library>:<gitlink path>`` requirements whose composed source artifact
+  ## replaced the producer's exported root on ``nimPathDirs``. Its presence
+  ## puts the composition semantics into ``producerChannelIdentity``, and
+  ## stops ``canReuseMaterializedProducer`` from serving a cached projection:
+  ## the artifact is a snapshot, so every build recomposes (cheaply, when the
+  ## descriptor still matches) to see the producer's current source.
+
+var producerComposedSourceLog: Table[string, seq[string]] =
+  initTable[string, seq[string]]()
+  ## Status lines of the composition, printed by the build's summary log
+  ## once the producer is spliced (the log template is the build's own).
+
 var producerActionHashes*: Table[string, string] =
   initTable[string, string]()
   ## SC-2 fingerprint fold sink: consumer selector -> the producer edge's
@@ -6472,6 +6488,14 @@ proc producerChannelIdentity*(selector: string): string =
   ## thing that distinguishes the new content from the old, which is still on
   ## disk unchanged.
   var payload = "cross-repo-producer-channel.v1\x00" & selector & "\x00"
+  if producerComposedSourceRequirements.hasKey(selector):
+    # §4.2a.2a: the Nim root is a composed source artifact. Its semantics
+    # (and which gitlinks it composes) are part of what the action is
+    # handed; its CONTENT is not, for the same reason as every channel's.
+    payload.add(GitlinkSourceCompositionChannelTag & "\x00")
+    for requirement in producerComposedSourceRequirements[selector]:
+      payload.add(requirement)
+      payload.add('\x00')
   var nimProjectionTagged = false
   for dir in producerChannelDirs(selector):
     if dir.channel == "nimpath" and not nimProjectionTagged and
@@ -12039,6 +12063,10 @@ proc canReuseMaterializedProducer(selector: string; binding: ProducerBinding;
                                   consumerRoot: string): bool =
   result = producerMaterializedBinDirs.hasKey(selector) or
     producerMaterializedAuxPaths.hasKey(selector)
+  if result and producerComposedSourceRequirements.hasKey(selector):
+    # A composed gitlink source artifact (§4.2a.2a) is a snapshot of the
+    # producer's source, not a view of it: recompose it for this build.
+    return false
   if not result or binding.kind != pbkLockPinned:
     return
   let cachedRoot = producerMaterializedSourceRoots.getOrDefault(selector)
@@ -12069,10 +12097,53 @@ proc producerNativeLibraryNeedsBuild(lib: InterfaceLibrary;
     if lib.exportedPath.len > 0: lib.exportedPath else: "src"
   not dirExists(extendedPath(producerRootAbs / exported))
 
+proc gitlinkSourceArtifactDir(consumerRoot, selector, library: string):
+    string =
+  ## Where the composed gitlink source artifact of ``library`` from producer
+  ## ``selector`` lives: beside the consumer's fetched pinned producers, in
+  ## its workspace ``.repro`` tree, under a name made of the selector and
+  ## the library alone. The name is deliberately NOT content- or
+  ## revision-dependent (§4.2a.2a "Identity and invalidation"): the
+  ## directory is on every consumer compile's ``--path:``, so a name that
+  ## moved with the source would miss every compile on any edit. Its content
+  ## reaches keys through the reads compiles make there, and through the
+  ## channel-content fold for actions nothing observes.
+  lockPinnedProducerCacheRoot(consumerRoot) / ".source-artifacts" /
+    selectorFilesystemKey(selector) / selectorFilesystemKey(library)
+
+proc composeProducerGitlinkSource(selector, producerRootAbs: string;
+                                  lib: InterfaceLibrary;
+                                  consumerRoot: string): ComposedLibrarySource =
+  ## §4.2a.2a: compose ``lib``'s required gitlink source artifact. An
+  ## uninitialized gitlink is acquired through the same pinned-revision Git
+  ## fetch a lock-pinned producer uses (``fetchLockPinnedProducer``),
+  ## exactly at the commit the selected source's committed gitlink names.
+  if consumerRoot.len == 0:
+    raise newException(GitlinkSourceError,
+      "cross-repo producer \"" & selector & "\" library \"" & lib.name &
+      "\" sourceGitlinks: no consumer workspace to compose the source " &
+      "artifact in")
+  let acquire = proc (name, url, commit: string): string =
+    fetchLockPinnedProducer(LockedDep(name: name,
+      coordinates: Coordinates(kind: ckVcs, url: url, revision: commit)),
+      consumerRoot)
+  result = composeGitlinkSourceArtifact(selector, lib.name, producerRootAbs,
+    (if lib.exportedPath.len > 0: lib.exportedPath else: "src"),
+    lib.sourceGitlinks,
+    gitlinkSourceArtifactDir(consumerRoot, selector, lib.name), acquire)
+  var lines = producerComposedSourceLog.getOrDefault(selector)
+  lines.add("library \"" & lib.name & "\" composed with its required " &
+    "gitlinks at " & result.exportedRoot &
+    (if result.reused: " (reused)" else: ""))
+  for note in result.notes:
+    lines.add(note)
+  producerComposedSourceLog[selector] = lines
+
 proc recordProducerMaterialization(selector, producerRootAbs: string;
                                    producerArtifact: ProjectInterfaceArtifact;
                                    producerRuntimeIdentity: PathOnlyBuildIdentity;
                                    binding: ProducerBinding;
+                                   consumerRoot: string;
                                    includeCompiledOutputs = true): bool =
   ## Discover a producer's already-materialized public outputs and project
   ## them onto the consumer's executable/library channels. The build path
@@ -12139,14 +12210,30 @@ proc recordProducerMaterialization(selector, producerRootAbs: string;
           pkgConfigOutDir notin aux.pkgConfigDirs:
         aux.pkgConfigDirs.add(pkgConfigOutDir)
 
+  var composedRequirements: seq[string] = @[]
   for lib in producerArtifact.projectInterface.publicLibraries:
     if lib.name.len == 0:
       continue
     let exported =
       if lib.exportedPath.len > 0: lib.exportedPath else: "src"
-    let nimSrcDir = producerRootAbs / exported
+    var nimSrcDir = producerRootAbs / exported
+    if lib.sourceGitlinks.len > 0 and dirExists(extendedPath(nimSrcDir)):
+      # §4.2a.2a: the exported tree is incomplete without its required Git
+      # trees. Project an owned composed artifact instead of the producer's
+      # own directory; the producer checkout and its submodules are only
+      # read. A refusal raises here, before any consumer compile.
+      let composed = composeProducerGitlinkSource(selector, producerRootAbs,
+        lib, consumerRoot)
+      nimSrcDir = composed.exportedRoot
+      for req in lib.sourceGitlinks:
+        composedRequirements.add(lib.name & ":" & req.relativePath)
     if dirExists(extendedPath(nimSrcDir)) and nimSrcDir notin aux.nimPathDirs:
       aux.nimPathDirs.add(nimSrcDir)
+  if composedRequirements.len > 0:
+    composedRequirements.sort()
+    producerComposedSourceRequirements[selector] = composedRequirements
+  else:
+    producerComposedSourceRequirements.del(selector)
 
   let haveLibChannel = aux.libDirs.len > 0 or aux.includeDirs.len > 0 or
     aux.pkgConfigDirs.len > 0 or aux.cmakePrefixDirs.len > 0 or
@@ -12555,6 +12642,37 @@ proc runProviderCompileEdge(plan: ProviderCompilePlan;
     result = runBuild(graph([providerCompileBuildAction(plan, modulePath,
       interfacePath, artifactPath, helperCliPath, workDir, scratchDir)]),
       config)
+
+proc runVerifiedProviderCompileEdge(plan: ProviderCompilePlan;
+    modulePath, interfacePath, artifactPath, helperCliPath, workDir,
+    scratchDir, providerRoot: string; config: BuildEngineConfig;
+    observe: proc (run: BuildRunResult) {.closure.} = nil):
+    tuple[run: BuildRunResult, consistency: ProviderCompileConsistency] =
+  ## `runProviderCompileEdge`, then the post-execution check of what it left
+  ## (`verifyProviderCompileEdge`): an artifact that was SERVED and describes
+  ## some other compile is recompiled without the cache rather than failing
+  ## the build. A failed edge, or one that wrote no artifact, raises.
+  ## `observe` sees every run (one, or two when a recompile was needed);
+  ## `run` is the last. The caller acts on `consistency`.
+  var lastRun: BuildRunResult
+  let runEdge = proc (forceRebuild: bool): ProviderCompileEdgeRun =
+    var edgeConfig = config
+    edgeConfig.forceRebuild = edgeConfig.forceRebuild or forceRebuild
+    let run = runProviderCompileEdge(plan, modulePath, interfacePath,
+      artifactPath, helperCliPath, workDir, scratchDir, providerRoot,
+      edgeConfig)
+    lastRun = run
+    if observe != nil:
+      observe(run)
+    if run.hasFailedActions():
+      raise newException(OSError, providerCompileFailureWithLog(run,
+        artifactPath))
+    if not fileExists(extendedPath(artifactPath)):
+      raise newException(IOError,
+        "provider compile edge did not write artifact: " & artifactPath)
+    providerCompileEdgeRunOf(run)
+  let consistency = verifyProviderCompileEdge(plan, artifactPath, runEdge)
+  (run: lastRun, consistency: consistency)
 
 var interfaceEdgeSessionResults: Table[string, ProjectInterfaceArtifact]
   ## Per-PROCESS memo of extraction edges already materialized in this run,
@@ -15061,11 +15179,15 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
             "(no compiled artifact; src threaded via nimPathDirs).")
         if not recordProducerMaterialization(selector, producerRootAbs,
             producerArtifact, producerRuntimeIdentity, producer,
+            result.projectRoot,
             includeCompiledOutputs = not sourceChannelOnly):
           raise newException(OSError,
             "cross-repo producer \"" & selector & "\" at " & producerRootAbs &
             " declares no materialized executable, library, or Nim source " &
             "output to splice onto the consumer's tool channels.")
+        for line in producerComposedSourceLog.getOrDefault(selector):
+          logSummary("cross-repo producer: \"" & selector & "\" " & line)
+        producerComposedSourceLog.del(selector)
         if producerMaterializedBinDirs.hasKey(selector):
           logSummary("cross-repo producer: spliced \"" & selector &
             "\" bin dir(s) into tool identities: " &
@@ -15376,42 +15498,39 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       # stale daemon) is visibly attributed to the launch path rather
       # than the cache-freshness check above.
       progressRenderer.renderPhase("running provider compile")
-      providerCompileResult = runProviderCompileEdge(providerPlan,
+      let observeProviderCompile = proc (run: BuildRunResult) =
+        buildStats.mergeStats(run.stats)
+        warnRunQuotaBypassIfUsed(run, enabled = fallbackToRunQuotaBypass)
+        noteProviderCompileConsultation(run)
+        for item in run.results:
+          # `status`/`launched`/`cache` describe THIS consultation only.
+          # `consultations`/`compiled` describe the whole invocation, which
+          # is what a reader of this line is actually asking about — see
+          # `providerCompileLaunchedInThisProcess`.
+          logAction("providerCompileAction: " & item.id & " status=" &
+            $item.status & " launched=" & $item.launched & " cache=" &
+            $item.cacheDecision & " wouldLaunch=" & $item.wouldLaunch &
+            (if item.reason.len > 0: " reason=" & item.reason else: "") &
+            providerCompileInvocationSummary())
+        if run.hasFailedActions():
+          # The edge's action is built inside ``runProviderCompileEdge``, so
+          # the failure report carries its result without the declaration.
+          # The run raises right after this callback returns.
+          persistPreparationFailure("provider-compile", run,
+            newSeq[BuildAction]())
+      let verified = runVerifiedProviderCompileEdge(providerPlan,
         modulePath, interfacePath, providerArtifactPath,
         graphHelperCliPath(publicCliPath, ProviderCompileActionId), compileWorkDir,
-        compileScratchDir, result.projectRoot, providerCompileConfig)
-      buildStats.mergeStats(providerCompileResult.stats)
-      warnRunQuotaBypassIfUsed(providerCompileResult,
-        enabled = fallbackToRunQuotaBypass)
-      noteProviderCompileConsultation(providerCompileResult)
-      for item in providerCompileResult.results:
-        # `status`/`launched`/`cache` describe THIS consultation only.
-        # `consultations`/`compiled` describe the whole invocation, which
-        # is what a reader of this line is actually asking about — see
-        # `providerCompileLaunchedInThisProcess`.
-        logAction("providerCompileAction: " & item.id & " status=" &
-          $item.status & " launched=" & $item.launched & " cache=" &
-          $item.cacheDecision & " wouldLaunch=" & $item.wouldLaunch &
-          (if item.reason.len > 0: " reason=" & item.reason else: "") &
-          providerCompileInvocationSummary())
-      if providerCompileResult.hasFailedActions():
-        # The edge's action is built inside ``runProviderCompileEdge``, so
-        # the failure report carries its result without the declaration.
-        persistPreparationFailure("provider-compile", providerCompileResult,
-          newSeq[BuildAction]())
-        raise newException(OSError, providerCompileFailureWithLog(providerCompileResult,
-          providerArtifactPath))
-      if not fileExists(extendedPath(providerArtifactPath)):
-        raise newException(IOError,
-          "provider compile edge did not write artifact: " & providerArtifactPath)
-      provider = readProviderCompileArtifact(providerArtifactPath)
-      let providerConsistency = providerCompileConsistencyAfterExecution(
-        providerPlan, providerArtifactPath)
+        compileScratchDir, result.projectRoot, providerCompileConfig,
+        observeProviderCompile)
+      providerCompileResult = verified.run
+      let providerConsistency = verified.consistency
       if not providerConsistency.fresh:
         raise newException(IOError,
           "provider compile artifact is stale after edge execution: " &
             providerArtifactPath & "\n" & providerConsistency.detail)
-      if providerConsistency.reconciled:
+      provider = readProviderCompileArtifact(providerArtifactPath)
+      if providerConsistency.reconciled or providerConsistency.recompiled:
         logSummary("providerCompile: " & providerConsistency.detail)
       publishProviderCompileIfRequested(providerPlan,
         artifact.projectInterface.projectName, providerArtifactPath,
@@ -23171,6 +23290,73 @@ local_hook_missing_program() {
   ## likely cause, not a verdict: a body that guards the path keeps working
   ## and is never blamed.
 
+const DeclaredLocalHookShell = """
+local_hook_declared() {
+  # Exit 0 when this repository's pre-commit/prek configuration installs hook
+  # type $1, i.e. lists it in a top-level `default_install_hook_types`, or sets
+  # none and $1 is `pre-commit` (the default). Anything this cannot read,
+  # including no configuration at all, answers no.
+  for LOCAL_HOOK_CONFIG in "$REPO_ROOT/.pre-commit-config.yaml" \
+      "$REPO_ROOT/.pre-commit-config.yml"; do
+    [ -f "$LOCAL_HOOK_CONFIG" ] || continue
+    LOCAL_HOOK_STAGES=$(awk '
+      function strip(s) {
+        gsub(/^[ \t"'"'"']+|[ \t"'"'"']+$/, "", s)
+        return s
+      }
+      in_block {
+        if ($0 ~ /^[ \t]*(#.*)?$/) next
+        if ($0 ~ /^[ \t]*-/) {
+          item = $0
+          sub(/^[ \t]*-/, "", item)
+          sub(/[ \t]+#.*$/, "", item)
+          print strip(item)
+          next
+        }
+        exit
+      }
+      /^default_install_hook_types[ \t]*:/ {
+        found = 1
+        value = $0
+        sub(/^[^:]*:/, "", value)
+        sub(/[ \t]+#.*$/, "", value)
+        value = strip(value)
+        if (value == "") { in_block = 1; next }
+        if (value ~ /^\[.*\]$/) {
+          n = split(substr(value, 2, length(value) - 2), items, ",")
+          for (i = 1; i <= n; i++) print strip(items[i])
+        }
+        exit
+      }
+      END { if (!found) print "pre-commit" }
+    ' "$LOCAL_HOOK_CONFIG" 2>/dev/null) || return 1
+    printf '%s\n' "$LOCAL_HOOK_STAGES" | grep -qx -- "$1"
+    return $?
+  done
+  return 1
+}
+
+"""
+  ## Whether the repository declares the local hook of a stage, for
+  ## ``run_local_hook``: a missing or non-executable ``<hook>.repro-local``
+  ## is a silent "no local hook" only when the repository's hook framework
+  ## does not install that stage. When it does, the file is the repository's
+  ## own checks for that stage, and skipping it without a word let pushes
+  ## through that ran Reprobuild's gate and none of the repository's pre-push
+  ## hooks: a hook installer that chained `pre-commit` and never `pre-push`
+  ## left every push of such a checkout ungated by the repository's own checks.
+  ##
+  ## "Installs" is the framework's own rule: `default_install_hook_types`, or
+  ## `pre-commit` when unset
+  ## (https://pre-commit.com/#top_level-default_install_hook_types; prek reads
+  ## the same key), from `.pre-commit-config.yaml`, else `.pre-commit-config.yml`,
+  ## the order both tools look in. The value is read without a YAML parser,
+  ## since a hook cannot assume one: a flow list on the key's line or a block
+  ## list of `- name` lines under it, the two spellings pre-commit documents.
+  ## A value in any other form, or no configuration, answers no. A refusal is
+  ## only ever made on a positive reading, so an unreadable config costs the
+  ## warning, never a commit.
+
 type ChainedHookMissingProgram* = object
   ## A program a chained hook body names that does not exist.
   program*: string
@@ -23718,6 +23904,13 @@ proc vcsDispatcherContent(hookName: string; certificatePhase = false): string =
   ##      and never skips or refuses it on its own reading, so a body that
   ##      guards or never reaches the line keeps working. See
   ##      ``ChainedHookMissingProgramShell``.
+  ##   7. A missing chained hook is refused when the repository installs that
+  ##      stage. A ``<hook>.repro-local`` that is absent or not executable
+  ##      used to be skipped without a word, whether or not the repository's
+  ##      hook framework installs that stage; when it does, the skip runs
+  ##      Reprobuild's half alone and passes. Now it fails the commit or push
+  ##      and names the fix. Where nothing installs the stage, a missing file
+  ##      is still the silent "no local hook". See ``DeclaredLocalHookShell``.
   result = "#!/usr/bin/env sh\n"
   result.add("# " & VcsDispatcherMarker & "\n")
   result.add("# Dispatches preserved user hooks and Reprobuild-managed " &
@@ -23771,8 +23964,40 @@ proc vcsDispatcherContent(hookName: string; certificatePhase = false): string =
   # (6) A chained body that fails because a program it names is gone says
   # so. See ``ChainedHookMissingProgramShell``.
   result.add(ChainedHookMissingProgramShell)
+  # (7) A missing local hook is silent only when the repository installs
+  # nothing for this stage. See ``DeclaredLocalHookShell``.
+  result.add(DeclaredLocalHookShell)
   result.add("run_local_hook() {\n")
-  result.add("  [ -x \"$LOCAL_HOOK\" ] || return 0\n")
+  result.add("  if [ ! -x \"$LOCAL_HOOK\" ]; then\n")
+  # As `.legacy`, the framework that installs the stage is our caller and
+  # has run its checks: nothing is missing.
+  result.add("    [ \"$RUNNING_AS_LEGACY\" = 0 ] || return 0\n")
+  result.add("    local_hook_declared " & hookName & " || return 0\n")
+  result.add("    if [ -e \"$LOCAL_HOOK\" ]; then\n")
+  result.add("      LOCAL_HOOK_STATE='is not executable'\n")
+  result.add("    else\n")
+  result.add("      LOCAL_HOOK_STATE='does not exist'\n")
+  result.add("    fi\n")
+  result.add("    printf '%s\\n' \"repro hooks: " & hookName & ": " &
+    "$(basename -- \"$LOCAL_HOOK_CONFIG\") installs the " & hookName &
+    " stage, but its chained hook $LOCAL_HOOK $LOCAL_HOOK_STATE, so none of " &
+    "this repository's " & hookName & " hooks would run. Refusing rather " &
+    "than skipping them.\" >&2\n")
+  # One line the operator pastes as it is: prek, from Nix so that no dev
+  # shell is needed, installs the stage's shim (moving the dispatcher to
+  # `.legacy`), and `hooks ensure` puts the dispatcher back with the shim
+  # chained as `.repro-local`. Both paths are single shell words.
+  result.add("    printf '%s\\n' \"repro hooks: fix: \\`cd " &
+    "$(repro_remedy_word \"$REPO_ROOT\") && nix run nixpkgs#prek -- install " &
+    "--hook-type " & hookName & " && " &
+    "$(repro_remedy_word \"$REPRO_REMEDY_CMD\") hooks ensure --vcs " &
+    "$(repro_remedy_word \"$REPO_ROOT\")\\`\" >&2\n")
+  result.add("    if [ -e \"$LOCAL_HOOK\" ]; then\n")
+  result.add("      printf '%s\\n' \"repro hooks: or, if that file is the " &
+    "repository's own hook: \\`chmod +x $(repro_remedy_word \"$LOCAL_HOOK\")\\`\" >&2\n")
+  result.add("    fi\n")
+  result.add("    return 1\n")
+  result.add("  fi\n")
   result.add("  if [ \"$RUNNING_AS_LEGACY\" = 1 ] && grep -Eq " &
     "'^# File generated by (pre-commit|prek):' \"$LOCAL_HOOK\" 2>/dev/null; then\n")
   result.add("    return 0\n")
@@ -27352,6 +27577,7 @@ proc completionHookRequestOf(parsed: ParsedHooksCommand):
     pathEnv: getEnv("PATH"),
     user: getEnv("USER"),
     windows: defined(windows),
+    macos: defined(macosx),
     # Windows `--system` puts the script under this installation: the
     # directory above the `bin\` this binary runs from (an MSI's
     # `%ProgramFiles%\Reprobuild`, whose script the package installed).
@@ -28744,6 +28970,17 @@ when not defined(windows):
     # start arm registers, and that the adopting arm provably does not.
     trustDaemonWeSpawned(result, "runquotad", tdcNoContent)
 
+  proc refusedUserDaemonMessage(socket, refusal: string): string =
+    ## The error for a per-user daemon that refuses this client at `Hello`.
+    ## It names the socket and quotes the daemon, and its remedies leave the
+    ## daemon alone: it is serving every other client of this user.
+    "runquotad at " & socket & " refused this client: " & refusal & ". " &
+      "The daemon is running and serving its other clients; waiting for it " &
+      "or restarting it would not change its answer. Run with a runquotad " &
+      "of your own (start one on a socket of your choosing and name it with " &
+      "`RUNQUOTA_SOCKET=<its socket> RUNQUOTA_ENDPOINT_SCOPE=private`), or " &
+      "without RunQuota (`" & RunQuotaBypassFlag & "`)"
+
   proc adoptOrStartUserRunQuota(runquotad: string): owned(Process) =
     ## THE SHARED PER-USER DAEMON (reprobuild-pm
     ## `spec/RunQuota-Host-Configuration.md`, "The shared per-user daemon
@@ -28780,6 +29017,14 @@ when not defined(windows):
     ## 3. A daemon holds the lock and does not answer: it is shutting down
     ##    (idle exit, retirement), or was started by hand and is not yet
     ##    listening. Wait 50 ms and repeat.
+    ##
+    ## A daemon that answers the `Hello` with a REFUSAL is in none of the
+    ## three: it is alive and serving its other clients, and refuses this
+    ## one. Waiting does not change its answer and stopping it would disrupt
+    ## every other client and not help, so the loop fails at once, quoting
+    ## the daemon's diagnostic (`probeRunQuotaDaemon`, `rdaRefused`). Before
+    ## the probe kept the two apart, a refusal read as case 3: the loop
+    ## waited out the deadline and then advised stopping the daemon.
     let idleSeconds = autoRunQuotaIdleExitSeconds()
     let directory = userEndpointDir()
     ensureUserEndpointDir(directory)
@@ -28804,7 +29049,13 @@ when not defined(windows):
           present = true
         except OSError:
           present = false
-        if present and isRunQuotaDaemonReachable():
+        let probe =
+          if present: probeRunQuotaDaemon()
+          else: RunQuotaDaemonProbe(answer: rdaUnreachable)
+        if probe.answer == rdaRefused:
+          raise newException(OSError, refusedUserDaemonMessage(socket,
+            probe.refusal))
+        if probe.answer == rdaAnswered:
           let report = decideRunQuotaHandover(runquotad)
           if report.note.len > 0:
             stderr.writeLine("repro: note: " & report.note)
@@ -31473,7 +31724,16 @@ proc committedLockRepoFacts(repoRoot: string):
     tuple[headSha, branch, originUrl: string] =
   ## Read the repo-local facts the committed-lock-derived model needs: the
   ## current ``HEAD`` SHA, the checked-out branch (empty when detached), and
-  ## the canonical fetch URL (empty when the repo has NO remote at all).
+  ## the fetch URL (empty when the repo has NO remote at all).
+  ##
+  ## ``originUrl`` is the remote AS THIS CLONE SPELLS IT (SSH or HTTPS, with
+  ## any userinfo it was configured with), which is what a local fetch should
+  ## use. It is never written to a committed lock as is: every lock writer
+  ## records ``canonicalLockFetchUrl(originUrl)`` instead, because a lock
+  ## entry must not depend on the transport the writer's clone uses or carry
+  ## its credentials: an SSH clone would otherwise write a URL anonymous
+  ## consumers cannot fetch, and an HTTPS remote with userinfo would commit
+  ## its token.
   ##
   ## ``branch`` is the local name and is right for local decisions (a trunk
   ## to sync). It is never written to a committed lock, and neither is any
@@ -31806,7 +32066,8 @@ proc usesProducerLockedDep(selector, root, pathBase: string;
     let rel = relativePath(depAbs, pathBase).replace('\\', '/')
     return some(LockedDep(
       name: selector, path: rel,
-      coordinates: Coordinates(kind: ckVcs, url: facts.originUrl,
+      coordinates: Coordinates(kind: ckVcs,
+        url: canonicalLockFetchUrl(facts.originUrl),
         revision: facts.headSha),
       integrity: computeDepIntegrity(depAbs, facts.headSha),
       version: "", visibility: "public", participation: "",
@@ -31852,7 +32113,8 @@ proc lockedDepFromCheckout(name, depAbs, pathBase: string): LockedDep =
   let facts = committedLockRepoFacts(depAbs)
   LockedDep(
     name: name, path: relativePath(depAbs, pathBase).replace('\\', '/'),
-    coordinates: Coordinates(kind: ckVcs, url: facts.originUrl,
+    coordinates: Coordinates(kind: ckVcs,
+      url: canonicalLockFetchUrl(facts.originUrl),
       revision: facts.headSha),
     integrity: computeDepIntegrity(depAbs, facts.headSha),
     version: "", visibility: "public", participation: "",
@@ -31925,7 +32187,8 @@ proc catalogLockedDep*(catalogRoot, root: string;
       else: ReprobuildPackagesRepositoryName
     return some(LockedDep(
       name: name, path: defaultLockedDepCheckoutPath(name),
-      coordinates: Coordinates(kind: ckVcs, url: marker.url,
+      coordinates: Coordinates(kind: ckVcs,
+        url: canonicalLockFetchUrl(marker.url),
         revision: marker.revision),
       integrity: gitObjectMultihash(
         (if marker.revision.len == 64: "sha256" else: "sha1"),
@@ -31958,7 +32221,8 @@ proc catalogLockedDep*(catalogRoot, root: string;
     return some(LockedDep(
       name: depName,
       path: depPath,
-      coordinates: Coordinates(kind: ckVcs, url: facts.originUrl,
+      coordinates: Coordinates(kind: ckVcs,
+        url: canonicalLockFetchUrl(facts.originUrl),
         revision: facts.headSha),
       integrity: computeDepIntegrity(depAbs, facts.headSha),
       version: "", visibility: "public", participation: "",
@@ -32424,7 +32688,8 @@ proc lockedDepsForWorkspace*(workspaceRoot: string;
     let rel = relativePath(depAbs, pathBase).replace('\\', '/')
     siblingDeps.add(LockedDep(
       name: d.name, path: rel,
-      coordinates: Coordinates(kind: ckVcs, url: facts.originUrl,
+      coordinates: Coordinates(kind: ckVcs,
+        url: canonicalLockFetchUrl(facts.originUrl),
         revision: facts.headSha),
       integrity: computeDepIntegrity(depAbs, facts.headSha),
       version: "", visibility: "public", participation: "",
@@ -32549,7 +32814,8 @@ proc lockedDepsForWorkspace*(workspaceRoot: string;
       continue
     siblingDeps.add(LockedDep(
       name: depName, path: rel,
-      coordinates: Coordinates(kind: ckVcs, url: facts.originUrl,
+      coordinates: Coordinates(kind: ckVcs,
+        url: canonicalLockFetchUrl(facts.originUrl),
         revision: facts.headSha),
       integrity: computeDepIntegrity(depAbs, facts.headSha),
       version: "", visibility: "public", participation: "",
@@ -32636,13 +32902,23 @@ proc lockedDepsForWorkspace*(workspaceRoot: string;
     if name notin rootDepends: rootDepends.add(name)
   result.add(LockedDep(
     name: rootName, path: SelfLockedDepPath,
-    coordinates: Coordinates(kind: ckVcs, url: rootFacts.originUrl,
+    coordinates: Coordinates(kind: ckVcs,
+      url: canonicalLockFetchUrl(rootFacts.originUrl),
       revision: rootFacts.headSha),
     integrity: computeDepIntegrity(root, rootFacts.headSha),
     version: "", visibility: "public", participation: "",
     depends: rootDepends, tags: @[]))
   for d in siblingDeps:
-    result.add(d)
+    var entry = d
+    # Observed entries are already canonical. A pin carried forward from the
+    # existing lock (its sibling not checked out here, or a cached producer
+    # checkout) keeps the URL an older writer recorded, which may be the
+    # writer's SSH spelling or carry userinfo: write it in the one form every
+    # machine writes (Unified-Locking-And-Hooks.md §14.2, "The `url` a pin
+    # records"). This moves no pin.
+    if entry.coordinates.kind == ckVcs:
+      entry.coordinates.url = canonicalLockFetchUrl(entry.coordinates.url)
+    result.add(entry)
 
 proc checkoutTrunk(facts: tuple[headSha, branch, originUrl: string]): string =
   ## The default workspace branch of a committed-lock-only workspace: the
@@ -34242,7 +34518,7 @@ proc recordMaterializedProducersForInspection(
         selections = activeToolModeSelections(runtimeArtifact, mode),
         storeRootFor = overriddenToolStoreRoot(""))
     if not recordProducerMaterialization(selector, sourceRootAbs,
-        producerArtifact, runtimeIdentity, binding):
+        producerArtifact, runtimeIdentity, binding, projectRoot):
       raise newException(IOError,
         "cross-repo producer \"" & selector & "\" at " & sourceRootAbs &
         " is not materialized; run `repro build` for the consuming target " &
@@ -34430,18 +34706,16 @@ proc prepareBuildGraphInspection(target: string; mode: ToolProvisioningMode;
     # ANCESTOR of its working directory, so without the classification its
     # key carries the immediate membership of `/` and of the user's home.
     wireFilesystemRoots(providerCompileConfig, projectRoot, outDir)
-    let providerCompileResult = runProviderCompileEdge(providerPlan,
-      modulePath, interfacePath, providerArtifactPath,
-      graphHelperCliPath(publicCliPath, ProviderCompileActionId), compileWorkDir,
-      compileScratchDir, projectRoot, providerCompileConfig)
     # This pass logs nothing of its own, and it is the pass that most
     # often does the actual compiling. Record it so the ONE line that IS
     # logged (in `executeBuildTarget`) can report the invocation rather
     # than just its own last consultation.
-    noteProviderCompileConsultation(providerCompileResult)
-    if providerCompileResult.hasFailedActions():
-      raise newException(OSError, providerCompileFailureWithLog(providerCompileResult,
-          providerArtifactPath))
+    let verified = runVerifiedProviderCompileEdge(providerPlan,
+      modulePath, interfacePath, providerArtifactPath,
+      graphHelperCliPath(publicCliPath, ProviderCompileActionId), compileWorkDir,
+      compileScratchDir, projectRoot, providerCompileConfig,
+      proc (run: BuildRunResult) = noteProviderCompileConsultation(run))
+    let providerCompileResult = verified.run
     # Re-derived from the engine's own decision now that the hand-written
     # freshness gate is gone: the edge was scheduled, and the engine either
     # restored its outputs from the CAS (``asCacheHit``) or accepted the
@@ -34450,12 +34724,8 @@ proc prepareBuildGraphInspection(target: string; mode: ToolProvisioningMode;
     for item in providerCompileResult.results:
       if item.id == ProviderCompileActionId:
         result.providerCompileCacheHit = item.status in {asCacheHit, asUpToDate}
-    if not fileExists(extendedPath(providerArtifactPath)):
-      raise newException(IOError,
-        "provider compile edge did not write artifact: " & providerArtifactPath)
     provider = readProviderCompileArtifact(providerArtifactPath)
-    let providerConsistency = providerCompileConsistencyAfterExecution(
-      providerPlan, providerArtifactPath)
+    let providerConsistency = verified.consistency
     if not providerConsistency.fresh:
       raise newException(IOError,
         "provider compile artifact is stale after edge execution: " &
@@ -34660,21 +34930,20 @@ proc refreshRecipeProviderSnapshot(target: string;
     # ANCESTOR of its working directory, so without the classification its
     # key carries the immediate membership of `/` and of the user's home.
     wireFilesystemRoots(providerCompileConfig, projectRoot, outDir)
-    let providerCompileResult = runProviderCompileEdge(providerPlan,
-      modulePath, interfacePath, providerArtifactPath,
-      graphHelperCliPath(publicCliPath, ProviderCompileActionId), compileWorkDir,
-      compileScratchDir, projectRoot, providerCompileConfig)
     # This pass logs nothing of its own, and it is the pass that most
     # often does the actual compiling. Record it so the ONE line that IS
     # logged (in `executeBuildTarget`) can report the invocation rather
     # than just its own last consultation.
-    noteProviderCompileConsultation(providerCompileResult)
-    if providerCompileResult.hasFailedActions():
-      raise newException(OSError, providerCompileFailureWithLog(providerCompileResult,
-          providerArtifactPath))
-    if not fileExists(extendedPath(providerArtifactPath)):
+    let providerConsistency = runVerifiedProviderCompileEdge(providerPlan,
+      modulePath, interfacePath, providerArtifactPath,
+      graphHelperCliPath(publicCliPath, ProviderCompileActionId), compileWorkDir,
+      compileScratchDir, projectRoot, providerCompileConfig,
+      proc (run: BuildRunResult) = noteProviderCompileConsultation(run)).
+      consistency
+    if not providerConsistency.fresh:
       raise newException(IOError,
-        "provider compile edge did not write artifact: " & providerArtifactPath)
+        "provider compile artifact is stale after edge execution: " &
+          providerArtifactPath & "\n" & providerConsistency.detail)
     provider = readProviderCompileArtifact(providerArtifactPath)
 
   let providerArtifactId = digestHex(provider.providerFingerprint)
@@ -44786,6 +45055,12 @@ type
       ## document that ``--write-report`` persists).
     report: ReportSpec
       ## Opt-in ``--write-report[=PATH]`` artifact.
+    excludedRepos: seq[string]
+      ## Internal, no command-line flag: member repos this materialization
+      ## leaves uncloned, matched by ``repoNamedIn``. Set only by the fork form
+      ## of ``repro branch`` from its ``--except`` (CLI/branch.md §"--except"),
+      ## whose excluded repos stay members of the new workspace but must get no
+      ## checkout there. The membership this init records is unaffected.
 
   WorkspaceInitResolution = object
     project: ResolvedProject
@@ -46453,6 +46728,37 @@ proc alignWorkspaceRemotes*(workspaceRoot: string; repos: seq[ResolvedRepo]; ide
 # nested) checkout paths so discovery is not reimplemented here.
 proc refreshWorkspaceSiblingIgnoresBestEffort(workspaceRoot: string)
 
+proc repoNamedIn(repo: ResolvedRepo; names: openArray[string]): bool =
+  ## Whether ``names`` names ``repo`` EXACTLY: by its name, or by a name it
+  ## declares it was previously known under (``[extensions] previously``).
+  ##
+  ## This is the identity ``repro branch --except`` matches on
+  ## (CLI/branch.md §"--except"). The ``previously`` arm is what keeps an
+  ## exclusion written against the SOURCE workspace's names applying to a repo
+  ## the target's manifests have renamed under ``--from=<role>``; the same
+  ## identities correlate source and target checkouts there
+  ## (``matchSourceState``).
+  if repo.name in names:
+    return true
+  for prior in repo.previously:
+    if prior.name.len > 0 and prior.name in names:
+      return true
+  false
+
+proc namesMatchingNoRepo(repos: openArray[ResolvedRepo];
+                         names: openArray[string]): seq[string] =
+  ## The entries of ``names`` that ``repoNamedIn`` matches against NO repo of
+  ## ``repos``, in the order given. Every one is returned, not just the first,
+  ## so a refusal can name all the typos at once.
+  for name in names:
+    var matched = false
+    for repo in repos:
+      if repoNamedIn(repo, [name]):
+        matched = true
+        break
+    if not matched and name notin result:
+      result.add(name)
+
 proc executeWorkspaceInit(argsIn: WorkspaceInitArgs): WorkspaceInitOutcome =
   ## End-to-end driver. Resolves the named project / variant, classifies
   ## each declared repo against the on-disk workspace, schedules a
@@ -46549,6 +46855,10 @@ proc executeWorkspaceInit(argsIn: WorkspaceInitArgs): WorkspaceInitOutcome =
   var cloneActions: seq[BuildAction]
   var cloneEntries: seq[WorkspaceInitClonedEntry]
   for idx, repo in resolved.repos:
+    # A repo the caller excluded is neither classified nor cloned: the fork
+    # that asked for it promises the repo is not touched at all.
+    if repoNamedIn(repo, args.excludedRepos):
+      continue
     let absPath = args.workspaceRoot / repo.path
     if dirExists(absPath):
       classifyExistingRepo(identity, args.workspaceRoot, repo,
@@ -46825,10 +47135,17 @@ proc pathIsCwdOrAncestor*(candidate, fromDir: string): bool =
 
 proc cloneOrgRootRepo(identity: GitToolIdentity;
                       url, destination: string; independentObjects = false):
-    tuple[ok: bool; diagnostic: string] =
+    tuple[ok: bool; diagnostic: string; cloned: bool] =
   ## Clone the org root workspace repo at ``url`` into ``destination`` (a
   ## fresh named directory). Best-effort; returns a structured failure so
   ## the caller can report a clear error instead of crashing.
+  ##
+  ## ``cloned`` says whether ``git clone`` itself succeeded, which ``ok`` alone
+  ## does not: a clone that succeeded can still fail the step after it, and
+  ## then the work tree at ``destination`` is this call's. ``git clone``
+  ## refuses a non-empty destination and removes its own work tree when it
+  ## fails, so ``cloned`` is what tells a caller whether the tree there was
+  ## made by this call.
   ##
   ## ``--recurse-submodules`` because the root repo's submodules are part of
   ## the workspace, not of some repo inside it. Reprobuild treats a develop-mode
@@ -46848,7 +47165,7 @@ proc cloneOrgRootRepo(identity: GitToolIdentity;
   let res = execCmdEx(cmd, options = {poStdErrToStdOut, poUsePath},
     env = scrubbedGitRepositoryEnv())
   if res.exitCode != 0:
-    return (ok: false, diagnostic: res.output.strip())  # git-merged-text: clone's reason is on stderr
+    return (ok: false, diagnostic: res.output.strip(), cloned: false)  # git-merged-text: clone's reason is on stderr
   if independentObjects:
     # Git does not propagate the parent's --no-local into submodule clones.
     # A local submodule source can borrow too. Copy borrowed objects before
@@ -46857,8 +47174,9 @@ proc cloneOrgRootRepo(identity: GitToolIdentity;
     let owned = gitRunPlain(identity, ["-C", destination, "submodule", "foreach",
       "--quiet", "--recursive", ownSubmoduleObjects])
     if owned.code != 0:
-      return (ok: false, diagnostic: "could not make root submodules independent: " & owned.output)
-  (ok: true, diagnostic: "")
+      return (ok: false, diagnostic: "could not make root submodules independent: " & owned.output,
+              cloned: true)
+  (ok: true, diagnostic: "", cloned: true)
 
 proc runWorkspaceInitFromUrl*(c: ReproCommandLineWorkspaceInit;
                               env: proc(name: string): string = sysEnv): int =
@@ -54526,6 +54844,10 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs;
   # again, for every registered leaf, once the refresh has moved the pool.
   block sharedCloneLeaves:
     var reports: seq[LeafCheckReport]
+    # One set for the whole pass: a repository that is a submodule of more
+    # than one participating checkout is inspected once (``seen`` of
+    # ``checkSubmoduleLeaves``).
+    var submodulesSeen = initHashSet[string]()
     for repo in resolved.repos:
       let repoPath = args.workspaceRoot / repo.path
       if args.cloneObjects in ["", "shared"] and hasGitEntry(repoPath):
@@ -54542,7 +54864,7 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs;
         reports.add(checkSubmoduleLeaves(identity.binaryPath, repoPath,
           lcmRepair,
           if cacheRoot.len > 0: cacheRoot
-          else: defaultCacheRoot(args.workspaceRoot)))
+          else: defaultCacheRoot(args.workspaceRoot), submodulesSeen))
     emitLeafReports(reports)
 
   var sharedBareRefreshAction = initTable[string, string]()
@@ -57378,6 +57700,12 @@ type
     # the legacy whole-workspace refusal (explicit ``repro workspace lock``
     # and post-commit keep that behavior).
     dirtyScopeNames: HashSet[string]
+    sweepKeepRelPaths: seq[string]
+      ## Records the caller is about to publish, which this write's orphan
+      ## sweep must leave in place whatever it finds (the pre-push gate's range
+      ## drafts). Never needed for correctness — each is keyed at an ancestor
+      ## of a checked-out HEAD, so it is reachable — but it makes "the gate
+      ## never sweeps a record it anchors" a property of the call.
     dirtyScopeIsExplicit: bool
       ## ``dirtyScopeNames`` was DECIDED by the caller, so an empty set means
       ## "no repo is in scope" rather than "no scope was supplied".
@@ -58365,6 +58693,8 @@ proc executeWorkspaceLock(args: WorkspaceLockArgs;
     var justWritten: seq[string]
     if lockRelForTracking.len > 0:
       justWritten.add(lockRelForTracking)
+    for rel in args.sweepKeepRelPaths:
+      justWritten.add(rel)
     let sweep = sweepOrphanedLockDrafts(identity, recordStoreRoot,
       observedRoots, keepRelPaths = justWritten)
     report.sweptDrafts = sweep.swept
@@ -60854,6 +61184,271 @@ proc withheldLockRecordLine(item: WithheldLockRecord;
     "local draft. Publish the commit with `git -C " &
     remedyPathWord(item.checkout) & " push`, then re-run `" & workspaceLockCommand(workspaceRoot) & "`."
 
+# ---- A push also publishes the verified drafts below its tip ---------------
+#
+# push-hook-publication-protocol.md §"A push also publishes the verified drafts
+# of the commits below its tip" and Invariant 13. ``post-commit`` files a draft
+# for EVERY commit, and the gate anchors the record of the pushed tip. A push
+# that carries several commits publishes source for all of them, so their
+# drafts are this operation's to anchor too — provided each one is FIT to
+# publish. Before this, only the tip's record was published: the other drafts
+# were never published (nothing anchored them) and never swept (a remote
+# branch reaches their commits, so they are not orphans), and the commits they
+# describe stayed published with no record sibling resolution could read.
+#
+# Candidates are every untracked draft of the pushed repo whose commit is a
+# PROPER ANCESTOR of the pushed tip — not only the drafts of this push's
+# range. After the push every ancestor of the tip is on a remote, so the rule
+# also covers drafts an earlier push left behind: those written before this
+# rule existed, and those an earlier push held back because they failed
+# verification. That is the retry path; nothing else ever examines them again.
+#
+# The gate never WRITES a record for a range commit: it cannot know which
+# sibling revisions that commit was developed against, and recomputing them
+# from today's HEADs would publish a false record that immutability then keeps
+# forever. A range commit with no draft gets no record.
+
+type
+  HeldRangeDraft = object
+    ## A range draft that failed publication verification. It stays a draft,
+    ## exactly as it is, and the next push of the same repo examines it again.
+    relPath: string
+    reason: string ## a clause completing "it ..."
+
+  RangeDraftExamination = object
+    anchored: seq[ExpectedLockRecord]
+      ## Drafts that passed verification, bound to their exact coordinates.
+      ## They join the record-store publication unchanged, byte for byte.
+    held: seq[HeldRangeDraft]
+    diagnostics: seq[string]
+      ## Probes that FAILED. Each left every draft it concerned unexamined,
+      ## and so unpublished: doubt keeps a draft a draft.
+
+proc rangeDraftHeldLine(item: HeldRangeDraft; pushedRepo: string): string =
+  ## The gate-output line for a held range draft. It names the record and the
+  ## reason, and says what happens to it, so the operator can tell a draft the
+  ## gate examined and kept back from one nothing looked at.
+  "range draft '" & item.relPath & "' stays a draft and is not published: " &
+    "it " & item.reason & "; the next push of '" & pushedRepo &
+    "' examines it again"
+
+proc verifyRangeDraft(identity: GitToolIdentity; abs, relPath, project,
+    pushedRepo, keySha: string;
+    pinCheckouts: Table[string, LockPinCheckout];
+    pinVerdicts: var Table[string, string]):
+    tuple[ok: bool; record: ExpectedLockRecord; reason: string] =
+  ## Publication verification of one range draft (§"A push also publishes the
+  ## verified drafts …", rule 3). ``reason`` completes "it …" when not ``ok``.
+  ##
+  ## ``pinVerdicts`` caches ``pinnedRevisionEvidence`` per (repo, revision)
+  ## across every draft of one push (rule 6: each pinned sibling revision is
+  ## probed once per push, whatever the number of drafts that pin it).
+  var body: string
+  try:
+    body = readFile(extendedPath(abs))
+  except CatchableError as err:
+    return (false, ExpectedLockRecord(), "could not be read (" & err.msg & ")")
+  var lock: Lock
+  try:
+    # The full ``reprobuild.workspace.lock.v1`` reader, deliberately without
+    # the minimal routed-record fallback the publisher also accepts: a range
+    # draft is a ``post-commit`` draft of the record store, and anything else
+    # under that key is not something this rule may publish on its own.
+    lock = readLock(abs)
+  except CatchableError as err:
+    return (false, ExpectedLockRecord(),
+      "does not parse as a workspace lock (" & firstOutputLine(err.msg) & ")")
+  if lock.lock.project != project:
+    return (false, ExpectedLockRecord(), "names project '" &
+      lock.lock.project & "', not '" & project & "'")
+  var selfFound = false
+  for entry in lock.repo:
+    if entry.name == pushedRepo:
+      if entry.revision.toLowerAscii() != keySha.toLowerAscii():
+        return (false, ExpectedLockRecord(), "pins " & pushedRepo & " @ " &
+          entry.revision & ", not the commit it is keyed at (" & keySha & ")")
+      selfFound = true
+      continue
+    if entry.revision.len == 0:
+      return (false, ExpectedLockRecord(), "pins " & entry.name &
+        " at no revision")
+    if entry.name notin pinCheckouts:
+      return (false, ExpectedLockRecord(), "pins " & entry.name & " @ " &
+        entry.revision & ", a repo with no checkout in this workspace to " &
+        "check it against")
+    let cacheKey = entry.name & "\0" & entry.revision.toLowerAscii()
+    if cacheKey notin pinVerdicts:
+      let located = pinCheckouts[entry.name]
+      pinVerdicts[cacheKey] = pinnedRevisionEvidence(identity,
+        located.checkout, entry.revision, located.gitRemote)
+    let evidence = pinVerdicts[cacheKey]
+    if evidence.len > 0:
+      return (false, ExpectedLockRecord(), "pins " & entry.name & " @ " &
+        entry.revision & ", which " & evidence)
+  if not selfFound:
+    # A record that does not pin its own key commit cannot be bound to an
+    # exact coordinate, and the publisher's own verification would refuse it
+    # (``verifyLockRecordPath``: "lock trigger identity does not match its
+    # path"). Holding it here keeps that refusal from failing the push.
+    return (false, ExpectedLockRecord(), "has no entry for " & pushedRepo &
+      ", so it cannot be bound to the commit it is keyed at")
+  let bound = expectedLockRecordFromBody(relPath, body)
+  if bound.isNone:
+    return (false, ExpectedLockRecord(),
+      "cannot be bound to an exact repository coordinate")
+  (true, bound.get(), "")
+
+proc examineRangeDrafts(identity: GitToolIdentity;
+    recordStoreRoot, project, pushedRepo, pushedRoot, tipSha: string;
+    pinCheckouts: Table[string, LockPinCheckout]): RangeDraftExamination =
+  ## The range drafts of one push: every UNTRACKED canonical draft under
+  ## ``locks/<project>/<pushedRepo>/`` whose commit is a proper ancestor of
+  ## ``tipSha`` in ``pushedRoot``, split into those that pass publication
+  ## verification (``anchored``) and those that do not (``held``).
+  ##
+  ## ``pinCheckouts`` maps a declared repo NAME to the checkout its pinned
+  ## revisions are checked in and the git remote that scopes the check.
+  ##
+  ## Bounded (rule 6): only drafts already on disk under the pushed repo's
+  ## directory are examined, listed as the store's untracked files, so the
+  ## published records beside them are never read; each costs one ancestry
+  ## probe. Never raises: a failed probe is reported and leaves the drafts it
+  ## concerned unpublished.
+  if recordStoreRoot.len == 0 or pushedRoot.len == 0 or tipSha.len == 0:
+    return
+  let dirRel = lockRecordSubtreeRelPath(project, pushedRepo)
+  try:
+    if not dirExists(extendedPath(recordStoreRoot /
+        dirRel.replace('/', DirSep))):
+      return
+    # The store must be its OWN checkout, for the reason the sweep gives:
+    # otherwise git's upward discovery answers "untracked" from whatever
+    # repository encloses the directory.
+    if not discoverGitWorktree(identity, recordStoreRoot).ok:
+      return
+    # ``--others`` WITHOUT ``--exclude-standard``, as the publisher and the
+    # sweep enumerate: an operator may ignore the whole manifest layer.
+    let listing = gitRunPlainQuery(identity,
+      ["-C", recordStoreRoot, "ls-files", "-z", "--others", "--", dirRel])
+    if listing.code != 0:
+      result.diagnostics.add("could not list the drafts of '" & pushedRepo &
+        "' in '" & recordStoreRoot & "'; none was examined: " &
+        listing.diagnostic)
+      return
+    var pinVerdicts = initTable[string, string]()
+    for rel in nulSeparatedPaths(listing.output):
+      let parsed = parseLockRecordRelPath(rel)
+      if not parsed.ok or parsed.project != project or
+          parsed.repo != pushedRepo:
+        continue
+      if not isFullObjectIdText(parsed.sha): continue
+      if parsed.sha.toLowerAscii() == tipSha.toLowerAscii(): continue
+      let abs = recordStoreRoot / parsed.relPath.replace('/', DirSep)
+      if not fileExists(extendedPath(abs)): continue
+      # One ancestry probe per draft. Exit 1 is "not an ancestor": a commit on
+      # another branch, or one no ref reaches (the orphan sweep's business).
+      # Anything else — a commit this checkout does not have, a failed probe —
+      # is not positive evidence either, so the draft is simply not a
+      # candidate this time and stays as it is.
+      let ancestry = gitRunPlain(identity, ["-C", pushedRoot, "merge-base",
+        "--is-ancestor", parsed.sha, tipSha])
+      if ancestry.code != 0: continue
+      let verdict = verifyRangeDraft(identity, abs, parsed.relPath, project,
+        pushedRepo, parsed.sha, pinCheckouts, pinVerdicts)
+      if verdict.ok:
+        result.anchored.add(verdict.record)
+      else:
+        result.held.add(HeldRangeDraft(relPath: parsed.relPath,
+          reason: verdict.reason))
+  except CatchableError as err:
+    # Best-effort by construction, like the sweep: a range draft that could
+    # not be examined stays a draft, and the tip's publication is unaffected.
+    result.anchored.setLen(0)
+    result.diagnostics.add("range draft examination failed; no range " &
+      "draft is published by this push: " & err.msg)
+
+type
+  RangeDraftScreen = object
+    publish: seq[ExpectedLockRecord]
+      ## Drafts to publish with the tip: their key is absent upstream, or
+      ## holds the identical bytes (then their publication is a no-op).
+    lines: seq[string]
+      ## One operator-facing line per draft that is NOT published, and why.
+
+proc screenRangeDraftsAgainstUpstream(identity: GitToolIdentity;
+    recordStoreRoot: string; drafts: openArray[ExpectedLockRecord]):
+    RangeDraftScreen =
+  ## Invariant 14 for range drafts (§"A push also publishes the verified
+  ## drafts …", rule 4), checked against the FRESHLY FETCHED upstream before
+  ## anything is staged.
+  ##
+  ## A key the upstream already holds is immutable. For the tip that is a
+  ## refusal, and stays one (``publishedLockKeyCollision``). For a range draft
+  ## it must not fail the push: the published record stands, the draft is
+  ## dropped from this publication, and the operator is told. Identical bytes
+  ## are a no-op and are published with the rest (the replay onto the fetched
+  ## tip then drops them as already applied).
+  ##
+  ## A draft at a key published with DIFFERENT bytes is also removed from the
+  ## store's working tree. It can never be published — its key is taken — and
+  ## the store checkout has to hold the published record at that path as soon
+  ## as it catches up with its upstream: an untracked file there stops that
+  ## catch-up (``git`` refuses to overwrite an untracked file, even one with
+  ## identical bytes), which is the replay this very publication performs. The
+  ## line printed for it names both blob ids, so what the draft said is not
+  ## lost without trace.
+  ##
+  ## When the upstream cannot be resolved or fetched, no range draft is
+  ## published this time; each stays a draft for the next push, and the tip's
+  ## publication reports the backend failure itself.
+  if drafts.len == 0: return
+  let upstream = resolveLockUpstream(identity, recordStoreRoot)
+  if not upstream.ok:
+    # No upstream: the tip's publication is a benign "not publishable" skip,
+    # and there is nothing to compare the drafts with either.
+    return
+  let fetched = fetchImmutableLockTip(identity, recordStoreRoot,
+    upstream.target)
+  if not fetched.ok:
+    result.lines.add("range drafts of this push are not published this " &
+      "time (" & fetched.diagnostic & "); they stay drafts and the next " &
+      "push examines them again")
+    return
+  for item in drafts:
+    let remoteBlob = gitRunPlainQuery(identity, ["-C", recordStoreRoot,
+      "rev-parse", "--verify", "--quiet", fetched.oid & ":" & item.relPath])
+    if remoteBlob.code != 0 or remoteBlob.output.strip().len == 0:
+      result.publish.add(item)
+      continue
+    let abs = recordStoreRoot / item.relPath.replace('/', DirSep)
+    # The blob the draft WOULD be staged as: ``hash-object`` with the path
+    # applies the store's own clean filters, exactly as ``git add`` does.
+    let localBlob = gitRunPlainQuery(identity, ["-C", recordStoreRoot,
+      "hash-object", "--path=" & item.relPath, abs])
+    if localBlob.code != 0 or localBlob.output.strip().len == 0:
+      result.lines.add("range draft '" & item.relPath & "' is not " &
+        "published: its key is already published on " &
+        upstream.target.display & " and the draft could not be compared " &
+        "with it (" & localBlob.diagnostic & "); it stays a draft")
+      continue
+    let published = remoteBlob.output.strip().toLowerAscii()
+    let drafted = localBlob.output.strip().toLowerAscii()
+    if published == drafted:
+      result.publish.add(item)
+      continue
+    var removal = ""
+    try:
+      removeFile(extendedPath(abs))
+    except CatchableError as err:
+      removal = "; the draft could not be removed (" & err.msg &
+        "), so this store cannot take the published record until it is"
+    result.lines.add("range draft '" & item.relPath & "' is not " &
+      "published: a DIFFERENT record is already published at that key on " &
+      upstream.target.display & " (published blob " & published &
+      ", draft blob " & drafted & "). Published records are immutable, so " &
+      "the published one stands and the draft is withdrawn from this store" &
+      removal)
+
 proc runWorkspaceLockCommand*(c: ReproCommandLineWorkspaceLock): int =
   ## ``repro workspace lock [<project>] [--workspace-root=PATH]
   ## [--record-store-root=PATH] [--sha=SHA] [--trigger-repo=NAME]
@@ -61008,9 +61603,20 @@ type
       ## store but are absent from its last-known upstream.
     strandedRecords*: int
       ## M19b — of ``pendingRecords``, how many are anchored to a trigger
-      ## commit that is ALREADY published in the trigger repo. Each one is
-      ## proof that a push went out without its lock: publication is broken,
-      ## not merely pending. Any non-zero value is loud.
+      ## commit that is ALREADY published in the trigger repo with NO
+      ## published record of the repo at that commit or at any commit between
+      ## it and the repo's upstream. Each one is proof that a push went out and
+      ## published nothing at or above it: publication is not running, not
+      ## merely pending. Any non-zero value is loud.
+    heldRecords*: int
+      ## Of ``pendingRecords``, how many are anchored to an already-pushed
+      ## commit that lies BELOW a published record: drafts the push that
+      ## published that record examined and kept back (or an older build left
+      ## behind). The next push of the repo examines them again. Quiet.
+    backlogTruncated*: bool
+      ## The backlog scan stopped at its bound, so ``pendingRecords``,
+      ## ``strandedRecords`` and ``heldRecords`` are lower bounds (the log
+      ## line marks each with ``+``).
 
 proc postCommitPublicationTag(state: PostCommitPublication): string =
   case state
@@ -61037,6 +61643,8 @@ proc toJsonNode*(report: PostCommitReport): JsonNode =
   result["publication"] = %report.publication
   result["pendingRecords"] = %report.pendingRecords
   result["strandedRecords"] = %report.strandedRecords
+  result["heldRecords"] = %report.heldRecords
+  result["backlogTruncated"] = %report.backlogTruncated
 
 proc mainWorktreeRootFor(startPath: string; gitBin = ""): string =
   ## HL-1 (§4.3) — the MAIN worktree's root for a path inside a LINKED git
@@ -62217,18 +62825,28 @@ proc refreshEvidenceOnlyRepoAtPostCommit(workspaceRoot, currentRepoAbs: string):
 # strictly stronger than the claim the old ``ok wrote <path>`` made, which was
 # none at all.
 #
-# It also counts the store's BACKLOG for the trigger repo, and within that the
-# STRANDED records: pending records whose trigger commit is already published
-# in the trigger repo. A stranded record is not "publication has not happened
-# yet" — it is "a push went out and left its lock behind", i.e. proof that the
-# publication path is broken. That distinction is what separates the designed
-# steady state (quiet) from the two-week starvation (loud), without inventing
-# an arbitrary backlog threshold.
+# It also counts the store's BACKLOG for the trigger repo: its unpublished
+# records. Of those whose commit the trigger repo's upstream already reaches,
+# it tells two kinds apart (push-hook-publication-protocol.md §"The
+# post-commit publication probe tells a held draft from a starved push"):
+#
+# * STRANDED — no published record of the repo is keyed at that commit or at
+#   any commit between it and the upstream. A push went out and published
+#   nothing at or above it: proof that the publication path is not running.
+#   This is what separates the designed steady state (quiet) from the
+#   two-week starvation (loud), without an arbitrary backlog threshold.
+# * HELD — the commit lies below a published record. The push that published
+#   that record also examined this draft and kept it back (it pins a sibling
+#   revision no remote has yet, say), or an older build left it behind. The
+#   next push of the repo examines it again; it is not evidence of a broken
+#   publisher, and it is reported as what it is.
 
 const PostCommitBacklogScanLimit = 256
-  ## Bound on how many backlog records the probe inspects. A post-commit hook
-  ## may not turn into an unbounded git-call loop on a store with years of
-  ## history; the counts saturate at this bound and the diagnostic says so.
+  ## Bound on how many UNPUBLISHED records the probe inspects. A post-commit
+  ## hook may not turn into an unbounded git-call loop on a store with years
+  ## of history. The bound applies to the drafts, never to the published
+  ## records beside them, which are read in one listing; when it truncates the
+  ## scan, every count the probe reports is a lower bound and says so.
 
 type
   PostCommitPublicationProbe = object
@@ -62236,7 +62854,9 @@ type
     detail: string       ## Why the store is/is not publishable, when relevant.
     pending: int
     stranded: int
-    saturated: bool
+    held: int
+    saturated: bool      ## The scan stopped at the bound: every count is a
+                         ## lower bound.
 
 proc lockStoreUpstreamRef(identity: GitToolIdentity; storeRoot: string): string =
   ## The store's upstream tracking ref (``origin/main``), or "" when the store
@@ -62254,6 +62874,55 @@ proc pathIsInGitTree(identity: GitToolIdentity; repoRoot, treeish,
   gitRunPlain(identity,
     ["-C", repoRoot, "cat-file", "-e",
      treeish & ":" & relPath.replace('\\', '/')]).code == 0
+
+proc recordShaOf(fileName: string): string =
+  ## The full object id a canonical record file is keyed at, lower-cased, or
+  ## "" for anything else in the directory (a README, a legacy record).
+  if not fileName.endsWith(lockRecordExt): return ""
+  let stem = fileName[0 ..< fileName.len - lockRecordExt.len]
+  if not isFullObjectIdText(stem): return ""
+  stem.toLowerAscii()
+
+proc commitsWithPublishedRecordAbove(identity: GitToolIdentity;
+    repoRoot, upstream: string; drafts: openArray[string];
+    published: HashSet[string]): tuple[ok: bool; held: HashSet[string]] =
+  ## Of ``drafts`` (commits the trigger repo's ``upstream`` reaches), the ones
+  ## below a commit keyed in ``published`` that ``upstream`` also reaches —
+  ## i.e. with a published record between them and the upstream.
+  ##
+  ## ONE history walk, not one per draft. It covers exactly the commits
+  ## ``upstream`` reaches that are not ancestors of the drafts' common base,
+  ## so every draft and every commit between a draft and the upstream is in
+  ## it. Walked children-first (``--topo-order``), so a commit's flag "a
+  ## published record is at or above one of my children" is final by the time
+  ## the commit itself is read.
+  result.held = initHashSet[string]()
+  if drafts.len == 0: return (true, result.held)
+  let base = gitRunPlainQuery(identity,
+    @["-C", repoRoot, "merge-base", "--octopus"] & @drafts)
+  if base.code != 0 or base.output.strip().len == 0: return (false, result.held)
+  let baseSha = base.output.strip().splitLines()[0].strip()
+  let parents = gitRunPlainQuery(identity,
+    ["-C", repoRoot, "rev-list", "--parents", "-n", "1", baseSha])
+  if parents.code != 0: return (false, result.held)
+  var args = @["-C", repoRoot, "rev-list", "--topo-order", "--parents",
+    upstream]
+  for parent in parents.output.strip().splitWhitespace()[1 .. ^1]:
+    args.add("^" & parent)
+  let walk = gitRunPlainQuery(identity, args)
+  if walk.code != 0: return (false, result.held)
+  let wanted = drafts.toHashSet()
+  var aboveChild = initHashSet[string]()
+  for line in walk.output.splitLines():
+    let fields = line.strip().toLowerAscii().splitWhitespace()
+    if fields.len == 0: continue
+    let commit = fields[0]
+    if commit in wanted and commit in aboveChild:
+      result.held.incl(commit)
+    if commit in published or commit in aboveChild:
+      for parent in fields[1 .. ^1]:
+        aboveChild.incl(parent)
+  (true, result.held)
 
 proc probePostCommitPublication(identity: GitToolIdentity;
                                 storeRoot, lockFilePath, triggerRepoRoot: string):
@@ -62306,33 +62975,75 @@ proc probePostCommitPublication(identity: GitToolIdentity;
     else: pcpPending
   result.detail = "upstream " & upstream
 
-  # Backlog + stranded counts, scoped to the trigger repo's own lock directory
+  # Backlog, scoped to the trigger repo's own lock directory
   # (``locks/<project>/<repo>/``) — the directory this run just wrote into, and
   # the only one whose trigger SHAs we can resolve against a checkout we hold.
   let recordDir = parentDir(lockFilePath)
   if not dirExists(recordDir): return
   let dirRel = relativePath(recordDir, storeRoot).replace('\\', '/')
-  var scanned = 0
-  for entry in walkDir(recordDir):
-    if entry.kind notin {pcFile, pcLinkToFile}: continue
-    let base = extractFilename(entry.path)
-    if not base.endsWith(".toml"): continue
-    if scanned >= PostCommitBacklogScanLimit:
-      result.saturated = true
-      break
-    inc scanned
-    if pathIsInGitTree(identity, storeRoot, upstream, dirRel & "/" & base):
-      continue
-    inc result.pending
-    # Stranded: the commit this record is anchored to is ALREADY published in
-    # the trigger repo, so the push that carried it did not carry the lock.
-    if triggerRepoRoot.len == 0: continue
-    let sha = base[0 ..< base.len - ".toml".len]
-    if sha.len < 7: continue
+
+  # What the upstream already carries: one listing of the directory's tree,
+  # however many records it holds. A directory the upstream does not have yet
+  # is an empty set, not a failure.
+  var published = initHashSet[string]()
+  if pathIsInGitTree(identity, storeRoot, upstream, dirRel):
+    let tree = gitRunPlainQuery(identity, ["-C", storeRoot, "ls-tree", "-z",
+      "--name-only", upstream & ":" & dirRel])
+    if tree.code != 0:
+      result.detail.add("; backlog not counted: " & tree.diagnostic)
+      return
+    for name in nulSeparatedPaths(tree.output):
+      let sha = recordShaOf(name)
+      if sha.len > 0: published.incl(sha)
+
+  # The unpublished records: the untracked drafts, plus records committed
+  # locally that the upstream does not carry (a publication commit a failed
+  # push retained). Both are listed by git, so the published records beside
+  # them never consume the scan bound.
+  var unpublished: seq[string]
+  var seen = initHashSet[string]()
+  let untracked = gitRunPlainQuery(identity, ["-C", storeRoot, "ls-files",
+    "-z", "--others", "--", dirRel & "/"])
+  let ahead = gitRunPlainQuery(identity, ["-C", storeRoot, "diff", "-z",
+    "--name-only", "--no-renames", "--diff-filter=A", upstream, "HEAD", "--",
+    dirRel & "/"])
+  if untracked.code != 0 or ahead.code != 0:
+    result.detail.add("; backlog not counted: " &
+      (if untracked.code != 0: untracked.diagnostic else: ahead.diagnostic))
+    return
+  for rel in nulSeparatedPaths(untracked.output) &
+      nulSeparatedPaths(ahead.output):
+    if rel.rsplit('/', maxsplit = 1)[0] != dirRel: continue
+    let sha = recordShaOf(rel.rsplit('/', maxsplit = 1)[^1])
+    if sha.len == 0 or sha in published or sha in seen: continue
+    seen.incl(sha)
+    unpublished.add(sha)
+  if unpublished.len > PostCommitBacklogScanLimit:
+    result.saturated = true
+    unpublished.setLen(PostCommitBacklogScanLimit)
+  result.pending = unpublished.len
+
+  # Of those, the ones whose commit is ALREADY published in the trigger repo.
+  if triggerRepoRoot.len == 0: return
+  var pushed: seq[string]
+  for sha in unpublished:
     if gitRunPlain(identity,
         ["-C", triggerRepoRoot, "merge-base", "--is-ancestor", sha,
          "@{u}"]).code == 0:
-      inc result.stranded
+      pushed.add(sha)
+  if pushed.len == 0: return
+  let above = commitsWithPublishedRecordAbove(identity, triggerRepoRoot,
+    "@{u}", pushed, published)
+  if not above.ok:
+    # Without the walk nothing shows a published record above them, so each
+    # reads as stranded: a probe that cannot tell must not go quiet.
+    result.stranded = pushed.len
+    result.detail.add("; could not tell held drafts from stranded ones, " &
+      "so every already-pushed one is counted as stranded")
+    return
+  for sha in pushed:
+    if sha in above.held: inc result.held
+    else: inc result.stranded
 
 # ---- A pin never moves backward silently ----------------------------------
 #
@@ -63280,18 +63991,27 @@ proc runPostCommitLockCommand*(currentRepo: string): int =
     report.publication = postCommitPublicationTag(probe.state)
     report.pendingRecords = probe.pending
     report.strandedRecords = probe.stranded
+    report.heldRecords = probe.held
+    report.backlogTruncated = probe.saturated
 
-    let backlog =
-      if probe.pending > 0:
-        "; " & $probe.pending & (if probe.saturated: "+" else: "") &
-          " unpublished record(s) for '" & outcome.report.triggerRepo &
-          "' in the store" &
-          (if probe.stranded > 0:
-            ", " & $probe.stranded &
-              " of them anchored to ALREADY-PUSHED commits — publication " &
-              "is not merely pending, it is not running"
-          else: "")
-      else: ""
+    # A truncated scan makes EVERY count a lower bound, so every count says
+    # so — not only the pending one.
+    let bound = if probe.saturated: "+" else: ""
+    var backlog = ""
+    if probe.pending > 0:
+      backlog = "; " & $probe.pending & bound &
+        " unpublished record(s) for '" & outcome.report.triggerRepo &
+        "' in the store"
+      if probe.stranded > 0:
+        backlog.add(", " & $probe.stranded & bound &
+          " of them anchored to ALREADY-PUSHED commits with no published " &
+          "record at or above them — publication is not merely pending, " &
+          "it is not running")
+      if probe.held > 0:
+        backlog.add((if probe.stranded > 0: "; " else: ", ") &
+          $probe.held & bound & " held below a published record of an " &
+          "already-pushed commit, waiting for the next push to verify " &
+          "and publish them")
     case probe.state
     of pcpPublished:
       # The only success tag: the record is demonstrably in the store's
@@ -66950,6 +67670,12 @@ type
       ## names, so a sibling that moved during the run is a state no
       ## certificate could describe.
     expectedManifestRecords: seq[ExpectedLockRecord]
+    rangeDraftRecords: seq[ExpectedLockRecord]
+      ## The drafts below the pushed tip that passed publication verification
+      ## (``examineRangeDrafts``). Published with the tip, to the record-store
+      ## backend only, and kept apart from ``expectedManifestRecords`` so that
+      ## neither the lock-missing check nor the routed per-backend publication
+      ## treats them as the tip's obligation.
     deferredPublishWrites: seq[DeferredParticipationWrite]
     exitCode*: int
 
@@ -75184,6 +75910,9 @@ proc absentLockedSiblingsOutsideWorkspace(repoRoot: string):
     if not isGitCheckoutDir(depAbs):
       result.add((name: d.name, path: depAbs))
 
+proc manifestPublicationEnabled(workspaceRoot: string): bool
+  ## Forward declaration; defined beside the gate's publication step.
+
 proc executeCheckPrePush(parsed: CheckArgs;
     publicationMembers: seq[HookPublicationMember] = @[];
     publicationWorkspace = ""): CheckReport =
@@ -76753,6 +77482,47 @@ proc executeCheckPrePush(parsed: CheckArgs;
       result.exitCode = 0
       finalizePoliciesAndParticipation()
       return
+  # INVARIANT 13 — the range drafts (push-hook-publication-protocol.md §"A push
+  # also publishes the verified drafts of the commits below its tip"). Besides
+  # the record of its tip, a push anchors each existing draft of the pushed
+  # repo whose commit the tip reaches, if that draft passes publication
+  # verification. Examined here, where the observed checkouts are at hand,
+  # and only when this push will publish to the record store at all: a
+  # certificate issuance publishes nothing, and neither does a workspace that
+  # has not opted into publication, so neither has drafts to report on.
+  if currentRepoName.len > 0 and not parsed.issuingForCurrentHead and
+      manifestPublicationEnabled(parsed.workspaceRoot):
+    var tipSha = ""
+    var tipRoot = ""
+    for obs in observations:
+      if obs.name == currentRepoName and obs.hasGit and obs.headSha.len > 0:
+        tipSha = obs.headSha
+        tipRoot = obs.absPath
+        break
+    if tipSha.len > 0:
+      # Where each pinned repo's revision is checked: a checkout this gate
+      # observed, with the remote its own publication stage scoped to;
+      # otherwise the declared repo's checkout in this workspace, with its
+      # declared remote (``pinnedRevisionEvidence`` widens to every
+      # remote-tracking ref when that remote is not configured there).
+      var pinCheckouts = initTable[string, LockPinCheckout]()
+      for repo in resolved.repos:
+        pinCheckouts[repo.name] = LockPinCheckout(
+          checkout: parsed.workspaceRoot / repo.path.replace('/', DirSep),
+          gitRemote: gitRemoteNameFor(repo))
+      for obs in observations:
+        if obs.hasGit:
+          pinCheckouts[obs.name] = LockPinCheckout(checkout: obs.absPath,
+            gitRemote: obs.remoteName)
+      let examined = examineRangeDrafts(identity, recordStoreRoot,
+        resolved.projectName, currentRepoName, tipRoot, tipSha, pinCheckouts)
+      result.rangeDraftRecords = examined.anchored
+      for item in examined.held:
+        result.notices.add(rangeDraftHeldLine(item, currentRepoName))
+      for diag in examined.diagnostics:
+        result.notices.add("range drafts: " & diag)
+      for item in examined.anchored:
+        lockArgs.sweepKeepRelPaths.add(item.relPath)
   # RA-1: resolve the latest lock via Git history over the per-repo lock
   # subtree (no shared index). MO-3: this gate read is routed through the
   # ``LockStore`` interface — the git-checkout backend delegates to the
@@ -77045,6 +77815,8 @@ proc executeCheckPrePush(parsed: CheckArgs;
       var anchored: seq[string]
       for expectedRecord in result.expectedManifestRecords:
         anchored.add(expectedRecord.relPath)
+      for rangeRecord in result.rangeDraftRecords:
+        anchored.add(rangeRecord.relPath)
       let sweep = sweepOrphanedLockDrafts(identity, recordStoreRoot,
         observedRoots, keepRelPaths = anchored)
       for item in sweep.swept:
@@ -77741,7 +78513,17 @@ proc runCheckCommand*(parsed: CheckArgs; hookRemoteName = "";
         # on.
         let publishStore =
           newGitCheckoutLockStore(identity, report.recordStoreRoot)
-        publishStore.pendingExpected = report.expectedManifestRecords
+        # The range drafts join the tip's publication, after a check against
+        # the freshly fetched upstream that no key among them is already
+        # published (``screenRangeDraftsAgainstUpstream``): a draft can
+        # never change a published record, and must not fail the push over
+        # one either. The tip keeps its own strict rule.
+        let rangeScreen = screenRangeDraftsAgainstUpstream(identity,
+          report.recordStoreRoot, report.rangeDraftRecords)
+        for line in rangeScreen.lines:
+          stderr.writeLine("repro check: " & line)
+        publishStore.pendingExpected =
+          report.expectedManifestRecords & rangeScreen.publish
         let storePub = publishStore.publishPending()
         let pub = LockPublishResult(
          outcome: lockPublishFromStorePut(storePub.outcome),
@@ -81333,6 +82115,9 @@ proc executeWorkspaceStatus(args: WorkspaceStatusArgs): WorkspaceStatusReport =
       recordStoreRoot / latestLock.lockRelPath.replace('/', DirSep)
     else: ""
 
+  # One set for the whole pass: a repository that is a submodule of more than
+  # one participating checkout is inspected and reported once.
+  var submodulesSeen = initHashSet[string]()
   for repo in resolved.repos:
     let repoAbsPath = args.workspaceRoot / repo.path
     var entry: WorkspaceStatusRepoEntry
@@ -81444,7 +82229,7 @@ proc executeWorkspaceStatus(args: WorkspaceStatusArgs): WorkspaceStatusReport =
     # account (§4.1), and the files a failed checkout left out in them.
     for subReport in checkSubmoduleLeaves(identity.binaryPath, repoAbsPath,
         if args.fix: lcmRepair else: lcmReport,
-        defaultCacheRoot(args.workspaceRoot)):
+        defaultCacheRoot(args.workspaceRoot), submodulesSeen):
       report.leafReports.add(subReport)
 
     if not entry.isClean:
@@ -84339,6 +85124,9 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
     var chains: seq[string]
     var lostFiles: seq[string]
     var diagnostics: seq[string]
+    # One set for the whole pass, so a repository that is a submodule of more
+    # than one participating checkout is counted and reported once.
+    var submodulesSeen = initHashSet[string]()
     for index, repo in ctx.resolved.repos:
       parsed.progress.beginItem(repo.path, index + 1, ctx.resolved.repos.len)
       let abs = parsed.workspaceRoot / repo.path
@@ -84351,7 +85139,7 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
       # checkout's own pass below; ``--fix`` restores the files a failed
       # checkout left out.
       let subReports = checkSubmoduleLeaves(ctx.gitIdentity.binaryPath, abs,
-        lcmReport, cacheRoot)
+        lcmReport, cacheRoot, submodulesSeen)
       if subReports.len > 0:
         ctx.submoduleParents.add(abs)
       for sr in subReports:
@@ -84893,9 +85681,11 @@ proc applyHealthFixes(parsed: HealthArgs; checks: seq[HealthCheck];
           if f.kind == lfkStaleRemoteRef and f.removed:
             emit("fix: removed " & f.refName & " in " & lr.leaf)
             stderr.writeLine(f.message)
+      var repairedSubmodules = initHashSet[string]()
       for parent in ctx.submoduleParents:
         for sr in checkSubmoduleLeaves(ctx.gitIdentity.binaryPath, parent,
-            lcmRepair, defaultCacheRoot(parsed.workspaceRoot)):
+            lcmRepair, defaultCacheRoot(parsed.workspaceRoot),
+            repairedSubmodules):
           for f in sr.findings:
             if f.kind == lfkStaleRemoteRef and f.removed:
               emit("fix: removed " & f.refName & " in " & sr.leaf)
@@ -86365,6 +87155,23 @@ type
       ## inherited from the source, or the ``--projects`` override. Reported so
       ## a fork's membership is auditable without diffing two workspace.toml
       ## files after the fact.
+    destination*: string
+      ## Fork form only: the destination path the fork was asked to
+      ## materialize (the same path as ``workspaceRoot``), named on its own so
+      ## a reader of a FAILED fork knows which directory the next two fields
+      ## are about.
+    destinationState*: string
+      ## Fork form only: what a run that did not succeed left at
+      ## ``destination``. ``removed`` — this run created the destination,
+      ## created no branch anywhere, and removed what it materialized;
+      ## ``kept`` — something is left there (it pre-existed or was occupied
+      ## when the root clone ran, or the branch was created somewhere);
+      ## ``remove_failed``
+      ## — this run tried to remove what it created and could not. Empty on
+      ## success and on a refusal that never touched the destination.
+    destinationRemedy*: string
+      ## Fork form only: the command that removes what is left at the
+      ## destination after a failed run. Empty when nothing is left there.
 
 proc branchOutcomeTag(outcome: BranchRepoOutcome): string =
   case outcome
@@ -86373,6 +87180,19 @@ proc branchOutcomeTag(outcome: BranchRepoOutcome): string =
   of broDirtyRefused: "dirty_refused"
   of broCollisionRefused: "collision_refused"
   of broActionFailed: "action_failed"
+
+proc branchOutcomeCreatedBranch*(outcome: string): bool =
+  ## Whether a per-repo outcome means the branch now EXISTS in that repo. One
+  ## definition for the two decisions that hinge on it: how a failure summary
+  ## is worded (a partial advance is not a refusal), and whether a failed fork
+  ## may remove what it materialized (only when no repo reached the branch).
+  ##
+  ## ``already`` is a repo an earlier run of a resumed fork put on the branch
+  ## (CLI/branch.md, resumability): the branch exists there too, so it counts
+  ## for both decisions.
+  outcome in ["branched", "branched_with_changes",
+              "branched_from_declared_baseline", "branched_from_mainline",
+              "already", branchOutcomeTag(broCreated)]
 
 proc toJsonNode*(report: BranchReport): JsonNode =
   result = newJObject()
@@ -86416,6 +87236,10 @@ proc toJsonNode*(report: BranchReport): JsonNode =
     for name in report.projects:
       projects.add(%name)
     result["projects"] = projects
+    result["destination"] = %report.destination
+    result["destinationState"] = %report.destinationState
+    if report.destinationRemedy.len > 0:
+      result["destinationRemedy"] = %report.destinationRemedy
 
 proc renderBranchTextLines*(report: BranchReport): seq[string] =
   if report.form == "show":
@@ -86450,9 +87274,16 @@ proc renderBranchTextLines*(report: BranchReport): seq[string] =
       line.add(" (" & entry.diagnostic & ")")
     result.add(line)
   if report.exitCode == 0:
+    # An `--except`ed repo has no branch (CLI/branch.md §"--except"), so it is
+    # counted apart rather than among the repos the branch spans.
+    var excluded = 0
+    for entry in report.repos:
+      if entry.outcome == "excluded":
+        inc excluded
     result.add("workspace branch: '" & report.branch &
-      "' created across " & $report.repos.len & " repos; metadata=" &
-      report.recordedBranch)
+      "' created across " & $(report.repos.len - excluded) & " repos" &
+      (if excluded > 0: " (" & $excluded & " excluded)" else: "") &
+      "; metadata=" & report.recordedBranch)
     # M27 fork form: the operator's next step is in a DIFFERENT directory than
     # the one they ran from, so say where it is (communicate-before-execute's
     # closing half) and point at the readiness check.
@@ -86479,31 +87310,64 @@ proc renderBranchTextLines*(report: BranchReport): seq[string] =
     var blockers: seq[string]
     var created: seq[string]
     for entry in report.repos:
-      if entry.outcome in ["branched", "branched_with_changes",
-                           "branched_from_declared_baseline",
-                           "branched_from_mainline",
-                           branchOutcomeTag(broCreated)]:
+      # `already` is a repo a previous run of this resumed fork put on the
+      # branch: the branch exists there, so it counts toward "created in N
+      # repo(s)" (``branchOutcomeCreatedBranch`` says so) — otherwise a re-run
+      # that fails in one repo would claim no branch exists anywhere while the
+      # earlier run's branches are on disk.
+      if branchOutcomeCreatedBranch(entry.outcome):
         created.add(entry.path)
-      elif entry.outcome != "ready" and
-          entry.outcome != branchOutcomeTag(broAlreadyAtHead):
+      elif entry.outcome notin ["ready", "excluded",
+                                 branchOutcomeTag(broAlreadyAtHead)]:
+        # `excluded` (left out by `--except`) is a requested outcome, never a
+        # blocker.
         blockers.add(entry.path & "=" & entry.outcome)
+    # The fork form also says what is at the destination, from
+    # ``destinationState`` rather than from a guess: a fork that created no
+    # branch removes what it materialized, and telling the operator to "re-run
+    # to finish" a tree that is gone sends them looking for it.
+    let forkDest = remedyProsePath(report.destination)
+    let removal =
+      if report.destinationRemedy.len > 0:
+        ", or remove it with `" & report.destinationRemedy & "`"
+      else: ""
     var summary =
       if created.len > 0:
         "workspace branch: INCOMPLETE — '" & report.branch &
           "' was created in " & $created.len & " repo(s) and the partial " &
-          "workspace is left in place; re-run the same command to finish it"
-      elif report.exitCode != 2:
-        # A clone can fail after materializing the root and other members,
-        # before the branch pass creates any feature branches. Exit 1 also
-        # covers probe failures, so do not infer whether a target exists.
-        "workspace branch: INCOMPLETE — no branch '" & report.branch &
-          "' was created in any repo; any partial workspace at " &
-          report.workspaceRoot & " is left in place; re-run the same " &
-          "command to finish it"
-      else:
+          "workspace" &
+          (if report.destination.len > 0: " at " & forkDest else: "") &
+          " is left in place; re-run the same command to finish it" & removal
+      elif report.exitCode == 2:
         "workspace branch: ABORTED — no branch '" & report.branch &
           "' was created in any repo (nothing had been created when the " &
           "first blocker was found)"
+      elif report.destinationState == "removed":
+        # A clone can fail after materializing the root and other members,
+        # before the branch pass creates any branch. Everything there was a
+        # clone of something that exists elsewhere, so the run removed it.
+        "workspace branch: FAILED — no branch '" & report.branch &
+          "' was created in any repo; this run's materialization at " &
+          forkDest & " was removed and nothing is left there"
+      elif report.destinationState == "kept":
+        "workspace branch: INCOMPLETE — no branch '" & report.branch &
+          "' was created in any repo; the partial workspace at " & forkDest &
+          " (there before this run) is left in place; re-run the same " &
+          "command to finish it" & removal
+      elif report.destinationState == "remove_failed":
+        "workspace branch: FAILED — no branch '" & report.branch &
+          "' was created in any repo, and what this run materialized at " &
+          forkDest & " could not be removed; remove it with `" &
+          report.destinationRemedy & "`"
+      elif report.destination.len > 0:
+        # A fork that failed before it materialized anything (an exit-1 probe
+        # failure in the pre-flight).
+        "workspace branch: FAILED — no branch '" & report.branch &
+          "' was created in any repo, and nothing was materialized at " &
+          forkDest
+      else:
+        "workspace branch: INCOMPLETE — no branch '" & report.branch &
+          "' was created in any repo"
     if blockers.len > 0:
       summary.add("; " & $blockers.len & " repo(s) blocked: " &
         blockers.join(", "))
@@ -86552,6 +87416,12 @@ type
       ## inherited rather than re-derived. A non-empty value REPLACES the
       ## inherited set, which is how a developer forks a narrower (or wider)
       ## slice than they currently have checked out.
+    exceptRepos: seq[string]
+      ## ``--except=a,b`` (CLI/branch.md §"--except") — member repos the fork
+      ## leaves out: not probed, fetched, cloned or branched, and reported
+      ## ``excluded``. Applied AFTER ``projects``: that chooses the membership,
+      ## this chooses which members get a checkout. Membership itself is not
+      ## edited, so a later fork without the flag brings an excluded repo in.
     fromRole: RoleChoice
       ## ``--from=<role>`` (Workspace-Branch-Roles.md §4.2) or a shorthand —
       ## take the repo SET from this
@@ -86685,6 +87555,10 @@ proc branchArgsOf*[T](c: T; verb = "repro branch";
     let trimmed = name.strip()
     if trimmed.len > 0 and trimmed notin result.projects:
       result.projects.add(trimmed)
+  for name in c.exceptRepos:
+    let trimmed = name.strip()
+    if trimmed.len > 0 and trimmed notin result.exceptRepos:
+      result.exceptRepos.add(trimmed)
   result.json = c.json
   result.report = reportSpecOf(c)
   result.forkPath = c.path
@@ -86699,10 +87573,11 @@ proc branchArgsOf*[T](c: T; verb = "repro branch";
     # destination, so accepting them here would silently do nothing.
     if explicitBranch.len > 0 or result.existingBranch or
         result.includeChanges or result.projects.len > 0 or
+        result.exceptRepos.len > 0 or
         result.unpublished != upRefuse or result.cutsFromRole or fetchGiven:
       raise newException(ValueError,
         "`--branch` / `--existing-branch` / `--include-changes` / " &
-          "`--unpublished` / `--projects` / `--from=<role>` (or a " &
+          "`--unpublished` / `--projects` / `--except` / `--from=<role>` (or a " &
           "shorthand) / `--fetch` require a " &
           "destination path (`" & verb & " <path>`); with no path " &
           "`repro branch` only reports the current workspace branch")
@@ -87158,11 +88033,16 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport
 
 proc branchReportRoot(report: BranchReport): string =
   # M27: in the fork form ``workspaceRoot`` is the NEW workspace, which is
-  # where the report belongs. But a fork refused BEFORE materializing (a bad
-  # destination, a remote-branch collision) must not conjure that directory
-  # into existence just to drop a report in it — fall back to the source.
+  # where a SUCCESSFUL fork's report belongs. A fork that did not succeed
+  # reports to the SOURCE workspace, where the command was run: a refusal
+  # must not conjure the destination into existence just to drop a report in
+  # it, a fork that created no branch has removed its destination, and one
+  # whose partial tree is kept must not have that tree mistaken for a
+  # workspace — a report inside it was what made later runs treat a leftover
+  # as a fork under way.
   result = report.workspaceRoot
-  if report.sourceWorkspaceRoot.len > 0 and not dirExists(result / ".git"):
+  if report.sourceWorkspaceRoot.len > 0 and
+      (report.exitCode != 0 or not dirExists(result / ".git")):
     result = report.sourceWorkspaceRoot
 
 proc writeBranchReport(report: BranchReport; destination: string) =
@@ -87226,7 +88106,10 @@ proc runBranchCommand*[T](c: T; verb = "repro branch";
   # The read-only ``show`` form answers a question and must not write anything —
   # the same rule that made the report opt-in. Only the forms that MOVE the
   # workspace refresh the cache, and they leave every repo on the new branch.
-  if report.form != "show" and report.repos.len > 0:
+  # A failed fork describes neither workspace — the source was not moved and
+  # the destination is not a workspace on the branch — so it refreshes none.
+  if report.form != "show" and report.repos.len > 0 and
+      (report.form != "fork" or report.exitCode == 0):
     var branches: seq[string]
     for _ in report.repos:
       branches.add(report.recordedBranch)
@@ -89922,6 +90805,162 @@ proc roleBranchLabel(r: Option[ResolvedRole]; branch: string): string =
   if r.isSome: "branch '" & branch & "' (role " & roleChainText(r.get()) & ")"
   else: "branch '" & branch & "'"
 
+proc projectsFlagNameListing(workspaceRoot: string):
+    tuple[names: seq[string]; listing: string] =
+  ## Every name ``--projects`` accepts in this workspace — the manifests
+  ## root's ``projects/``, then ``variants/``, then ``repo-sets/`` (the
+  ## resolution ladder's order) — and the same names rendered for a
+  ## diagnostic, grouped by kind (``projects: a, b; variants: c``).
+  ##
+  ## A directory listing rather than a resolve, like ``definedProjectNames``:
+  ## a set whose manifest is malformed still exists. ``names`` is empty when
+  ## the root holds none of the three directories, which is how a caller tells
+  ## "not a defined name" from "nothing to compare against".
+  let source = newDirectorySource(manifestsRoot(workspaceRoot))
+  var parts: seq[string]
+  for (dir, label) in [("projects", "projects"), ("variants", "variants"),
+                       (repoSetsDirName, "repo sets")]:
+    var names: seq[string]
+    for relPath in source.listTomlFiles(dir):
+      let name = relPath.splitFile.name
+      if name notin names:
+        names.add(name)
+    if names.len == 0:
+      continue
+    names.sort()
+    parts.add(label & ": " & names.join(", "))
+    for name in names:
+      if name notin result.names:
+        result.names.add(name)
+  result.listing = parts.join("; ")
+
+type
+  ForkDestinationKind = enum
+    ## What was at a fork's destination when the command started. Recorded
+    ## before anything is materialized, because it is the first half of the
+    ## evidence of what the run itself created (the second half is whether
+    ## its own root clone succeeded): once the root is cloned, a directory the
+    ## operator made and one the run made look the same.
+    fdkAbsent        ## nothing there: the run creates it (and maybe parents)
+    fdkEmptyDir      ## an empty directory the operator made
+    fdkPreexisting   ## a directory with content: a fork of this workspace
+                     ## already under way (the destination guard refuses any
+                     ## other non-empty directory)
+    fdkOther         ## a file, or a link to nothing: not a directory the run
+                     ## can materialize into, and never the run's to remove
+
+  ForkDestination = object
+    kind: ForkDestinationKind
+    createdParents: seq[string]
+      ## ``fdkAbsent`` only: the missing ancestors of the destination, nearest
+      ## first. The root clone creates them the way ``mkdir -p`` does, so a
+      ## run that removes its destination tries to remove them too — each
+      ## only while it is still empty.
+
+proc observeForkDestination(forkPath: string): ForkDestination =
+  ## Classify ``forkPath`` as it is NOW. Links are not followed when asking
+  ## whether something is there, so a dangling link counts as occupied rather
+  ## than as a path the run would create (and later remove).
+  if dirExists(forkPath):
+    result.kind =
+      if toSeq(walkDir(forkPath)).len == 0: fdkEmptyDir else: fdkPreexisting
+    return
+  if fileExists(forkPath) or symlinkExists(forkPath):
+    result.kind = fdkOther
+    return
+  result.kind = fdkAbsent
+  var child = forkPath
+  var parent = parentDir(forkPath)
+  while parent.len > 0 and parent != child and
+      not dirExists(parent) and not fileExists(parent) and
+      not symlinkExists(parent):
+    result.createdParents.add(parent)
+    child = parent
+    parent = parentDir(parent)
+
+proc settleForkDestination(report: var BranchReport; dest: ForkDestination;
+                           materialized, rootCloned, succeeded,
+                           mayHaveBranches: bool) =
+  ## Decide what a fork that did not succeed leaves at its destination, act on
+  ## it, and record it in ``report`` (see ``BranchReport.destinationState``).
+  ##
+  ## The destination is removed only when ALL of these hold:
+  ##
+  ## * no repo reached the branch. Until the branch pass creates one,
+  ##   everything there is a clone of something that exists elsewhere, so
+  ##   removing it costs a re-clone and loses nothing. Left behind, it was a
+  ##   directory the summary said nothing about, and the next run took it for
+  ##   a fork under way and wrote its own reports into it. Once a branch
+  ##   exists the no-rollback contract applies and the tree is the operator's
+  ##   to resume.
+  ## * it was absent or empty when the run started. A destination that
+  ##   already held content is never removed, whatever the outcome; an empty
+  ##   directory the operator made is emptied and kept.
+  ## * this run's own root clone into it succeeded (``rootCloned``). The
+  ##   observation above is not enough on its own: the path can be occupied
+  ##   by the time the clone runs (a concurrent fork to the same path, or a
+  ##   spelling such as ``missing/../existing`` that does not resolve until
+  ##   the clone creates ``missing``). ``git clone`` refuses a non-empty
+  ##   directory, so a clone that succeeded is proof the tree is this run's;
+  ##   one that failed has already removed its own work tree.
+  ##
+  ## Nothing here follows a link: a link inside the tree is unlinked, never
+  ## the directory it points at. A created parent is removed only while it is
+  ## empty, so nothing that appeared beside the destination is touched.
+  if succeeded or not materialized:
+    # Success, or a run that stopped before it touched the destination.
+    return
+  let branchCreated = mayHaveBranches or
+    report.repos.anyIt(branchOutcomeCreatedBranch(it.outcome))
+  let owned = rootCloned and dest.kind in {fdkAbsent, fdkEmptyDir}
+  if branchCreated or not owned:
+    if dest.kind == fdkOther:
+      return
+    if not branchCreated and not rootCloned and
+        dest.kind in {fdkAbsent, fdkEmptyDir}:
+      # The root clone failed, and ``git clone`` removes the work tree it was
+      # making when it fails. Only the parents it created for that work tree
+      # can still be the run's, and they are removed only while empty.
+      if dest.kind == fdkAbsent:
+        for parent in dest.createdParents:
+          if not removeEmptyDirNoFollow(parent):
+            break
+      let leftNothing =
+        if dest.kind == fdkAbsent: not dirExists(report.destination)
+        else: dirExists(report.destination) and
+          toSeq(walkDir(report.destination)).len == 0
+      if leftNothing:
+        report.destinationState = "removed"
+      # Otherwise what is there now is not this run's and was not there to
+      # resume when it started: it is neither reported as a partial fork nor
+      # offered for removal, since the run never touched it.
+      return
+    if dirExists(report.destination):
+      report.destinationState = "kept"
+      report.destinationRemedy = "rm -rf " &
+        remedyPathWord(report.destination)
+    return
+  try:
+    case dest.kind
+    of fdkAbsent:
+      removePathNoFollow(report.destination)
+      for parent in dest.createdParents:
+        if not removeEmptyDirNoFollow(parent):
+          break
+    of fdkEmptyDir:
+      for _, child in walkDir(report.destination):
+        removePathNoFollow(child)
+    of fdkPreexisting, fdkOther:
+      discard
+    report.destinationState = "removed"
+  except CatchableError as err:
+    report.destinationState = "remove_failed"
+    report.destinationRemedy = "rm -rf " & remedyPathWord(report.destination)
+    report.repos.add(BranchRepoEntry(
+      outcome: "destination_remove_failed",
+      diagnostic: "no branch was created, but removing what this run " &
+        "materialized at '" & report.destination & "' failed: " & err.msg))
+
 proc executeBranchFork(parsed: BranchArgs): BranchReport =
   ## M27 / WV-6 — ``repro branch <path>`` (a.k.a. ``repro workspace new``):
   ## materialize a NEW workspace at ``parsed.forkPath`` on a branch named after
@@ -89975,6 +91014,7 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
   result.role = parsed.fromRole.role
   result.sourceWorkspaceRoot = parsed.workspaceRoot
   result.workspaceRoot = parsed.forkPath
+  result.destination = parsed.forkPath
   result.includeChanges = parsed.includeChanges
 
   # ---- membership of the NEW workspace -----------------------------------
@@ -89995,12 +91035,28 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
       resolved = resolveProjectSet(parsed.workspaceRoot, forkProjects)
     except CatchableError as err:
       # Refused before anything is created, like every other fork guard.
+      #
+      # When a given name is not one the workspace defines at all — usually a
+      # repo's directory name — the remedy is a name from a list the operator
+      # has not seen yet, so the list is part of the diagnostic. A conflict
+      # between two real projects gets no list: every name there is valid.
+      var diagnostic = "`--projects=" & forkProjects.join(",") &
+        "` does not resolve against '" & parsed.workspaceRoot & "': " &
+        err.msg
+      let accepted = projectsFlagNameListing(parsed.workspaceRoot)
+      if accepted.names.len > 0:
+        var undefined: seq[string]
+        for name in forkProjects:
+          if name notin accepted.names:
+            undefined.add("'" & name & "'")
+        if undefined.len > 0:
+          diagnostic.add(". " & undefined.join(", ") & " is not a project, " &
+            "variant or repo set of this workspace (`--projects` selects " &
+            "whole projects; `--except` leaves out single repos). " &
+            "`--projects` accepts " & accepted.listing)
       result.exitCode = 2
       result.repos.add(BranchRepoEntry(
-        outcome: "projects_unresolved",
-        diagnostic: "`--projects=" & forkProjects.join(",") &
-          "` does not resolve against '" & parsed.workspaceRoot & "': " &
-          err.msg))
+        outcome: "projects_unresolved", diagnostic: diagnostic))
       return
   else:
     let parsedSwitch = SwitchArgs(
@@ -90017,6 +91073,46 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
     forkProjects = @[resolved.projectName]
   result.project = resolved.projectName
   result.projects = forkProjects
+
+  # ---- --except: members that get no checkout here ------------------------
+  # CLI/branch.md §"--except". Applied after the membership above: the set is
+  # not narrowed (it is recorded unchanged at the end), only which of its repos
+  # this run touches. An excluded repo is dropped BEFORE the observation pass,
+  # so it is never probed, fetched, collision-checked, cloned, branched or
+  # carried for — a probe that cannot run is never asked to — and each one is
+  # still reported, so the report names everything the new workspace lacks.
+  #
+  # An unknown name is refused before anything is created: an exclusion that
+  # silently matched nothing reads exactly like a fork with nothing to leave
+  # out. Names are checked against the set resolved from the SOURCE's
+  # manifests, the only ones there are before the target exists.
+  if parsed.exceptRepos.len > 0:
+    let unknown = namesMatchingNoRepo(resolved.repos, parsed.exceptRepos)
+    if unknown.len > 0:
+      var quoted: seq[string]
+      for name in unknown:
+        quoted.add("'" & name & "'")
+      result.exitCode = 2
+      result.repos.add(BranchRepoEntry(
+        outcome: "except_unresolved",
+        diagnostic: "`--except` names no repo of the new workspace's set: " &
+          quoted.join(", ") & " (names are matched EXACTLY against the " &
+          "repo names; `repro workspace repos list` shows them)"))
+      return
+  var memberRepos: seq[ResolvedRepo]
+  var excludedEntries: seq[BranchRepoEntry]
+  for repo in resolved.repos:
+    if repoNamedIn(repo, parsed.exceptRepos):
+      # Nothing was probed or resolved, so no baseline is asserted.
+      excludedEntries.add(BranchRepoEntry(
+        name: repo.name, path: repo.path, outcome: "excluded"))
+    else:
+      memberRepos.add(repo)
+  defer:
+    # Every exit from here on — success, refusal or partial advance — reports
+    # the excluded repos after the ones the run did act on.
+    for entry in excludedEntries:
+      result.repos.add(entry)
 
   let identity = ensureGitToolResolvable(
     parsed.toolProvisioning, getEnv("PATH"))
@@ -90065,6 +91161,22 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
           "(no `origin` matching '" & rootOrigin & "'); choose a different " &
           "path or remove it first"))
       return
+
+  # ---- what this run owns at the destination -----------------------------
+  # Recorded now, before anything is materialized (see
+  # ``settleForkDestination``). The deferred settlement also runs when the
+  # run is cut short by an exception, so a raise after the root clone cannot
+  # leave an unreported tree behind either; ``succeeded`` is set only at the
+  # final success point for that reason, rather than read from ``exitCode``,
+  # which is 0 by default until something sets it.
+  let destination = observeForkDestination(parsed.forkPath)
+  var materializationStarted = false
+  var rootCloned = false
+  var mayHaveBranches = false
+  var succeeded = false
+  defer:
+    settleForkDestination(result, destination, materializationStarted,
+      rootCloned, succeeded, mayHaveBranches)
 
   # ---- observation pass over the SOURCE workspace ------------------------
   type
@@ -90121,7 +91233,7 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
   # before a 100+-repo workspace starts any network probe, while an ABSENT
   # checkout is a valid state: target init will materialize it under the normal
   # manifest/lock rules and its target HEAD becomes the branch baseline.
-  for repo in resolved.repos:
+  for repo in memberRepos:
     var state: ForkSourceState
     state.repo = repo
     state.srcPath = parsed.workspaceRoot / repo.path
@@ -90675,9 +91787,11 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
 
   # ---- materialize the new workspace ------------------------------------
   # Resuming (see the destination guard) means the root clone is already there.
+  materializationStarted = true
   if not resuming and not dirExists(parsed.forkPath / ".git"):
     let rootClone = cloneOrgRootRepo(identity, rootOrigin, parsed.forkPath,
       independentObjects = parsed.cloneObjects notin ["", "shared"])
+    rootCloned = rootClone.cloned
     if not rootClone.ok:
       result.exitCode = 1
       result.repos.add(BranchRepoEntry(
@@ -90723,19 +91837,38 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
     initArgs.additionalProjects = forkProjects[1 .. ^1]
   initArgs.toolProvisioning = parsed.toolProvisioning
   initArgs.cloneObjects = parsed.cloneObjects
-  let initOutcome = executeWorkspaceInit(initArgs)
+  # `--except`: the excluded repos stay members (init records the whole set)
+  # but get no checkout.
+  initArgs.excludedRepos = parsed.exceptRepos
+  var initOutcome: WorkspaceInitOutcome
+  try:
+    initOutcome = executeWorkspaceInit(initArgs)
+  except CatchableError as err:
+    # Init reports clone failures as outcomes, but it can also raise (an
+    # unreadable manifest in the freshly cloned root, a filesystem error).
+    # Unhandled, that produced no report at all; reported, it is one more way
+    # for materialization to fail before any branch exists.
+    result.exitCode = 1
+    result.repos.add(BranchRepoEntry(
+      outcome: "init_failed",
+      diagnostic: "materializing the member repos of '" & parsed.forkPath &
+        "' failed before any branch was created: " & err.msg))
+    return
   for entry in initOutcome.report.cloned:
     clonedPaths.incl(entry.path)
   if initOutcome.cloneFailures > 0:
-    # Partial materialization is LEFT IN PLACE (no rollback): re-running the
-    # identical command clones only what is still missing.
+    # No branch exists yet, so what was materialized is not left as a
+    # resumable fork: ``settleForkDestination`` removes it when this run
+    # created it and keeps it when it was already there, and the summary says
+    # which. The per-repo errors are the `workspace init: clone failed for …`
+    # lines init printed, so they are not repeated here.
     result.exitCode = 1
     result.repos.add(BranchRepoEntry(
       outcome: "clone_failed",
       diagnostic: $initOutcome.cloneFailures & " repo clone(s) failed while " &
-        "materializing '" & parsed.forkPath & "'; the partial workspace is " &
-        "left in place — re-run the same command to finish it (see " &
-        "init-report.json there for the per-repo detail)"))
+        "materializing '" & parsed.forkPath & "' (each is printed above as " &
+        "`workspace init: clone failed for …`); no branch had been created " &
+        "yet"))
     return
 
   # For a repo absent from the SOURCE, target init is the authority for its
@@ -90762,6 +91895,10 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
     let targetRoleSettings = workspaceRoleSettings(parsed.forkPath)
     var usedSource = initHashSet[int]()
     for targetRepo in targetResolved.repos:
+      # Excluded by its target name or a name it was previously known under,
+      # so an exclusion survives a rename in the role's manifests.
+      if repoNamedIn(targetRepo, parsed.exceptRepos):
+        continue
       var ts: TargetBranchState
       ts.repo = targetRepo
       ts.srcIdx = matchSourceState(targetRepo, states, usedSource)
@@ -90854,6 +91991,32 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
   createDir(receiptDir)
   var actions: seq[BuildAction]
   var actionRepoIndex = initTable[string, int]()
+  # Resumability (CLI/branch.md §"Resumability & partial-failure reporting"):
+  # a checkout a previous run of this same fork already put on the branch, at
+  # the commit this run would cut, is reported `already` rather than as newly
+  # branched. Its fork action still runs (it is a no-op there), but the report
+  # must tell the operator which repos the re-run actually did something to —
+  # after an `--except` it is exactly the formerly excluded ones.
+  var alreadyActions = initHashSet[string]()
+  proc alreadyOnBranch(repoPath, sha: string): bool =
+    ## HEAD is attached to ``refs/heads/<branch>`` and, when ``sha`` is given,
+    ## the branch is at it. ``sha`` is empty under ``--existing-branch``,
+    ## where the branch point is the existing branch itself. Only a resumed
+    ## fork asks: in a fresh destination every checkout was just cloned, and
+    ## its branch pass is the one doing the work.
+    if not resuming or not dirExists(repoPath / ".git"):
+      return false
+    let head = gitRunPlainQuery(identity,
+      ["-C", repoPath, "symbolic-ref", "--quiet", "HEAD"])
+    if head.code != 0 or
+        head.output.strip() != "refs/heads/" & parsed.branchName:
+      return false
+    if sha.len == 0:
+      return true
+    let tip = gitRunPlainQuery(identity,
+      ["-C", repoPath, "rev-parse", "--verify", "--quiet",
+       "refs/heads/" & parsed.branchName])
+    tip.code == 0 and tip.output.strip() == sha
 
   const RootEntryIndex = -1
   let rootActionId = "workspace-start-fork-root"
@@ -90899,6 +92062,11 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
           receiptPath = ".repro" / "workspace" / "receipts" /
             "start-fork-root.receipt")
     rootAction.cwd = parsed.forkPath
+    if alreadyOnBranch(parsed.forkPath,
+        (if parsed.existingBranch: ""
+         elif parsed.cutsFromRole: rootRoleTip
+         else: rootHead.headSha)):
+      alreadyActions.incl(rootActionId)
     actions.add(rootAction)
     actionRepoIndex[rootActionId] = RootEntryIndex
 
@@ -90923,6 +92091,8 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
       action.cwd = parsed.forkPath
       action.pool = "vcs/fetch"
       action.poolUnits = 1'u32
+      if alreadyOnBranch(parsed.forkPath / ts.repo.path, ts.targetTip):
+        alreadyActions.incl(actionId)
       actions.add(action)
       actionRepoIndex[actionId] = idx
   else:
@@ -90955,10 +92125,17 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
       action.cwd = parsed.forkPath
       action.pool = "vcs/fetch"
       action.poolUnits = 1'u32
+      if alreadyOnBranch(parsed.forkPath / state.repo.path,
+          (if parsed.existingBranch: "" else: state.headSha)):
+        alreadyActions.incl(actionId)
       actions.add(action)
       actionRepoIndex[actionId] = idx
 
   var outcomeById = initTable[string, ActionResult]()
+  # From here a branch may exist in some repo before the outcomes below are
+  # recorded, so a raise in between must not be read as "no branch created".
+  # Settled again from the recorded outcomes once they are all in.
+  mayHaveBranches = actions.len > 0
   if actions.len > 0:
     let cacheRoot = parsed.forkPath / ".repro" / "workspace" / "engine-cache"
     var config = defaultBuildEngineConfig(cacheRoot)
@@ -91004,7 +92181,8 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
           resolvedRole: (if parsed.cutsFromRole: rootRole
                          else: none(ResolvedRole)),
           outcome:
-            (if parsed.cutsFromRole: "branched_from_mainline"
+            (if action.id in alreadyActions: "already"
+             elif parsed.cutsFromRole: "branched_from_mainline"
              else: "branched")))
       continue
     if parsed.cutsFromRole:
@@ -91024,7 +92202,9 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
         entry.diagnostic = "status=" & $outcome.status & " reason=" &
           outcome.reason & " " & outcome.stderr
       else:
-        entry.outcome = "branched_from_mainline"
+        entry.outcome =
+          if action.id in alreadyActions: "already"
+          else: "branched_from_mainline"
         # ---- optional WIP carry-over ------------------------------------
         if parsed.includeChanges and ts.srcIdx >= 0 and not states[ts.srcIdx].isClean:
           let copied = copyWorkingTreeChanges(identity, states[ts.srcIdx].srcPath,
@@ -91056,7 +92236,9 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
           outcome.reason & " " & outcome.stderr
       else:
         entry.outcome =
-          if state.baselineSource == "mainline_head":
+          if action.id in alreadyActions:
+            "already"
+          elif state.baselineSource == "mainline_head":
             "branched_from_mainline"
           elif state.baselineSource == "declared_checkout":
             "branched_from_declared_baseline"
@@ -91107,6 +92289,7 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
             entry.outcome = "branched_with_changes"
       result.repos.add(entry)
 
+  mayHaveBranches = result.repos.anyIt(branchOutcomeCreatedBranch(it.outcome))
   if failures > 0 or rootFailed:
     result.exitCode = 1
     return
@@ -91157,6 +92340,7 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
         "' failed: " & err.msg))
     return
   result.exitCode = 0
+  succeeded = true
 
 ## ----------------------------------------------------------------------------
 ## CI-Sharding M2 — ``repro test`` shard runner.
@@ -92999,6 +94183,14 @@ proc judgeUntrackedInputs*(mode: CertificateUntrackedInputs;
         if isTrackedOrInsideTracked(relative, trackedPaths):
           continue
         if dirExists(canonicalReadPath(path)):
+          continue
+        # An absence observation (Test-Certificates.md, "Absence observations"):
+        # a path absent on disk at test time was looked up, not read, and a path
+        # absent from the certified tree stays pinned by the content id. A later
+        # creation of a tracked file changes the content; an untracked file that
+        # appears later is read by the next run and refused there.
+        if not (fileExists(absolutePath(path)) or
+            symlinkExists(absolutePath(path))):
           continue
         if isExemptOutputRead(path, readSet, asEntry):
           continue
@@ -97907,7 +99099,7 @@ proc solverInputsFromCompiledProvider(projectDir: string;
         # The provider runs below with its cwd at the project directory.
         let providerRoot =
           if projectDir.len > 0: absolutePath(projectDir) else: getCurrentDir()
-        let compiled = runProviderCompileEdge(plan,
+        let lockProviderConsistency = runVerifiedProviderCompileEdge(plan,
           modulePath, interfacePath, providerArtifactPath,
           graphHelperCliPath(publicCliPath, ProviderCompileActionId), compileWorkDir, scratchDir,
           providerRoot, BuildEngineConfig(
@@ -97924,12 +99116,7 @@ proc solverInputsFromCompiledProvider(projectDir: string;
           bypassRunQuota: runQuotaBypassedByEnv(),
           inlineRunQuota: true,
           suppressTrace: true,
-          skipCacheHitEvidence: true))
-        if compiled.hasFailedActions():
-          raise newException(OSError, providerCompileFailureWithLog(compiled,
-          providerArtifactPath))
-        let lockProviderConsistency = providerCompileConsistencyAfterExecution(
-          plan, providerArtifactPath)
+          skipCacheHitEvidence: true)).consistency
         if not lockProviderConsistency.fresh:
           raise newException(IOError,
             "lock metadata provider artifact is stale after edge execution: " &
@@ -108879,7 +110066,8 @@ proc runCompletionCommand*(shellName: string): int =
   ## ``repro __complete <shell> <words...>`` and prints what comes back, so
   ## completion always offers what the installed binary's description
   ## declares, dynamic values included. ``shellName`` is one of the values
-  ## the description allows.
+  ## the description allows; ``pwsh`` (PowerShell 7's executable name) is a
+  ## synonym of ``powershell`` and prints the same script.
   var shell: CliShell
   if not cliParseShell(shellName, shell):
     # The description's closed value set rejects any other name before this
@@ -108972,6 +110160,26 @@ type
     ## thing it produces.
     memberSets: seq[string]
     memberRepos: seq[string]
+
+proc manifestCheckoutRefusal(identity: GitToolIdentity;
+                             manifestRoot: string): string =
+  ## Asked by every definition verb (`sets`/`projects` `add`/`remove`,
+  ## `repos add`/`remove`) before it writes or deletes anything: the empty
+  ## string when ``manifestRoot`` is itself a git checkout, otherwise the
+  ## refusal diagnostic. A definition verb writes, commits and pushes, and
+  ## the commit is part of the verb rather than a follow-up to it: one that
+  ## cannot commit must refuse with the tree untouched rather than leave
+  ## uncommitted manifest edits behind (which the next verb's commit would not
+  ## stage) and report a definition no other workspace can see.
+  ## `commitAndPushManifest` keeps the same check as a backstop for a caller
+  ## that reaches it without asking first.
+  let discovery = discoverGitWorktree(identity, manifestRoot)
+  if discovery.ok:
+    return ""
+  "manifest repo root '" & manifestRoot &
+    "' is not a git checkout; refusing to change manifest definitions, " &
+    "nothing was written" &
+    (if discovery.diagnostic.len > 0: ": " & discovery.diagnostic else: "")
 
 proc commitAndPushManifest(identity: GitToolIdentity;
                            gitBin, manifestRoot, message: string;
@@ -109788,6 +110996,13 @@ proc runWorkspaceSetsCommand(req: WorkspaceSetsRequest;
         return 1
       seed.memberSets = loaded.member_sets
       seed.memberRepos = loaded.member_repos
+    # The last check before the first write: a definition that cannot be
+    # committed is not made, so the tree is left as it was, the index is not
+    # regenerated, and no "defined" line follows.
+    let noCheckout = manifestCheckoutRefusal(identity, manifestRoot)
+    if noCheckout.len > 0:
+      stderr.writeLine(verb & " add: " & name & " — " & noCheckout)
+      return 1
     createDir(manifestRoot / addDir)
     let fileRel = addDir & "/" & name & ".toml"
     let fileAbs = manifestRoot / addDir / (name & ".toml")
@@ -109908,6 +111123,12 @@ proc runWorkspaceSetsCommand(req: WorkspaceSetsRequest;
     except CatchableError as exc:
       stderr.writeLine(verb & " remove: warning: cannot read " & target.abs &
         " (" & exc.msg & "); removing it without an orphan report")
+    # The last check before the first deletion, for the same reason as `add`:
+    # a removal that cannot be committed must not happen on disk.
+    let noCheckout = manifestCheckoutRefusal(identity, manifestRoot)
+    if noCheckout.len > 0:
+      stderr.writeLine(verb & " remove: " & name & " — " & noCheckout)
+      return 1
     var paths = @[target.rel]
     removeFile(target.abs)
     let docRel = target.rel.changeFileExt("md")
@@ -110341,6 +111562,15 @@ proc runWorkspaceReposCommand*(c: ReproCommandLineWorkspaceRepos): int =
       stderr.writeLine("  Nothing was written.")
       return 2
 
+    # Before the remote probe and the first write (the url-prefix minting
+    # below): without a manifest checkout to commit to, nothing is written at
+    # all, and the refusal costs no network round trip.
+    let noCheckout = manifestCheckoutRefusal(identity, manifestRoot)
+    if noCheckout.len > 0:
+      stderr.writeLine("repro workspace repos add: " & repo & " — " &
+        noCheckout)
+      return 1
+
     # `--mainline` and `--revision` are each validated against the remote, for
     # the same reason: a manifest naming a branch or a pin that does not exist
     # authors fine and fails at sync time on everyone else's machine. Both are
@@ -110476,6 +111706,13 @@ proc runWorkspaceReposCommand*(c: ReproCommandLineWorkspaceRepos): int =
       stdout.writeLine("repro workspace repos remove: no repo-set or " &
         "project declares " & fragmentRel & "; nothing to do")
       return 0
+    # Before the first membership edge is dropped: a removal that cannot be
+    # committed must not happen on disk.
+    let noCheckout = manifestCheckoutRefusal(identity, manifestRoot)
+    if noCheckout.len > 0:
+      stderr.writeLine("repro workspace repos remove: " & repo & " — " &
+        noCheckout)
+      return 1
     var paths: seq[string]
     var droppedFrom: seq[string]
     for project in projects:

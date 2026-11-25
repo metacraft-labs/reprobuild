@@ -72,14 +72,25 @@ package reprobuild:
     # declares the wrapper edge's `sh` and coreutils
     # (Reprobuild-Standard-Library.md, `cross_zig`).
     #
-    # The range admits 0.14 as well as 0.13. This entry is part of every
-    # consumer's solve, not only of reprobuild's own cross build: a recipe
-    # that `uses:` reprobuild solves one zig for its whole closure, and
-    # codetracer-launcher, which such a recipe (codetracer) also uses,
-    # requires `zig >=0.14 <0.15`. A `<0.14` cap left the two with no common
-    # version and made that solve unsatisfiable. The stdlib zig package
-    # carries 0.14.1 on every platform it carries 0.13.0.
-    "zig >=0.13 <0.15"
+    # The floor is 0.14, not 0.13: this zig links the monitor shim under a
+    # zig target, and zig 0.13 binds `pthread_mutex_lock` and ten other
+    # symbols the shim calls to `libpthread.so.0` (it hands the linker its
+    # glibc stubs in a fixed order, libpthread's ahead of libc's, and both
+    # define them for glibc 2.34+), so a 0.13-linked shim NEEDS
+    # `libpthread.so.0`, which no link flag removes. zig 0.14 binds them to
+    # `libc.so.6`, and the shim needs only libc and the loader. That is
+    # required of every build of the Linux shim: it is preloaded into every
+    # monitored process, and a program that finds its C runtime through
+    # DT_RUNPATH cannot resolve a further C-runtime library for it
+    # (`libs/repro_dsl_stdlib/tests/t_zig_cross_monitor_shim_needs_only_libc.nim`).
+    #
+    # This entry is part of every consumer's solve, not only of reprobuild's
+    # own cross build: a recipe that `uses:` reprobuild solves one zig for
+    # its whole closure, and codetracer-launcher, which such a recipe
+    # (codetracer) also uses, requires `zig >=0.14 <0.15`, so the two agree.
+    # The stdlib zig package carries 0.14.1 on every platform it carries
+    # 0.13.0.
+    "zig >=0.14 <0.15"
     # Toolchain floor — mirrors flake.nix's nativeBuildInputs. These
     # are the PATH-resolvable binaries the reprobuild build needs;
     # they're sufficient for the path-mode tool resolver to succeed
@@ -1839,12 +1850,16 @@ package reprobuild:
       let bumpVersionTest = source == "tests/unit/test_bump_version.py"
       let ciLockCredentialsTest =
         source == "tests/unit/test_ci_reconcile_lock_credentials.py"
+      let downstreamRecorderPinsTest =
+        source == "tests/unit/test_downstream_recorder_sibling_pins.py"
       let releaseSmokeTest =
         source == "tests/unit/test_release_smoke_dev_exec.py"
       let releaseTagTest =
         source == "tests/unit/test_release_tag_names_build.py"
       let releaseCachePushTest =
         source == "tests/unit/test_release_cache_push.py"
+      let clingoProducerTest =
+        source == "tests/unit/test_clingo_windows_arm64_producer.py"
       let releaseIdentityTest =
         source == "tests/unit/test_release_pipeline_identity.py"
       let confinementSystemdAnalyzeTest =
@@ -1870,6 +1885,15 @@ package reprobuild:
           # contract cases read.
           @["scripts/ci_lock_source_credentials.py",
             ".github/workflows/ci.yml"]
+        elif downstreamRecorderPinsTest:
+          # The script under test; the workflow whose step it runs; the two
+          # scripts that step also runs; and the module it imports the
+          # workflow reader from.
+          @["scripts/recorder_build_siblings_lock.sh",
+            ".github/workflows/downstream-tests.yml",
+            "scripts/reconcile_locked_siblings.sh",
+            "scripts/ci_lock_source_credentials.py",
+            "tests/unit/test_ci_reconcile_lock_credentials.py"]
         elif releaseSmokeTest:
           @["scripts/release/smoke_release_dev_exec.sh",
             "scripts/release/with_windows_archive_runquota.ps1",
@@ -1884,6 +1908,15 @@ package reprobuild:
           # It copies the guard into the runner clone it builds.
           @["scripts/release/assert_tag_names_commit.sh",
             ".github/workflows/release-pipeline.yml"]
+        elif clingoProducerTest:
+          # The two admit-job guards it runs, the workflow whose steps it runs
+          # and whose trigger it checks, the release trigger it must stay
+          # disjoint from, and the pins the version guard reads.
+          @["scripts/release/assert_producer_tag.sh",
+            "scripts/release/assert_commit_on_branch.sh",
+            ".github/workflows/clingo-windows-arm64.yml",
+            ".github/workflows/release.yml",
+            "windows/toolchain-versions.env"]
         elif releaseCachePushTest:
           # The retry script, and the workflow whose `publish-nix-cache` job
           # shape the test checks and whose push step's `run:` block it runs.
@@ -1923,10 +1956,20 @@ package reprobuild:
       # for the loopback-forge cases.
       if ciLockCredentialsTest:
         appendRegisteredActionToolIdentityRefs(pyExecute.id, ["git"])
+      # Real bash runs the workflow step and the script; real git provides
+      # the sibling checkouts the step reconciles.
+      if downstreamRecorderPinsTest:
+        appendRegisteredActionToolIdentityRefs(pyExecute.id, ["bash", "git"])
       # Real git and bash: a bare repository as the remote, `git ls-remote`
       # against it, and the workflow steps' `run:` lines under bash.
       if releaseTagTest:
         appendRegisteredActionToolIdentityRefs(pyExecute.id, ["bash", "git"])
+      # Real git and bash again, plus the branch guard's `mktemp` and `rm`
+      # and the version step's `sed`; POSIX only, like the admit job.
+      when not defined(windows):
+        if clingoProducerTest:
+          appendRegisteredActionToolIdentityRefs(pyExecute.id,
+            ["bash", "git", "mktemp", "rm", "sed"])
       # node runs the guard step's `actions/github-script` body.
       if releaseIdentityTest:
         appendRegisteredActionToolIdentityRefs(pyExecute.id, ["node"])

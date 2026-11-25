@@ -1814,6 +1814,61 @@ proc registerInUnifiedStore*(storeRoot, packageName, version, adapter,
                            receipt.createdAtUnix)
   (prefixId: prefixId, inserted: inserted)
 
+type
+  RuntimePrefixMissing* = object of OSError
+    ## The prefix a relocated prefix's programs were rewritten onto (its
+    ## ``elfRuntimePackage``) is gone. The relocated prefix cannot start
+    ## its programs, and must not be handed out.
+
+  RuntimeReferenceOutcome* = enum
+    rroRecorded    ## the store index now records the reference
+    rroUnindexed   ## one of the two prefixes has no index row to record it on
+    rroUnwritable  ## the store index cannot be written by this process
+
+proc recordRuntimePrefixReference*(storeRoot, prefix,
+                                   runtimePrefix: string):
+    RuntimeReferenceOutcome =
+  ## Record in the store index that ``prefix``, whose ELF files were
+  ## relocated onto the loader and C library of ``runtimePrefix``, references
+  ## it, so store GC and the budget collector keep ``runtimePrefix`` for as
+  ## long as ``prefix`` is indexed (``recordPrefixReference``). Called on
+  ## every resolution of such a prefix, a reused or substituted one
+  ## included, so a prefix realized before references were recorded gains
+  ## the record the next time it is resolved.
+  ##
+  ## Raises ``RuntimePrefixMissing`` when ``runtimePrefix`` is not on disk,
+  ## or when the collector removes its row while the record is being made:
+  ## the relocated programs name a loader that does not exist.
+  ##
+  ## Returns ``rroUnindexed`` when either prefix has no index row (a
+  ## substituted prefix is laid down without one). Nothing can be recorded
+  ## then; such a prefix is invisible to the collector, which only collects
+  ## what the index names, and the caller reports it. Returns
+  ## ``rroUnwritable`` when the index cannot be written (a read-only mount,
+  ## another user's store): this process cannot collect from it either, and
+  ## resolving a prefix from such a store must keep working.
+  if not dirExists(extendedPath(runtimePrefix)):
+    raise newException(RuntimePrefixMissing,
+      "tool-resolution failed: " & prefix & " was relocated onto the " &
+      "loader and C library of " & runtimePrefix & ", which is gone")
+  var store = openStore(storeRoot)
+  defer: store.close()
+  let referrer = store.prefixOwningPath(prefix)
+  let referenced = store.prefixOwningPath(runtimePrefix)
+  if not referrer.found or not referenced.found:
+    return rroUnindexed
+  try:
+    discard store.recordPrefixReference(referrer.row.prefixId,
+      referenced.row.prefixId)
+  except SqliteError:
+    return rroUnwritable
+  except EPrefixNotIndexed as err:
+    raise newException(RuntimePrefixMissing,
+      "tool-resolution failed: " & prefix & " or its runtime prefix " &
+      runtimePrefix & " was collected while it was being resolved: " &
+      err.msg)
+  rroRecorded
+
 proc writeProfile(outp: var seq[byte]; profile: PathOnlyToolProfile)
 proc readProfile(bytes: openArray[byte]; pos: var int;
                  version: uint16): PathOnlyToolProfile
@@ -6327,6 +6382,20 @@ proc raiseProvisioningFailure(run: BuildRunResult) =
         "tool-resolution failed: provisioning edge " & item.id &
         " was blocked by " & item.blockedBy)
 
+proc elfRuntimeReceiptOf*(edges: ProvisioningEdges): string =
+  ## The receipt of the ``elf-runtime:<package>`` dependency edge of the
+  ## requested package's edge, or "" when its archive names no
+  ## ``elfRuntimePackage``. Read from the root edge's own spec, the one its
+  ## executor reads the runtime prefix from.
+  for action in edges.actions:
+    if action.id != edges.rootId:
+      continue
+    let spec = parseJson(action.builtinText)
+    for node in spec{"extractors"}:
+      if isElfRuntimeRole(node{"role"}.getStr()):
+        return node{"receipt"}.getStr()
+  ""
+
 proc resolveTarballTool*(useDef: InterfaceToolUse; storeRoot: string;
                          writerMode = "direct";
                          graphOutputs: openArray[string] = []):
@@ -6341,6 +6410,8 @@ proc resolveTarballTool*(useDef: InterfaceToolUse; storeRoot: string;
       getCurrentDir() / ".repro" / "tool-store"
   let edges = tarballProvisioningEdges(useDef, root, writerMode,
     graphOutputs)
+  let runtimeReceipt = elfRuntimeReceiptOf(edges)
+  var runtimePrefix = ""
   var receipt: TarballProvisionReceipt
   var actionCacheHit = false
   for attempt in 0 .. 1:
@@ -6362,13 +6433,29 @@ proc resolveTarballTool*(useDef: InterfaceToolUse; storeRoot: string;
     # the edge realizes the prefix the current layout keys on. (The alias is
     # written beside the executable; a launcher-pair alias is not a plain
     # file of that name and is not checked here.)
-    if receipt.executable.len > 0 and
+    #
+    # A relocated prefix needs the prefix its programs were rewritten onto as
+    # well: its PT_INTERP and run path name files there, so with that prefix
+    # gone the receipt and the executable are still in place and the
+    # programs cannot start. The forced run re-realizes it at the same path.
+    let rootPresent = receipt.executable.len > 0 and
         fileExists(extendedPath(receipt.executable)) and
         (plan.declaredExecutableAlias.len == 0 or
          plan.declaredLauncher.len > 0 or
          fileExists(extendedPath(receipt.executable.parentDir /
-           plan.declaredExecutableAlias))):
+           plan.declaredExecutableAlias)))
+    if runtimeReceipt.len > 0:
+      runtimePrefix = readTarballProvisionReceipt(runtimeReceipt).prefix
+    let runtimePresent = runtimeReceipt.len == 0 or
+      (runtimePrefix.len > 0 and dirExists(extendedPath(runtimePrefix)))
+    if rootPresent and runtimePresent:
       break
+    if attempt > 0 and rootPresent:
+      raise newException(RuntimePrefixMissing,
+        "tool-resolution failed: " & receipt.prefix & " was relocated " &
+        "onto the loader and C library of " & runtimePrefix &
+        ", which is missing after it was realized again (receipt " &
+        runtimeReceipt & ")")
     if attempt > 0:
       # Name the reason the prefix the receipt points at does not satisfy the
       # declaration, not merely that it does not. When the prefix is gone
@@ -6394,6 +6481,18 @@ proc resolveTarballTool*(useDef: InterfaceToolUse; storeRoot: string;
       plan.record), receipt.prefix, tarballAppTrust)
   refuseUnrunnableTarballExecutable(useDef, receipt.executable,
     receipt.prefix)
+  if runtimeReceipt.len > 0:
+    # Keep the runtime prefix for as long as this one is indexed. Recorded
+    # on every resolution, a reused prefix included; see
+    # ``recordRuntimePrefixReference``.
+    let outcome = recordRuntimePrefixReference(root, receipt.prefix,
+      runtimePrefix)
+    if outcome != rroRecorded:
+      stderr.writeLine("WRuntimeReferenceUnrecorded: store GC is not told " &
+        "that " & receipt.prefix & " needs its runtime prefix " &
+        runtimePrefix & ": " &
+        (if outcome == rroUnindexed: "one of them has no store index row"
+         else: "the store index is not writable by this process"))
   result = tarballProfileFor(useDef, plan, receipt.prefix,
     receipt.selectedUrl, receipt.executable)
   # Not part of the profile fingerprint (see the field), so set after the

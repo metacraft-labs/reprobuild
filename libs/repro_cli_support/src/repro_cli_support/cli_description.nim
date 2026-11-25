@@ -884,6 +884,14 @@ proc branchFlags(): NimNode {.compileTime.} =
     flag projects is seq[string], separator = ",",
       help = "Fork only these projects (repeat it or give a " &
         "comma-separated list)"
+    # The same field and spelling as `repro sync`'s repo selector
+    # (`repoSelectionFlags`), so `--except` means one thing across the
+    # workspace verbs: exact repo names, repeatable or comma-separated.
+    flag exceptRepos is seq[string], separator = ",",
+      perSource = [cli = "except"],
+      help = "Leave the named repos out of the new workspace: no probe, " &
+        "no clone, no branch (exact names; repeat it or give a " &
+        "comma-separated list)"
     `report`
     pos path is string, required = false,
       help = "Where to create the new workspace (its last component names " &
@@ -4138,8 +4146,10 @@ proc reproCommandLineDescription*(): NimNode {.compileTime.} =
       boolFlag json is bool,
         help = "Print one JSON object (schema reprobuild.version.v1)"
     subcmd "completion", help = "Print a shell's completion script":
-      pos shell is string, values = ["bash", "zsh", "fish", "powershell"],
-        help = "The shell whose completion script to print"
+      pos shell is string,
+        values = ["bash", "zsh", "fish", "powershell", "pwsh"],
+        help = "The shell whose completion script to print (`pwsh` is " &
+          "`powershell`)"
 
     # ---- Role processes ----------------------------------------------------
     # The commands repro spawns of itself. Listed only by

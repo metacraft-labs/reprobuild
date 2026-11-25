@@ -52,7 +52,8 @@
 ## No mocks: the manifest edits are read back through the real strict readers
 ## and the real resolver, and the commits land in a real git repo.
 
-import std/[json, options, os, osproc, strutils, tempfiles, unittest]
+import std/[algorithm, json, options, os, osproc, strutils, tempfiles,
+  unittest]
 
 import repro_test_support
 import repro_test_support/reasoned_skip
@@ -525,3 +526,99 @@ suite "membership model — `repro ws sets` authoring":
       check "repos/lib-o.toml" in repoCommit
       check stagedPaths() == @["projects/alpha.toml"]
       check requireGit(git & " diff --cached") == stagedBefore
+
+proc treeSnapshot(root: string): string =
+  ## Every file under ``root`` with its bytes, and every directory, in a
+  ## stable order, so "nothing was written" is checked against the whole tree
+  ## rather than against the one path a verb is expected to touch; a verb that
+  ## got as far as creating an empty directory (`url-prefixes/`) shows up
+  ## too. `.git` is left out: it is what the test itself moves to take the
+  ## checkout away.
+  var entries: seq[string]
+  for path in walkDirRec(root, yieldFilter = {pcFile, pcLinkToFile, pcDir,
+                                              pcLinkToDir}, relative = true):
+    if path == ".git" or path.startsWith(".git" & DirSep):
+      continue
+    if dirExists(root / path):
+      entries.add(path & DirSep)
+    else:
+      entries.add(path & "\n" & readFile(root / path))
+  entries.sort()
+  entries.join("\n--\n")
+
+proc assertRefusedUntouched(fx: Fixture; label: string; nested: bool;
+                            args: openArray[string]) =
+  ## The refusal, its wording, and an unchanged tree, for one invocation.
+  ## ``nested`` pins WHICH refusal: the enclosing-checkout one names the
+  ## enclosing worktree, the plain one does not, so the two shapes cannot
+  ## collapse into one (e.g. a TMPDIR that is itself inside a checkout).
+  let before = treeSnapshot(fx.workspaceRoot)
+  let res = runRepro(fx, args)
+  checkpoint(label & " output: " & res.output)
+  check res.code == 1
+  check res.output.contains("is not a git checkout")
+  check res.output.contains("inside the Git worktree") == nested
+  check res.output.contains("nothing was written")
+  check not res.output.contains("defined, not enabled")
+  check treeSnapshot(fx.workspaceRoot) == before
+
+suite "membership model — definition verbs without a manifest checkout":
+
+  test "t_definition_verbs_refuse_before_writing_without_a_manifest_checkout":
+    ## A definition verb writes, commits and pushes. When the manifest repo
+    ## root is not a git checkout there is nothing to commit to, and the verb
+    ## must refuse with the tree exactly as it was — no scaffolded manifest,
+    ## no deleted one, no regenerated `workspace-projects.md` — and must not
+    ## print the "defined, not enabled" success line.
+    ##
+    ## Regression: `sets add` wrote `repo-sets/<name>.toml` and `workspace-projects.md`,
+    ## then refused to commit, exited 1, and still reported the set
+    ## "defined". `remove` and `repos add` / `remove` had the same order —
+    ## edit first, ask about the checkout at commit time.
+    ##
+    ## Both shapes of "not a checkout" are driven: a plain directory with no
+    ## repository anywhere above it, and a plain directory NESTED inside an
+    ## enclosing checkout, where git's upward discovery would otherwise have
+    ## committed the edit into the wrong repository.
+    let gitBin = findExe("git")
+    if gitBin.len == 0:
+      skip("git not on PATH; this case needs a repository to take away")
+    else:
+      let fx = setupFixture(gitBin, "no-checkout")
+      defer: removeDir(fx.scratch)
+
+      # Real state for `remove` to find, authored while it WAS a checkout.
+      check runRepro(fx, ["ws", "sets", "add", "beta"]).code == 0
+      check runRepro(fx, ["ws", "repos", "add", "lib-z", "--project=alpha",
+        "--remote=https://git.example.invalid/acme/lib-z",
+        "--branch=dev"]).code == 0
+
+      # Take the checkout away.
+      moveDir(fx.workspaceRoot / ".git", fx.scratch / "detached.git")
+
+      for shape in ["plain directory", "nested in an enclosing checkout"]:
+        let nested = shape == "nested in an enclosing checkout"
+        if nested:
+          discard requireGit(q(gitBin) & " init -q -b main " & q(fx.scratch))
+        assertRefusedUntouched(fx, shape & ": sets add", nested,
+          ["ws", "sets", "add", "gamma"])
+        assertRefusedUntouched(fx, shape & ": projects add", nested,
+          ["ws", "projects", "add", "delta", "-m", "A project."])
+        assertRefusedUntouched(fx, shape & ": sets remove", nested,
+          ["ws", "sets", "remove", "beta"])
+        assertRefusedUntouched(fx, shape & ": repos add", nested,
+          ["ws", "repos", "add", "lib-n", "--project=alpha",
+           "--remote=https://git.example.invalid/acme/lib-n", "--branch=dev"])
+        # Into a repo-set, from an org no `url-prefixes/` entry serves: the
+        # first write this path would make is a minted prefix file.
+        assertRefusedUntouched(fx, shape & ": repos add --set", nested,
+          ["ws", "repos", "add", "lib-m", "--set=beta",
+           "--remote=https://git.example.invalid/other-org/lib-m",
+           "--branch=dev"])
+        assertRefusedUntouched(fx, shape & ": repos remove", nested,
+          ["ws", "repos", "remove", "lib-z"])
+      check not fileExists(fx.workspaceRoot / "repo-sets" / "gamma.toml")
+      check not dirExists(fx.workspaceRoot / "url-prefixes")
+      check fileExists(fx.workspaceRoot / "repo-sets" / "beta.toml")
+      check "lib-z" in readProjectManifest(
+        fx.workspaceRoot / "projects" / "alpha.toml").member_repos
