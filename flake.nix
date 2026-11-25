@@ -1854,17 +1854,17 @@
                 NIMCRYPTO_SRC|${nimcrypto-src}
                 BEARSSL_SRC|${bearssl-src}
                 STACKABLE_HOOKS_SRC|${nim-stackable-hooks-src}/src
-                CODETRACER_TRACE_FORMAT_NIM_SRC|${codeTracerTraceFormatNimSrc}
-                IO_MON_SRC|${io-mon-src}/src
-                SHM_GSET_SRC|${nim-shm-gset-src}/src
-                SHM_QUEUE_SRC|${nim-shm-queue-src}/src
+                REPRO_ENGINE_CODETRACER_TRACE_FORMAT_NIM_SRC|${codeTracerTraceFormatNimSrc}
+                REPRO_ENGINE_IO_MON_SRC|${io-mon-src}/src
+                REPRO_ENGINE_SHM_GSET_SRC|${nim-shm-gset-src}/src
+                REPRO_ENGINE_SHM_QUEUE_SRC|${nim-shm-queue-src}/src
                 CLI_SPEC_SRC|${nim-cli-spec-src}/src
                 ENTRYPOINTS_SRC|${nim-entrypoints-src}/src
                 CONFUTILS_SRC|${nim-confutils-src}
                 CODETRACER_PINNED_SRC|${codetracerSrc}/src
                 REPRO_CT_TEST_RUNNER_SRC|${reprobuild-ct-test-runner-src}
                 REPRO_TEST_ADAPTERS_SRC|${reprobuild-test-adapters-src}/src
-                TEST_CERTIFICATES_TOOLS_SRC|${test-certificates-tools-src}/src
+                REPRO_ENGINE_TEST_CERTIFICATES_TOOLS_SRC|${test-certificates-tools-src}/src
                 REPROBUILD_USE_SYSTEM_HASH_LIBS|1
                 RUNQUOTA_SRC|${runquota-src}
                 RUNQUOTAD_BIN|${runquotaTools}/bin/runquotad

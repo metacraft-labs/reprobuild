@@ -3350,7 +3350,7 @@ suite "an essential unit never requires the restore (§13 decision 192)":
     check r.len == 1 and "systemd-networkd.service is essential" in r[0] and
       "the profile's st.service starts it" in r[0]
 
-  test "decision 192, route 4: decision 60's onward closure":
+  test "decision 192, route 4: decision 60's onward dependency closure":
     let (root, d) = installed15("r15-ess4")
     hostFile(root, "/lib/systemd/system/default.target", "[Unit]\n")
     hostFile(root, "/lib/systemd/system/online.target",
@@ -3362,7 +3362,7 @@ suite "an essential unit never requires the restore (§13 decision 192)":
       "ReadWritePaths=/var/lib/other\nExecStart=/bin/true\n")
     let r = refusals192(starter, root, d, none)
     check r.len == 1 and "systemd-networkd-wait-online.service is essential" in r[0] and
-      "decision 60's onward closure" in r[0]
+      "decision 60's onward dependency closure" in r[0]
 
   test "decision 192: an alias and a template instance are matched by Id=":
     let (root, d) = installed15("r15-ess5")

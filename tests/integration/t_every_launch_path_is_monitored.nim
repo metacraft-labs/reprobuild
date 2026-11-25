@@ -907,6 +907,15 @@ proc capabilitySurfaces(): seq[CapabilitySurface] =
                # A ReleaseLease on the session's connection for a grant no
                # queued process claimed; it starts nothing.
                "releaseUnclaimedGrant",
+               # The Hello round trip behind `isRunQuotaDaemonReachable`, with
+               # its two failure kinds kept apart; it connects and starts
+               # nothing (the Windows pipe probe it runs first is the inert
+               # `probeWindowsPipeOwner` above).
+               "probeRunQuotaDaemon",
+               # A template that counts a nesting depth around its body and
+               # then releases the adopted-daemon connection it held; it
+               # starts nothing.
+               "withInvocationRunQuotaHold",
                "probeWindowsPipeOwner", "terminateStalePipeOwner",
                # The two halves of the terminate PRECONDITION.
                # ``terminateStalePipeOwner`` no longer takes a PID; it
