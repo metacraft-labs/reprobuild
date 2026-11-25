@@ -358,6 +358,13 @@ dev-shell-hooks:
 test-run-tests-runquota-endpoint:
     bash ./tests/test_run_tests_runquota_endpoint.sh
 
+# The test phase of `just test` bounds every process's memory, so a runaway
+# case dies of its own failed allocation rather than the host's OOM killer.
+# Allocates up to 3 GiB in the control case; see
+# tests/test_run_tests_bounds_process_memory.sh.
+test-run-tests-bounds-process-memory:
+    bash ./tests/test_run_tests_bounds_process_memory.sh
+
 dev-env-full-regression:
     mkdir -p test-logs
     bash ./scripts/run_tests.sh 2>&1 | tee test-logs/dev-env-full-regression.log
