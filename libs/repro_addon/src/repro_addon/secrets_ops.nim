@@ -82,18 +82,38 @@ proc currentGenerationProfile(stateDir: string): SystemProfile =
     text = readFile(userProfilePath(stateDir))
   if text.len > 0: parseSystemProfile(text, stored = true) else: SystemProfile()
 
+proc composedLiveProfile*(ownText, userText: string; stateDir = ""):
+    SystemProfile =
+  ## The profile a ``secret put`` judges its consumers in: the generation's
+  ## own resources and its user resources together, as the switch composes
+  ## them (``runAddonApply``'s ``composed``), the user profile parsed as it
+  ## was installed (``parseStoredUserProfile``). A credential consumer
+  ## starts ``repro-addon-secrets.service``, which only the add-on's own
+  ## profile defines: judged in the user profile alone it reaches
+  ## everything, so the carried-state check never judges it (A13 review
+  ## round 15, the first measurement of §13 decision 190).
+  let user = if userText.len > 0: parseStoredUserProfile(userText, stateDir)
+             else: SystemProfile()
+  when mutated("secret-put-user-profile-only"):
+    # FALSIFYING MUTATION: the user profile alone, as first landed.
+    return user
+  let own = if ownText.len > 0: parseSystemProfile(ownText) else: SystemProfile()
+  SystemProfile(addOn: user.addOn, resources: own.resources & user.resources,
+                secretFiles: user.secretFiles)
+
 proc currentGenerationLiveProfile(stateDir: string): SystemProfile =
-  ## The current generation's operator profile as it was installed
-  ## (``parseStoredUserProfile``: its floor rendered as stored), which the
-  ## carried-state cross-check of a ``secret put`` judges.
+  ## ``composedLiveProfile`` of the current generation (its user profile
+  ## alone for a generation applied before its own profile was kept).
   let current = readCurrentGenerationId(stateDir)
-  var text = ""
+  var own, user = ""
   if current.len > 0:
     let g = generationProfiles(stateDir, current)
-    if g.found: text = g.user
-  if text.len == 0 and fileExists(userProfilePath(stateDir)):
-    text = readFile(userProfilePath(stateDir))
-  if text.len > 0: parseStoredUserProfile(text, stateDir) else: SystemProfile()
+    if g.found:
+      own = g.own
+      user = g.user
+  if user.len == 0 and fileExists(userProfilePath(stateDir)):
+    user = readFile(userProfilePath(stateDir))
+  composedLiveProfile(own, user, stateDir)
 
 proc currentSecretDecls*(stateDir: string): seq[SecretFileDecl] =
   ## The current generation's ``secrets.secretFile`` declarations.

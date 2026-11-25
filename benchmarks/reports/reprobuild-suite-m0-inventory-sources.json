@@ -10117,7 +10117,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_addon/tests/t_addon_carried_state_fails_closed.nim",
       "sourceSuiteCount": 37,
-      "staticCaseCount": 201,
+      "staticCaseCount": 202,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

@@ -2231,9 +2231,16 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
         # so "neither stopped nor held" can be seen, and the generator --
         # installed afterwards, without a reload -- links it to the judged
         # unit only at the apply's own reload.
-        discard nw.run("printf '[Unit]\\nDescription=A13 round-14 probe: an " &
+        # Its own inactive dummy service (Service=): on Debian sshd.service
+        # is an alias of the running ssh.service, and systemd will not
+        # start a socket whose service is already active.
+        discard nw.run("printf '[Unit]\\nDescription=A13 round-15 probe: the " &
+          "dummy listener's own service\\n[Service]\\nExecStart=/bin/true\\n' > " &
+          "/etc/systemd/system/a13r15-sshd-dummy.service && " &
+          "printf '[Unit]\\nDescription=A13 round-14 probe: an " &
           "essential name, a dummy listener\\n[Socket]\\nListenStream=" &
-          "127.0.0.1:18714\\n[Install]\\nWantedBy=sockets.target\\n' > " &
+          "127.0.0.1:18714\\nService=a13r15-sshd-dummy.service\\n" &
+          "[Install]\\nWantedBy=sockets.target\\n' > " &
           "/etc/systemd/system/sshd.socket && mkdir -p " &
           "/etc/systemd/system/sockets.target.wants && ln -sf ../sshd.socket " &
           "/etc/systemd/system/sockets.target.wants/sshd.socket && " &
@@ -2257,7 +2264,8 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
         discard nw.run("systemctl stop sshd.socket 2>/dev/null; " &
           "rm -f /etc/systemd/system-generators/a13r14-late " &
           "/etc/systemd/system/sockets.target.wants/sshd.socket " &
-          "/etc/systemd/system/sshd.socket; rm -rf /etc/systemd/system/" &
+          "/etc/systemd/system/sshd.socket " &
+          "/etc/systemd/system/a13r15-sshd-dummy.service; rm -rf /etc/systemd/system/" &
           "sshd.socket.d /run/systemd/system/sshd.socket.d; systemctl " &
           "daemon-reload; systemctl stop sshd.socket 2>/dev/null; systemctl " &
           "reset-failed sshd.socket 2>/dev/null; true")

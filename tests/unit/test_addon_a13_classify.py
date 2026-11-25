@@ -159,9 +159,13 @@ def green(kind, base="debian-13"):
                                    "credentialChanged": True,
                                    "tokenReached": True}
         rec["revertStepReached"] = True
-        rec["secretPutJudged"] = {"exit": 1, "loadedUserBefore": "root",
-                                  "refused": True, "ranAsRoot": False,
-                                  "restarted": False, "ok": True}
+        rec["secretPutJudged"] = {
+            "a": {"exit": 0, "loadedUserBefore": "root", "refused": False,
+                  "restarted": True, "userAfter": "", "ranAsRoot": False,
+                  "ok": True},
+            "b": {"exit": 1, "refused": True, "restarted": False,
+                  "ranAsRoot": False, "ok": True},
+            "ok": True}
         rec["steps"].insert(len(ADOPT_EVERY_SWITCH_STEPS), ok(
             "decision 135, add-on host: a profile with a confined template "
             "applies with carried state on the host, and the instances an "
@@ -514,13 +518,16 @@ def red_record(kind, base="debian-13"):
                             "anything is written")]
     elif kind == "mutsecretput":
         rec = base_record(ADOPT, base, mutation="secret-put-unjudged")
-        rec["secretPutJudged"] = {"exit": 0, "loadedUserBefore": "root",
-                                  "refused": False, "ranAsRoot": True,
-                                  "restarted": True, "ok": False}
+        rec["secretPutJudged"] = {
+            "a": {"exit": 0, "refused": False, "restarted": True,
+                  "ranAsRoot": False, "ok": True},
+            "b": {"exit": 0, "refused": False, "restarted": True,
+                  "ranAsRoot": False, "ok": False},
+            "ok": False}
         rec["steps"] = [ok("bootstrap"),
-                        red("decision 190: with carried state on the host a "
-                            "secret put judges its consumer as systemd loaded "
-                            "it and refuses rather than restart it as root")]
+                        red("decision 190 (b): with a generator making the "
+                            "probe root at the put's own reload, the put "
+                            "refuses and the probe never runs as root")]
     elif kind == "mutessreq":
         rec = base_record(CONV, base, engine=ENGINE,
                           engine_mutation="essential-restore-requirement-allowed")
@@ -1298,7 +1305,7 @@ class TheTriggersOfHeldUnits(unittest.TestCase):
         rec["prefixDropInRefused"]["written"] = False
         self.assertRejected("mutprefixcall-debian-13", rec)
         rec = red_record("mutsecretput")
-        rec["secretPutJudged"]["ranAsRoot"] = False
+        rec["secretPutJudged"]["b"]["restarted"] = False
         self.assertRejected("mutsecretput-debian-13", rec)
         rec = red_record("mutessreq")
         rec["essentialRequirementRefused"]["exit"] = 1
