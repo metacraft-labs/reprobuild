@@ -37,7 +37,7 @@ suite "recipe compiler requirement":
     check "2.2.4" in refusal
     check "REPRO_NIM_COMPILER names" in refusal
     check "operator decision of 2026-11-24" in refusal
-    check "2026-10-20-interface-extraction-nimcache-name-exceeds" in refusal
+    check "cannot open" in refusal  # says what the old compiler does
     expect RecipeCompilerTooOldError:
       requireRecipeCompilerVersion("2.2.4", "the lock pins")
 

@@ -1,8 +1,6 @@
 ## A recipe compile refuses a compiler older than Nim 2.2.10 and says so.
 ##
-## Operator decision of 2026-11-24 (reprobuild-pm
-## `issues/2026-10-20-interface-extraction-nimcache-name-exceeds-name-max-for-deep-recipe-paths.md`):
-## recipe compilation requires Nim 2.2.10. An explicit `REPRO_NIM_COMPILER`
+## Operator decision of 2026-11-24: recipe compilation requires Nim 2.2.10. An explicit `REPRO_NIM_COMPILER`
 ## naming an older release must stop the command with an error that names the
 ## requirement, the release found and the way out, and must not be followed by
 ## a compile that dies later with `cannot open`.

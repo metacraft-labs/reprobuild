@@ -1,9 +1,7 @@
 ## The Nim release a recipe compile requires.
 ##
-## Operator decision of 2026-11-24 (reprobuild-pm
-## `issues/2026-10-20-interface-extraction-nimcache-name-exceeds-name-max-for-deep-recipe-paths.md`):
-## recipe compilation, which is interface extraction and the provider compile,
-## REQUIRES Nim 2.2.10. Nim 2.2.4 names a module's generated C file after its
+## Operator decision of 2026-11-24: recipe compilation, which is interface
+## extraction and the provider compile, REQUIRES Nim 2.2.10. Nim 2.2.4 names a module's generated C file after its
 ## path relative to the project only, so a recipe at a deep path makes a file
 ## name longer than NAME_MAX and the compile dies with `cannot open`; Nim
 ## 2.2.6 and later also weigh the `--path` roots, which is what lets the
@@ -88,9 +86,7 @@ proc recipeCompilerRefusal*(version, source: string): string =
     "path relative to the project only, so a recipe at a deep path makes " &
     "a file name longer than the filesystem allows and the compile fails " &
     "with `cannot open`. Remove the older pin or `REPRO_NIM_COMPILER`, or " &
-    "point it at Nim " & RecipeCompilerMinimumVersion & " or newer " &
-    "(reprobuild-pm issues/2026-10-20-interface-extraction-nimcache-name-" &
-    "exceeds-name-max-for-deep-recipe-paths.md)."
+    "point it at Nim " & RecipeCompilerMinimumVersion & " or newer."
 
 proc requireRecipeCompilerVersion*(version, source: string) =
   ## Raises `RecipeCompilerTooOldError` with `recipeCompilerRefusal`'s text.
