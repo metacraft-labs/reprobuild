@@ -81,8 +81,10 @@ proc lowerToSolver*(input: NimbleSolverInput; toolchainNim = "";
   ## condition (`nim-version-unknown`; ``NimbleSolveOptions.nimDeclared``).
   var gates: seq[PackageDecl]
   for pkg in input.packages:
+    # A `nimble:` package's versions are ordered, and its ranges read, as
+    # Nimble does, over any number of components (NPC-AREQ6).
     var decl = PackageDecl(name: pkg.identity, onDemand: true,
-      preferNewest: true)
+      preferNewest: true, versionScheme: vsNimble)
     let deps = perVersionDependencies(input, pkg)
     var nimOf = initTable[string, seq[string]]()
     for c in pkg.candidates:
@@ -118,8 +120,9 @@ proc lowerToSolver*(input: NimbleSolverInput; toolchainNim = "";
   # when a chosen version names it (NPC-AREQ7).
   for pkg in input.packages:
     for f in pkg.features:
+      # Its versions mirror the package's, under the same ranges.
       var decl = PackageDecl(name: featureIdentity(pkg.identity, f),
-        onDemand: true)
+        onDemand: true, versionScheme: vsNimble)
       for (version, ds) in featureVersionDependencies(input, pkg, f):
         if version in decl.versions:
           continue
@@ -156,7 +159,8 @@ proc lowerToSolver*(input: NimbleSolverInput; toolchainNim = "";
           declared.incl d.name
           missing.add d.name
   for name in missing:
-    result.add PackageDecl(name: name, onDemand: true)
+    result.add PackageDecl(name: name, onDemand: true,
+      versionScheme: vsNimble)
 
 proc canonicalRequirement*(input: NimbleSolverInput;
                            dep: DependencyDecl): DependencyDecl =
@@ -293,6 +297,8 @@ proc explainNimbleFailure*(input: NimbleSolverInput;
     input.platform.id & ")"]
   for m in input.missing:
     lines.add "  nimble:" & m & " is not in the index" & renderChain(input, m)
+  for note in aliasCandidateNotes(input):
+    lines.add "  " & note
   for pkg in input.packages:
     for c in pkg.candidates:
       if not c.offered: continue

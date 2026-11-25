@@ -26,6 +26,8 @@ when defined(posix):
   import std/[monotimes, os, osproc, strutils, times]
   import std/importutils
   import std/posix
+  from repro_daemon_core/detached_working_directory import
+    detachedDaemonWorkingDirectory
   from repro_core/descriptor_inheritance import
     markInheritableDescriptorsCloseOnExec, restoreInheritableDescriptors
 
@@ -391,7 +393,9 @@ when defined(posix):
     ## * a NEW SESSION (the intermediate's ``setsid``): a terminal's
     ##   ``SIGINT`` / ``SIGHUP`` addressed to the invocation's process group
     ##   does not reach it;
-    ## * working directory ``/``: it pins no caller directory;
+    ## * working directory ``/`` (``detachedDaemonWorkingDirectory``, the rule
+    ##   every detached daemon ``repro`` starts follows): it pins no caller
+    ##   directory and not the directory of its own image;
     ## * stdin ``/dev/null``, stdout and stderr appended to ``logFd``
     ##   (``runquotad.log``);
     ## * NO DESCRIPTOR ABOVE 2. ``osproc`` and other code in this process
@@ -440,7 +444,9 @@ when defined(posix):
         $strerror(errno) & ")")
     let devNull = atLeastThree(devNullOpened, "/dev/null")
     defer: discard posix.close(devNull)
-    let root = "/".cstring
+    # Held by a named variable for as long as `root` points into it.
+    let rootDir = detachedDaemonWorkingDirectory(resolved)
+    let root = rootDir.cstring
     var defaultChild: Sigaction
     defaultChild.sa_handler = SIG_DFL
     discard sigemptyset(defaultChild.sa_mask)

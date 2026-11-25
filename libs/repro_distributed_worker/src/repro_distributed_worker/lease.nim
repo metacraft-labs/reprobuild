@@ -427,6 +427,9 @@ when defined(linux):
     "repro_lease_pidfd_supported".}
   proc c_repro_lease_userns_supported(): cint {.importc:
     "repro_lease_userns_supported".}
+  proc c_repro_lease_idmap_probe(newuidmap, newgidmap: cstring;
+      uid, gid, subuid, subgid: clong; err: cstring; errcap: cint): cint
+    {.importc: "repro_lease_idmap_probe".}
 
   proc subordinateIds*(): tuple[ok: bool; uid, gid, count: int] =
     ## The first subordinate uid/gid range of the current user
@@ -446,6 +449,24 @@ when defined(linux):
     (u.start > 0 and g.start > 0, u.start, g.start, min(u.count, g.count))
 
   proc landlockAbi*(): int = int(c_repro_lease_supported())
+
+  proc idMappingRefusal*(newuidmap, newgidmap: string): string =
+    ## Why the floor's id mapping cannot be installed here, or "" when it
+    ## can: the helpers are run on a throwaway user namespace with the
+    ## mapping of lease slot 0 (`c/repro_lease_linux.c`
+    ## `repro_lease_idmap_probe`), so the answer is what a floor lease would
+    ## meet, not whether the helpers merely exist.
+    let ids = subordinateIds()
+    if not ids.ok:
+      return "no subordinate uid/gid range for the lease user"
+    var err = newString(512)
+    let mapped = c_repro_lease_idmap_probe(newuidmap.cstring,
+      newgidmap.cstring, clong(getuid()), clong(getgid()), clong(ids.uid),
+      clong(ids.gid), err.cstring, cint(err.len))
+    err.setLen(err.cstring.len)
+    if mapped != 0: ""
+    elif err.len > 0: err
+    else: "the id-mapping helpers refused the map"
 
   proc kv(buf: var string; k, v: string) =
     buf.add(k); buf.add('\0'); buf.add(v); buf.add('\0')
@@ -874,13 +895,52 @@ when defined(posix):
       p.reaped = true
     p.status
 
+  proc parentLinks(): seq[(int, int)] =
+    ## The (pid, ppid) pair of every process in the process table.
+    ##
+    ## Linux: read from `/proc/<pid>/stat` (proc(5)). `/bin/ps` is not
+    ## there on every Linux host (NixOS has none), and a `ps` found on PATH
+    ## would be whatever the daemon's environment happens to name. The
+    ## second field, the command name, is in parentheses and may itself hold
+    ## spaces and `)`, so the fields after it are counted from the LAST `)`:
+    ## state, then ppid. A process that exits between the directory listing
+    ## and the read is skipped (it has no descendants left to find).
+    ##
+    ## Elsewhere (macOS, where the Seatbelt backend runs): `/bin/ps`, a fixed
+    ## system binary there, so no PATH lookup is involved. Returns nothing
+    ## when the table cannot be read.
+    result = newSeq[(int, int)]()
+    when defined(linux):
+      for kind, name in walkDir("/proc", relative = true):
+        if kind != pcDir or name.len == 0 or not name[0].isDigit: continue
+        var pid, ppid: int
+        try:
+          pid = parseInt(name)
+          let stat = readFile("/proc" / name / "stat")
+          let close = stat.rfind(')')
+          if close < 0: continue
+          let rest = stat.substr(close + 1).splitWhitespace
+          if rest.len < 2: continue
+          ppid = parseInt(rest[1])
+        except ValueError, IOError, OSError:
+          continue
+        result.add((pid, ppid))
+    else:
+      let (text, code) = uncontrolledExecCmdEx("/bin/ps -A -o pid= -o ppid=")
+      if code != 0: return
+      for line in text.splitLines:
+        let f = line.splitWhitespace
+        if f.len != 2: continue
+        try:
+          result.add((parseInt(f[0]), parseInt(f[1])))
+        except ValueError: discard
+
   proc descendantsOf*(root: Pid): seq[Pid] =
     ## Every live descendant of `root` (not `root` itself), found by walking
-    ## the parent links of the process table (`ps`, a fixed system binary).
-    ## This finds what a process group cannot: a descendant that called
+    ## the parent links of the process table (`parentLinks`). This finds
+    ## what a process group cannot: a descendant that called
     ## `setsid`/`setpgid` and so left the group.
     var children: Table[int, seq[int]]
-    let (text, code) = uncontrolledExecCmdEx("/bin/ps -A -o pid= -o ppid=")
     # `newSeq[Pid]()`, never `@[]`, for an empty `seq[Pid]` (here and in
     # `killProcessTree`). Under ORC, Nim (2.2.8 upstream and the dev shell's
     # fork alike) types an empty `@[]` through a cache that does not tell
@@ -891,13 +951,9 @@ when defined(posix):
     # assignment (`-Wincompatible-pointer-types` is an error), so this module
     # stops compiling in any binary that reaches these procs. `newSeq` is
     # instantiated with the element type written out and is not affected.
-    if code != 0: return newSeq[Pid]()
-    for line in text.splitLines:
-      let f = line.splitWhitespace
-      if f.len != 2: continue
-      try:
-        children.mgetOrPut(parseInt(f[1]), @[]).add(parseInt(f[0]))
-      except ValueError: discard
+    result = newSeq[Pid]()
+    for (pid, ppid) in parentLinks():
+      children.mgetOrPut(ppid, @[]).add(pid)
     var todo = @[int(root)]
     while todo.len > 0:
       let cur = todo.pop()
@@ -910,8 +966,9 @@ when defined(posix):
     ## descendant, including those that left the group with `setsid`.
     ##
     ## The descendants are listed BEFORE anything dies, because killing a
-    ## process reparents its children to launchd and the parent links the walk
-    ## follows are gone. They are SIGSTOPped as they are found (and the walk
+    ## process reparents its children (to launchd on macOS, to init or a
+    ## subreaper on Linux) and the parent links the walk follows are gone.
+    ## They are SIGSTOPped as they are found (and the walk
     ## repeated until nothing new appears) so none can fork its way out of the
     ## snapshot while it is taken; SIGKILL ends a stopped process.
     var victims = newSeq[Pid]()  # not `@[]`: see `descendantsOf`
@@ -1508,6 +1565,13 @@ type
     subordinateIds*: bool
     idMappingTools*: bool
       ## newuidmap and newgidmap installed.
+    idMappingRefusal*: string
+      ## Empty when the helpers mapped a throwaway user namespace exactly as
+      ## a floor lease maps its own (or were not tried); otherwise why they
+      ## could not -- the helper's own refusal. Installed setuid helpers
+      ## still refuse every map where real root is not mapped into the
+      ## namespace the worker runs in, so being installed is not the same
+      ## as working.
 
 proc decideLinuxLeaseLayers*(probe: LinuxLeaseHostProbe; hardened: bool):
     tuple[ok: bool; layers: set[LeaseLayer]; reason: string] =
@@ -1537,6 +1601,9 @@ proc decideLinuxLeaseLayers*(probe: LinuxLeaseHostProbe; hardened: bool):
     missing.add("the floor: no subordinate uid/gid range for the lease user")
   elif not probe.idMappingTools:
     missing.add("the floor: newuidmap/newgidmap are not installed")
+  elif probe.idMappingRefusal.len > 0:
+    missing.add("the floor: newuidmap/newgidmap cannot map the lease " &
+      "user on this host (" & probe.idMappingRefusal & ")")
   else:
     layers.incl(llFloor)
   if hardened and missing.len > 0:
@@ -1552,8 +1619,12 @@ when defined(linux):
     result.pidfdGetfd = c_repro_lease_pidfd_supported() != 0
     result.landlock = landlockAbi() >= 1
     result.subordinateIds = subordinateIds().ok
-    result.idMappingTools = uncontrolledFindExe("newuidmap").len > 0 and
-      uncontrolledFindExe("newgidmap").len > 0
+    let newuidmap = uncontrolledFindExe("newuidmap")
+    let newgidmap = uncontrolledFindExe("newgidmap")
+    result.idMappingTools = newuidmap.len > 0 and newgidmap.len > 0
+    if result.subordinateIds and result.idMappingTools and
+        result.userNamespaces and not result.noConfinementBackend:
+      result.idMappingRefusal = idMappingRefusal(newuidmap, newgidmap)
 
 proc availableLeaseLayers*(hardened = false):
     tuple[ok: bool; layers: set[LeaseLayer]; reason: string] =
@@ -1570,7 +1641,10 @@ proc availableLeaseLayers*(hardened = false):
   ## * TRUSTED: namespaces + noexec always; Landlock when the kernel has it
   ##   and the floor (a subordinate uid per slot + the derived seccomp
   ##   allow-list) when the user has a subordinate id range and
-  ##   newuidmap/newgidmap. A missing one is NOT a refusal: the lease runs
+  ##   newuidmap/newgidmap map it: the helpers are run once on a throwaway
+  ##   user namespace (`idMappingRefusal`), because installed helpers that
+  ##   refuse every map would otherwise surface as a start failure in every
+  ##   floor lease. A missing one is NOT a refusal: the lease runs
   ##   without it and its isolation level says what it got
   ##   (`linux-namespace+landlock+floor` vs `linux-namespace`).
   ## * HARDENED: Landlock and the floor are REQUIRED; without either the

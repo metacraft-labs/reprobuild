@@ -399,8 +399,7 @@ suite "the subject list":
     # build-edge id is content-derived and only ``repro.nim`` can collect it.
     # A subject missing THERE runs against whatever binary is on disk, so a
     # change to it would not re-run this gate.
-    let project = nimSourceCommentsBlanked(
-      readFile(ReprobuildRepoRoot / "repro.nim"))
+    let project = nimSourceCommentsBlanked(reprobuildRecipeText())
     let at = project.find("PerCaseFixtureGateSubjects* =")
     check at >= 0
     let tail = project[max(at, 0) .. ^1]

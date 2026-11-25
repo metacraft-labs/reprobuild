@@ -62,10 +62,11 @@ import ./source_tree
 import ./submodules
 
 const
-  GeneratorIdentity* = "reprobuild-nimble-generator/1"
+  GeneratorIdentity* = "reprobuild-nimble-generator/2"
+    ## /2: `revived` and `alias-retargeted` events, the full history check
     ## The root's `generator`: the generator's own version, never the host's
     ## tools, so two operators with different git builds agree.
-  ReaderIdentity = "repro_nimble_reader/3"
+  ReaderIdentity = "repro_nimble_reader/4"
     ## in the `read` edge's key: the reader's version and its options.
     ## Version 2 reads the Nim-version comparisons and
     ## `defined(posix|unix|bsd)` into the closed condition set (NPC-AREQ7,
@@ -73,7 +74,9 @@ const
     ## is read again. Version 3 reads a `.nimble` in the old INI format as
     ## data (`admitIniFormat`), as Nimble reads it with `parsecfg` before
     ## trying NimScript, so a version-2 reading of one (needs-probe) is read
-    ## again
+    ## again. Version 4 reads a requirement naming a version with a non-zero
+    ## fourth or later component (`secp256k1 >= 0.6.0.3.1`, NPC-AREQ6), so a
+    ## version-3 reading of one (needs-override) is read again
   GeneratorReaderOptions* = ReaderOptions(admitIniFormat: true)
     ## The static reader's options for the `read` edge (NPC-AREQ8 step 1)
   SourceEdgeVersion = "source/2"
@@ -107,6 +110,19 @@ type
     ## Called with every fetch edge's output file after its wave, before the
     ## publisher admits it. Tests use it to hand the publisher what a
     ## compromised worker would write; a generation never sets it.
+
+  HistoryMode* = enum
+    ## Which `history-rewritten` rule a generation runs (NPC-AREQ4).
+    hmScheduled = "scheduled"
+      ## the full check when the last one is at least the source set's
+      ## `history_check_days` old by the generation time (or none has run,
+      ## or the generation has no previous one), the per-generation rule
+      ## otherwise
+    hmFull = "full"
+      ## the full check (`repro catalog generate --full-history`)
+    hmPerGeneration = "per-generation"
+      ## the per-generation rule only (an independent regeneration of a
+      ## generation that did not run the full check)
 
   GeneratorConfig* = object
     sourceSet*: SourceSet
@@ -142,6 +158,10 @@ type
       ## a hold file the independent regeneration writes (``regeneration``):
       ## while it names the root this generation builds on, the generation
       ## is not published. "" checks none
+    historyMode*: HistoryMode
+      ## the full history check by the source set's schedule (the default),
+      ## or forced one way: on demand, or by a repeat of a generation whose
+      ## root says which mode it ran
 
   Execution* = object
     family*: EdgeFamily
@@ -207,6 +227,8 @@ type
     events*: seq[OriginEvent]
     actions*: seq[BuildAction] ## every edge of the generation
     waves*: seq[WaveTiming]    ## every wave, in order
+    fullHistory*: bool
+      ## the generation ran the full history check (NPC-AREQ4)
 
   GeneratorError* = object of CatchableError
 
@@ -260,7 +282,21 @@ type
     readPath: Table[string, string]     ## nimble hash -> read output
     sightings: Table[string, seq[Sighting]]
     expansions: Table[string, Expansion]
-    aliasTarget: Table[string, string]  ## alias name key -> canonical name
+    aliasTarget: Table[string, string]
+      ## alias name key -> the canonical name it resolves to: its recorded
+      ## target (NPC-AREQ3)
+    previousAliases: Table[string, PackageAlias]
+      ## alias name key -> the alias as the previous generation recorded it
+    previousCandidates: Table[string, string]
+      ## alias name key -> the candidate target the previous generation's
+      ## name map kept for it
+    aliasCandidate: Table[string, string]
+      ## alias name key -> the canonical name the registry points the alias
+      ## at now, when that is not its recorded target
+    aliasEvents: Table[string, OriginEvent]
+      ## alias name key -> its `alias-retargeted` event of this generation
+    previousLastFullCheck: uint64
+    fullHistory: bool
     carried: HashSet[string]
       ## name keys the previous generation has and this one did not visit
       ## (outside the roots' closure): copied unchanged
@@ -598,8 +634,16 @@ proc resolveName(run: Run; name: string): string =
   if k in run.targets: run.targets[k].name
   else: run.aliasTarget.getOrDefault(k, "")
 
+proc candidateOf(run: Run; name: string): string =
+  ## The package the registry points the alias ``name`` at now when that is
+  ## not its recorded target: indexed too, as a separate candidate.
+  let k = nameKey(name)
+  if k in run.targets: ""
+  else: run.aliasCandidate.getOrDefault(k, "")
+
 proc params(run: Run): GenerationParams =
   GenerationParams(generatedAt: run.cfg.generatedAt,
+    fullHistory: run.fullHistory,
     cooldownSeconds: uint64(run.cfg.sourceSet.policy.cooldownDays) * 86400,
     expansions: run.expansions,
     resolveName: proc(name: string): string {.gcsafe.} =
@@ -622,6 +666,9 @@ proc execShard(run: Run; job: Job; outPath: string) =
       if o.envelope.isSome: packages.add o.envelope.get
       observations.add o.observation
       events.add o.events
+  for a in job.shardAliases:
+    if nameKey(a.alias) in run.aliasEvents:
+      events.add run.aliasEvents[nameKey(a.alias)]
   writeFile(outPath, toStr(buildShard(run.shardBits, job.shardBucket,
     packages, job.shardAliases, observations)))
   writeFile(outPath & ".events", toStr(encodeEvents(NimbleEvents(
@@ -636,7 +683,10 @@ proc execRoot(run: Run; job: Job; outPath: string) =
   let built = buildRootFromShards(IndexBuildInput(generator: GeneratorIdentity,
     sourceSet: sourceSetIdentity(run.cfg.sourceSet),
     generatedAt: run.cfg.generatedAt, previousRoot: run.previousRoot,
-    events: events), run.shardBits, shards)
+    events: events, aliasCandidates: run.aliasCandidate,
+    fullHistory: run.fullHistory,
+    lastFullCheck: (if run.fullHistory: run.cfg.generatedAt
+                    else: run.previousLastFullCheck)), run.shardBits, shards)
   writeFile(outPath, toStr(built.rootBytes))
   writeFile(outPath & ".names", toStr(built.objectTable()[built.root.nameMap.id]))
   writeFile(outPath & ".events", toStr(built.objectTable()[built.root.events.id]))
@@ -1021,9 +1071,15 @@ proc loadPrevious(run: Run) =
   var idx = openIndex(src, rootId)
   run.previousRoot = some(rootId)
   var stale: seq[string]
+  run.previousLastFullCheck = idx.root.lastFullCheck
+  for e in idx.loadNameMap().entries:
+    if e.candidate.len > 0:
+      run.previousCandidates[nameKey(e.name)] = e.candidate
   for r in idx.root.shards:
     let s = idx.loadShard(r.bucket)
     if s.isNone: continue
+    for a in s.get.aliases:
+      run.previousAliases[nameKey(a.alias)] = a
     for p in s.get.packages:
       run.previousEnvelopes[nameKey(p.name)] = p
       for v in p.versions:
@@ -1186,9 +1242,28 @@ proc generate*(config: GeneratorConfig): GenerationResult =
       run.targets[k].origin = PackageOrigin(url: o.origin, subdir: o.subdir,
         vcs: ovGit)
       run.targets[k].pinnedCommit = o.commit
-  for a in aliases:
+  # NPC-AREQ3: an alias keeps the target it was first recorded with. When
+  # the registry points it at another package, that package is a separate
+  # candidate (kept in the name map) and the change is an
+  # `alias-retargeted` event, reported at the generation that first sees it.
+  for a in aliases.mitems:
+    let ak = nameKey(a.alias)
+    let now = if nameKey(a.target) in run.targets:
+                run.targets[nameKey(a.target)].name
+              else: a.target
+    if ak in run.previousAliases:
+      let recorded = run.previousAliases[ak].target
+      if nameKey(recorded) != nameKey(now):
+        run.aliasCandidate[ak] = now
+        if nameKey(run.previousCandidates.getOrDefault(ak)) != nameKey(now):
+          run.aliasEvents[ak] = OriginEvent(kind: oeAliasRetargeted,
+            package: a.alias, before: recorded, after: now,
+            observedAt: config.generatedAt)
+        a.target = recorded
     if nameKey(a.target) in run.targets:
-      aliasTarget[nameKey(a.alias)] = run.targets[nameKey(a.target)].name
+      aliasTarget[ak] = run.targets[nameKey(a.target)].name
+    elif nameKey(a.target) in run.previousEnvelopes:
+      aliasTarget[ak] = run.previousEnvelopes[nameKey(a.target)].name
   run.aliasTarget = aliasTarget
   let resolve = proc(name: string): string = run.resolveName(name)
   for k, env in run.previousEnvelopes:
@@ -1198,6 +1273,20 @@ proc generate*(config: GeneratorConfig): GenerationResult =
         origin: env.origins[env.registryOrigin])
   if run.shardBits < 0:
     run.shardBits = defaultShardBits(run.targets.len)
+  # NPC-AREQ4: the full history check runs every `history_check_days` days
+  # and on demand. A generation with no previous one has no recorded commit
+  # to check, so it is a full check at no cost: the schedule starts there.
+  # An index whose roots record no full check (from before the check
+  # existed) is due at its next generation.
+  run.fullHistory =
+    case config.historyMode
+    of hmFull: true
+    of hmPerGeneration: false
+    of hmScheduled:
+      run.previousRoot.isNone or ss.policy.historyCheckDays == 0 or
+        run.previousLastFullCheck == 0 or
+        config.generatedAt >= run.previousLastFullCheck +
+          uint64(ss.policy.historyCheckDays) * 86400
 
   # ---- the closure: refs, history, source, read -------------------------
   var trackKeys = initHashSet[string]()
@@ -1208,6 +1297,8 @@ proc generate*(config: GeneratorConfig): GenerationResult =
       let n = resolve(r)
       if n.len == 0: fail("root " & r & " is not a package of the source set")
       frontier.add n
+      let c = run.candidateOf(r)
+      if c.len > 0: frontier.add c
   else:
     for k, t in run.targets: frontier.add t.name
   var inClosure = initHashSet[string]()
@@ -1267,6 +1358,11 @@ proc generate*(config: GeneratorConfig): GenerationResult =
           # Answering again after an observation that did not answer: the
           # history says whether the recorded commits are still there.
           reason.add " revived"
+      if run.fullHistory and k in run.previousEnvelopes and
+          run.previousEnvelopes[k].versions.len > 0 and
+          decodeRefs(run.workerText(run.refsPath[k])).state == anOk:
+        # The full check: every origin with recorded commits.
+        reason.add " full"
       if reason.len == 0 or historyAsked.getOrDefault(k) == reason: continue
       historyAsked[k] = reason
       changed = true
@@ -1382,6 +1478,9 @@ proc generate*(config: GeneratorConfig): GenerationResult =
           let tk = nameKey(n)
           if ss.roots.len > 0 and tk notin inClosure:
             frontier.add n
+          let c = run.candidateOf(e.target)
+          if ss.roots.len > 0 and c.len > 0 and nameKey(c) notin inClosure:
+            frontier.add c
           if e.versionKind == rvCommit:
             if e.constraint.len in [40, 64]:
               if e.constraint notin commitRequests.getOrDefault(tk):
@@ -1471,6 +1570,7 @@ proc generate*(config: GeneratorConfig): GenerationResult =
     var inputs: seq[string]
     var fp = @["shard", $b, $run.shardBits,
       (if b in timeSensitive: $config.generatedAt else: "-"),
+      "full-history " & $run.fullHistory,
       $ss.policy.cooldownDays, expansionsText.join(";"), canonicalText(ss)]
     var members = buckets[b]
     members.sort(proc (x, y: string): int = cmp(nameKey(x), nameKey(y)))
@@ -1511,7 +1611,12 @@ proc generate*(config: GeneratorConfig): GenerationResult =
     var al = bucketAliases.getOrDefault(b)
     al.sort(proc (x, y: PackageAlias): int = cmp(nameKey(x.alias),
       nameKey(y.alias)))
-    for a in al: fp.add "alias " & a.alias & " " & a.target
+    for a in al:
+      fp.add "alias " & a.alias & " " & a.target
+      if nameKey(a.alias) in run.aliasEvents:
+        # The event's time: the shard's events depend on it.
+        fp.add "alias-retargeted " & $config.generatedAt & " " &
+          run.aliasEvents[nameKey(a.alias)].after
     var uniq: seq[string]
     for i in inputs:
       if i notin uniq: uniq.add i
@@ -1525,8 +1630,12 @@ proc generate*(config: GeneratorConfig): GenerationResult =
   run.runWave(shardWave, all)
 
   var rootInputs: seq[string]
+  var candidatesText: seq[string]
+  for k, c in run.aliasCandidate: candidatesText.add k & "=" & c
+  candidatesText.sort()
   var rootFp = @["root", $run.shardBits, $config.generatedAt, GeneratorIdentity,
-    $sourceSetIdentity(ss),
+    $sourceSetIdentity(ss), "full-history " & $run.fullHistory & " " &
+    $run.previousLastFullCheck, "candidates " & candidatesText.join(","),
     (if run.previousRoot.isSome: $run.previousRoot.get else: "-")]
   for (s, e) in run.shardOutputs:
     rootInputs.add s
@@ -1575,8 +1684,15 @@ proc generate*(config: GeneratorConfig): GenerationResult =
         result.outsideLinks.add OutsideLink(package: job.package,
           commit: job.commit, tree: src.facts.treeDigest, origin: job.url,
           path: l.path, target: l.target)
+  for k in run.aliasEvents.keys:
+    var placed = false
+    for b, al in bucketAliases:
+      for a in al:
+        if nameKey(a.alias) == k: placed = true
+    if placed: result.events.add run.aliasEvents[k]
   result.actions = all
   result.waves = run.waves
+  result.fullHistory = run.fullHistory
   result.events = sortedEvents(result.events)
 
 # ---------------------------------------------------------------------------

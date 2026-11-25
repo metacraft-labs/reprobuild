@@ -121,6 +121,44 @@ reprobuild_available_memory_mb() {
   printf '\n'
 }
 
+# Free disk in MiB on the filesystem holding $1 (default: the current
+# directory), or empty when it cannot be measured.
+#
+# `df -Pk` (POSIX output, 1 KiB blocks) is portable across Linux and macOS.
+# The build phase writes only below the repository, so that is the filesystem
+# whose headroom matters; a pool shared with other runners is still measured
+# correctly because df reports the pool's free space, not a quota.
+reprobuild_available_disk_mb() {
+  local path="${1:-.}" kb
+  kb="$(df -Pk "${path}" 2>/dev/null | awk 'NR==2 { print $4; exit }' || true)"
+  if [[ "${kb}" =~ ^[0-9]+$ ]]; then
+    printf '%s\n' "$((kb / 1024))"
+    return 0
+  fi
+  printf '\n'
+}
+
+# Refuse, naming the cause, when the build phase cannot fit on the disk.
+#   $1 path on the filesystem the build writes to
+#   $2 MiB the phase needs
+# Returns 0 when there is room or the free space cannot be measured (an
+# unverifiable host is not refused: the guard must never invent a failure).
+# Returns 1 with one explanatory line on stderr otherwise. Without it a full
+# disk surfaces ~25 minutes in as "the engine never reached its post-mortem".
+reprobuild_require_free_disk() {
+  local path="$1" need_mb="$2" free_mb
+  free_mb="$(reprobuild_available_disk_mb "${path}")"
+  if [[ -z "${free_mb}" ]]; then
+    return 0
+  fi
+  if (( free_mb < need_mb )); then
+    printf 'error: only %s MiB free on the disk holding %s, but the build phase needs at least %s MiB. Free space (expire stale CI GC roots, remove old snapshots) or lower REPROBUILD_TEST_MIN_FREE_DISK_MB if you know better.\n' \
+      "${free_mb}" "${path}" "${need_mb}" >&2
+    return 1
+  fi
+  return 0
+}
+
 # The conservative core-only ladder: the behaviour every host had before the
 # budget existed. Retained verbatim for CI and for hosts whose memory cannot
 # be measured, so neither can be made worse by this file.
@@ -200,14 +238,35 @@ reprobuild_default_test_build_parallelism() {
   reprobuild_worker_budget "$@"
 }
 
-# EXECUTION phase: worker count for the test runner.
+# The width RunQuota granted this process, or empty when it holds no lease.
+# ``runquota run`` exports it as RUNQUOTA_RUN_WIDTH to the command it launches
+# (libs/repro_runquota: GrantedWidthEnvVar), so a suite started under a lease
+# sees its grant here. Anything that is not a positive integer is "no grant":
+# a stale or hand-typed value must not zero the worker count.
+reprobuild_granted_width() {
+  local w="${RUNQUOTA_RUN_WIDTH:-}"
+  if [[ "${w}" =~ ^[0-9]+$ ]] && (( w >= 1 )); then
+    printf '%s\n' "${w}"
+  else
+    printf '\n'
+  fi
+}
+
+# EXECUTION phase: the worker count before the lease grant is applied. This
+# is the host-derived number, capped at the measured best (see below). The
+# nested-build split is computed from THIS number, never from the grant
+# clamped one, so a small grant lowers the test workers without handing the
+# freed share to each nested build (which would raise ``threads * nested``
+# past the budget's division).
 #
 # Capped at eight because eight is the largest full-suite execution ever
-# measured (1183/1183). Above it there is no evidence, and the runner's own
-# notes record false failures at sixteen workers from CPU starvation — the
-# defect fixed in "Decide a test is hung from lack of progress, not from
-# silence". Raising this cap is a measurement, not an edit.
-reprobuild_default_test_threads() {
+# measured (1183/1183, and the best of the ~11,260-case runs: see EVIDENCE).
+# Above it there is no evidence, and the runner's own notes record false
+# failures at sixteen workers from CPU starvation -- the defect fixed in
+# "Decide a test is hung from lack of progress, not from silence". Raising
+# this cap is a measurement, not an edit. A re-measure at other widths is
+# optional later work.
+_reprobuild_host_test_threads() {
   local budget
   budget="$(reprobuild_worker_budget "$@")"
   local threads=$((budget / REPROBUILD_NESTED_BUILD_WORKERS))
@@ -220,13 +279,32 @@ reprobuild_default_test_threads() {
   printf '%s\n' "${threads}"
 }
 
+# EXECUTION phase: worker count for the test runner,
+# ``min(measured best, host-derived, RunQuota grant)``.
+#
+# The measured eight stays the ceiling and the host-derived number stays the
+# default; the grant only lowers it, so a suite running under a ``runquota
+# run`` lease never uses more test workers than the lease holds, and with a
+# grant of eight or more nothing changes. No lease (no RUNQUOTA_RUN_WIDTH)
+# leaves the result exactly as before. An explicit REPROBUILD_TEST_THREADS
+# still wins over this default in scripts/run_tests.sh.
+reprobuild_default_test_threads() {
+  local threads grant
+  threads="$(_reprobuild_host_test_threads "$@")"
+  grant="$(reprobuild_granted_width)"
+  if [[ -n "${grant}" ]] && (( grant < threads )); then
+    threads="${grant}"
+  fi
+  printf '%s\n' "${threads}"
+}
+
 # EXECUTION phase: the build parallelism each nested ``repro build`` inside a
 # test process gets. ``threads * nested <= budget`` holds for every input,
 # which is the whole point of deriving both from one number.
 reprobuild_default_nested_build_parallelism() {
   local budget threads
   budget="$(reprobuild_worker_budget "$@")"
-  threads="$(reprobuild_default_test_threads "$@")"
+  threads="$(_reprobuild_host_test_threads "$@")"
   local nested=$((budget / threads))
   if (( nested < 1 )); then
     nested=1

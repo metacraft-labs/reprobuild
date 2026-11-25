@@ -2550,6 +2550,10 @@ proc reproCommandLineDescription*(): NimNode {.compileTime.} =
             "(default: under the user cache directory)"
         flag generatedAt is string,
           help = "The generation time in Unix seconds (default: now)"
+        boolFlag fullHistory is bool,
+          help = "Run the full history check now: report every recorded " &
+            "commit no branch of its origin reaches (by default it runs " &
+            "every history_check_days days)"
       subcmd "verify",
           help = "Repeat the generation of a Nimble index from the inputs it " &
             "names and compare the roots":
@@ -4134,8 +4138,10 @@ proc reproCommandLineDescription*(): NimNode {.compileTime.} =
       boolFlag json is bool,
         help = "Print one JSON object (schema reprobuild.version.v1)"
     subcmd "completion", help = "Print a shell's completion script":
-      pos shell is string, values = ["bash", "zsh", "fish", "powershell"],
-        help = "The shell whose completion script to print"
+      pos shell is string,
+        values = ["bash", "zsh", "fish", "powershell", "pwsh"],
+        help = "The shell whose completion script to print (`pwsh` is " &
+          "`powershell`)"
 
     # ---- Role processes ----------------------------------------------------
     # The commands repro spawns of itself. Listed only by

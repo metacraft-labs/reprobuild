@@ -54,11 +54,10 @@ https://spectrum-os.org/git/spectrum	unverified-host
 ipetkov/crane	public
 jcollie/zon2nix	public
 juliosueiras-nix/nix-utils	public
-metacraft-labs/codetracer	public
-metacraft-labs/codetracer-trace-format-nim	public
 metacraft-labs/devops-modules	public
 metacraft-labs/ethereum.nix	public
 metacraft-labs/io-mon	public
+metacraft-labs/metacraft-github-actions	public
 metacraft-labs/nim	public
 metacraft-labs/nim-cli-spec	public
 metacraft-labs/nim-confutils	public

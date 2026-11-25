@@ -141,6 +141,13 @@ int repro_lease_supported(void) { return -1; }
 int repro_lease_pidfd_supported(void) { return 0; }
 int repro_lease_userns_supported(void) { return 0; }
 int repro_lease_memfd_noexec_supported(void) { return 0; }
+int repro_lease_idmap_probe(const char *newuidmap, const char *newgidmap,
+                            long uid, long gid, long subuid, long subgid,
+                            char *err, int errcap) {
+  (void)newuidmap; (void)newgidmap; (void)uid; (void)gid; (void)subuid; (void)subgid;
+  if (errcap > 0) err[0] = 0;
+  return 0;
+}
 #else /* x86_64 or aarch64: the real launcher */
 #define _GNU_SOURCE
 #include <errno.h>
@@ -1093,21 +1100,105 @@ static void confined_child(int ctl) {
 /* Supervisor.                                                               */
 /* ------------------------------------------------------------------------ */
 
-static int run_map(const char *tool, pid_t pid, long self, long sub, int floor) {
+/* Runs one id-mapping helper (`newuidmap`/`newgidmap`) on `pid`'s user
+   namespace for the floor: inner id 0 is `self` and inner 1000 is the
+   slot's subordinate id `sub`. The helper's
+   own diagnostics (stdout and stderr) are captured into `err` (when given),
+   because a refusal -- "write to uid_map failed: Operation not permitted"
+   where the setuid helper runs without privilege -- is the only account of
+   WHY the floor cannot be installed. */
+static int run_map(const char *tool, pid_t pid, long self, long sub,
+                   char *err, size_t errcap) {
   char p[32], a[32], b[32];
   snprintf(p, sizeof p, "%d", (int)pid);
   snprintf(a, sizeof a, "%ld", self);
   snprintf(b, sizeof b, "%ld", sub);
+  if (err && errcap) err[0] = 0;
+  if (!tool || !tool[0]) {
+    if (err && errcap) snprintf(err, errcap, "the id-mapping helper is not installed");
+    return -1;
+  }
+  int out[2] = {-1, -1};
+  if (err && errcap && pipe2(out, O_CLOEXEC) != 0) out[0] = out[1] = -1;
   pid_t k = fork();
-  if (k < 0) return -1;
+  if (k < 0) {
+    if (out[0] >= 0) { close(out[0]); close(out[1]); }
+    if (err && errcap) snprintf(err, errcap, "fork failed: %s", strerror(errno));
+    return -1;
+  }
   if (k == 0) {
-    if (floor) execl(tool, tool, p, "0", a, "1", "1000", b, "1", (char *)NULL);
-    else execl(tool, tool, p, "0", a, "1", (char *)NULL);
+    if (out[1] >= 0) { dup2(out[1], 1); dup2(out[1], 2); }
+    execl(tool, tool, p, "0", a, "1", "1000", b, "1", (char *)NULL);
+    static const char msg[] = "could not execute the helper\n";
+    if (write(2, msg, sizeof msg - 1) < 0) {}
     _exit(127);
   }
+  size_t used = 0;
+  if (out[0] >= 0) {
+    close(out[1]);
+    char chunk[256];
+    for (;;) {
+      ssize_t n = read(out[0], chunk, sizeof chunk);
+      if (n < 0 && errno == EINTR) continue;
+      if (n <= 0) break;
+      for (ssize_t i = 0; i < n && used + 1 < errcap; i++)
+        err[used++] = chunk[i] == '\n' ? ' ' : chunk[i];
+    }
+    close(out[0]);
+    while (used > 0 && err[used - 1] == ' ') used--;
+    err[used] = 0;
+  }
   int st = 0;
-  while (waitpid(k, &st, 0) < 0 && errno == EINTR) {}
-  return WIFEXITED(st) && WEXITSTATUS(st) == 0 ? 0 : -1;
+  pid_t w;
+  while ((w = waitpid(k, &st, 0)) < 0 && errno == EINTR) {}
+  if (w != k) {
+    /* No exit status to judge by (ECHILD: the caller ignores SIGCHLD, so
+       the kernel reaped the helper). A zero-initialised `st` would read as
+       success, and a helper not known to have mapped has not mapped. */
+    if (err && errcap)
+      snprintf(err, errcap, "could not collect the exit status of %s: %s",
+               tool, strerror(errno));
+    return -1;
+  }
+  int ok = WIFEXITED(st) && WEXITSTATUS(st) == 0;
+  if (!ok && err && errcap && used == 0) {
+    if (WIFEXITED(st))
+      snprintf(err, errcap, "%s exited with status %d", tool, WEXITSTATUS(st));
+    else
+      snprintf(err, errcap, "%s was killed by signal %d", tool,
+               WIFSIGNALED(st) ? WTERMSIG(st) : 0);
+  }
+  return ok ? 0 : -1;
+}
+
+/* `err` = "<helper>: <why>", without doubling the name when the helper's
+   own diagnostic already starts with it ("newgidmap: write to gid_map
+   failed: ..."), as shadow-utils' helpers do. */
+static void name_refusal(const char *helper, const char *why,
+                         char *err, size_t errcap) {
+  if (!err || !errcap) return;
+  size_t n = strlen(helper);
+  if (strncmp(why, helper, n) == 0 && why[n] == ':')
+    snprintf(err, errcap, "%s", why);
+  else
+    snprintf(err, errcap, "%s: %s", helper, why);
+}
+
+/* The floor's two helper runs, gid map first, as a floor lease has always
+   run them. `err` names the helper that refused and quotes it. */
+static int map_floor_ids(pid_t child, const char *newuidmap, const char *newgidmap,
+                         long uid, long gid, long subuid, long subgid,
+                         char *err, size_t errcap) {
+  char why[384] = "";
+  if (run_map(newgidmap, child, gid, subgid, why, sizeof why) != 0) {
+    name_refusal("newgidmap", why, err, errcap);
+    return -1;
+  }
+  if (run_map(newuidmap, child, uid, subuid, why, sizeof why) != 0) {
+    name_refusal("newuidmap", why, err, errcap);
+    return -1;
+  }
+  return 0;
 }
 
 static int write_map_file(pid_t pid, const char *file, const char *content) {
@@ -1119,11 +1210,10 @@ static int write_map_file(pid_t pid, const char *file, const char *content) {
   return n == (ssize_t)strlen(content) ? 0 : -1;
 }
 
-static int map_ids(pid_t child) {
-  if (cfg.layer_floor) {
-    if (run_map(cfg.newgidmap, child, cfg.gid, cfg.subgid, 1) != 0) return -1;
-    return run_map(cfg.newuidmap, child, cfg.uid, cfg.subuid, 1);
-  }
+static int map_ids(pid_t child, char *err, size_t errcap) {
+  if (cfg.layer_floor)
+    return map_floor_ids(child, cfg.newuidmap, cfg.newgidmap, cfg.uid, cfg.gid,
+                         cfg.subuid, cfg.subgid, err, errcap);
   /* Without the floor the child keeps the daemon's own uid: the single-id
      mapping any unprivileged process may write for itself. */
   char m[64];
@@ -1747,11 +1837,16 @@ static void supervise(void) {
     write_status(127, 0, 0, n > 1 && buf[0] == 'E' ? buf + 1 : "child did not unshare");
     _exit(127);
   }
-  if (map_ids(child) != 0) {
+  char map_err[448] = "";
+  if (map_ids(child, map_err, sizeof map_err) != 0) {
     kill(child, SIGKILL); waitpid(child, NULL, 0);
-    write_status(127, 0, 0, cfg.layer_floor ?
-      "could not map the lease user (newuidmap/newgidmap and /etc/subuid, /etc/subgid)" :
-      "could not write the user namespace id maps");
+    char why[512];
+    if (cfg.layer_floor)
+      snprintf(why, sizeof why, "could not map the lease user (newuidmap/newgidmap "
+               "and /etc/subuid, /etc/subgid): %s", map_err);
+    else
+      snprintf(why, sizeof why, "could not write the user namespace id maps");
+    write_status(127, 0, 0, why);
     _exit(127);
   }
   /* Resource limits a lease cannot lift (G31): its whole subtree, in its
@@ -1918,6 +2013,63 @@ int repro_lease_userns_supported(void) {
   int st = 0;
   while (waitpid(k, &st, 0) < 0 && errno == EINTR) {}
   return WIFEXITED(st) && WEXITSTATUS(st) == 0;
+}
+
+/* Whether the floor's id mapping can actually be installed here: a
+   throwaway child unshares a user namespace and the helpers are run on it
+   with exactly the arguments a floor lease uses (`map_floor_ids`). Finding
+   the helpers and a subordinate range is not enough: where real root is
+   not mapped into the namespace this process runs in (an agent sandbox's
+   `uid_map` of `1004 1004 1`), the setuid helpers run without privilege and
+   refuse every map, so every floor lease would fail to start. Returns 1 when both maps were written; 0 with the
+   refusal in `err` otherwise. */
+int repro_lease_idmap_probe(const char *newuidmap, const char *newgidmap,
+                            long uid, long gid, long subuid, long subgid,
+                            char *err, int errcap) {
+  size_t cap = errcap > 0 ? (size_t)errcap : 0;
+  if (cap) err[0] = 0;
+  int sync[2], hold[2];
+  if (pipe2(sync, O_CLOEXEC) != 0) {
+    if (cap) snprintf(err, cap, "pipe failed: %s", strerror(errno));
+    return 0;
+  }
+  if (pipe2(hold, O_CLOEXEC) != 0) {
+    if (cap) snprintf(err, cap, "pipe failed: %s", strerror(errno));
+    close(sync[0]); close(sync[1]);
+    return 0;
+  }
+  pid_t parent = getpid();
+  pid_t k = fork();
+  if (k < 0) {
+    if (cap) snprintf(err, cap, "fork failed: %s", strerror(errno));
+    close(sync[0]); close(sync[1]); close(hold[0]); close(hold[1]);
+    return 0;
+  }
+  if (k == 0) {
+    /* Only async-signal-safe calls: the caller may be multi-threaded. */
+    close(sync[0]); close(hold[1]);
+    if (prctl(PR_SET_PDEATHSIG, SIGKILL) != 0 || getppid() != parent) _exit(1);
+    char r = unshare(CLONE_NEWUSER) == 0 ? 'U' : 'E';
+    if (write(sync[1], &r, 1) < 0) {}
+    char go;
+    while (read(hold[0], &go, 1) < 0 && errno == EINTR) {}
+    _exit(0);
+  }
+  close(sync[1]); close(hold[0]);
+  char r = 0;
+  ssize_t n;
+  while ((n = read(sync[0], &r, 1)) < 0 && errno == EINTR) {}
+  int mapped = 0;
+  if (n != 1 || r != 'U') {
+    if (cap) snprintf(err, cap, "unshare(CLONE_NEWUSER) failed in the probe child");
+  } else {
+    mapped = map_floor_ids(k, newuidmap, newgidmap, uid, gid, subuid, subgid,
+                           err, cap) == 0;
+  }
+  close(hold[1]);               /* releases the child */
+  close(sync[0]);
+  while (waitpid(k, NULL, 0) < 0 && errno == EINTR) {}
+  return mapped;
 }
 
 /* Whether memfd_create(2) knows MFD_NOEXEC_SEAL (Linux 6.3+): the hardened

@@ -1492,6 +1492,69 @@ when defined(windows):
     else:
       ""
 
+type
+  RunQuotaDaemonAnswer* = enum
+    ## What the endpoint `connectDefault` resolves to said to a `Hello`.
+    rdaAnswered
+      ## A daemon completed the handshake: it serves this client.
+    rdaRefused
+      ## A daemon answered with an RQSP `Error` frame: it is alive, serving
+      ## its other clients, and refuses this one. Waiting does not change
+      ## that answer, and neither does stopping the daemon -- the next one
+      ## refuses the same client for the same reason.
+    rdaUnreachable
+      ## Nothing answered: no endpoint, nobody listening, a connection closed
+      ## or a handshake deadline passed without an answer.
+
+  RunQuotaDaemonProbe* = object
+    answer*: RunQuotaDaemonAnswer
+    refusal*: string
+      ## For `rdaRefused`: the daemon's diagnostic, its message and then its
+      ## detail in parentheses when it gave one. Empty otherwise.
+
+proc refusalText(diagnostic: Diagnostic): string =
+  result = diagnostic.message
+  if diagnostic.detail.len > 0:
+    result.add(" (" & diagnostic.detail & ")")
+
+proc probeRunQuotaDaemon*(): RunQuotaDaemonProbe =
+  ## The `Hello` round trip of `isRunQuotaDaemonReachable`, keeping apart
+  ## the two ways it can fail. A launcher that adopts a shared daemon needs
+  ## the difference: a daemon that does not answer may be shutting down and
+  ## is worth waiting for, one that refuses is not (`adoptOrStartUserRunQuota`
+  ## in `repro_cli_support`). The Windows pipe classification runs first, exactly
+  ## as it does for `isRunQuotaDaemonReachable`.
+  when defined(windows):
+    let endpoint = defaultEndpoint()
+    if endpoint.kind == endpointNamedPipe:
+      let probe = probeWindowsPipeOwner(endpoint.path)
+      case probe.status
+      of wpsAbsent, wpsStale:
+        # Nothing to talk to, and the caller may act on the name.
+        return RunQuotaDaemonProbe(answer: rdaUnreachable)
+      of wpsAccessDenied:
+        # A daemon is there and this token may not use it. Reported as
+        # UNREACHABLE, because it is -- but ``startAutoRunQuotaIfNeeded``
+        # reads the same probe and refuses to terminate or spawn on the
+        # strength of it. Returning early also avoids a
+        # ``connectDefault`` that would fail with the same error 5 after
+        # a timeout, turning a millisecond answer into a wedge.
+        return RunQuotaDaemonProbe(answer: rdaUnreachable)
+      of wpsHealthy, wpsBusy, wpsIndeterminate:
+        # Something is serving the name. Let the Hello/HelloOk
+        # round-trip below decide; the one thing none of these may do is
+        # authorise recovery.
+        discard
+  try:
+    var client = connectDefault()
+    client.close()
+    RunQuotaDaemonProbe(answer: rdaAnswered)
+  except RunQuotaRefusedError as refused:
+    RunQuotaDaemonProbe(answer: rdaRefused,
+      refusal: refusalText(refused.diagnostic))
+  except CatchableError:
+    RunQuotaDaemonProbe(answer: rdaUnreachable)
+
 proc isRunQuotaDaemonReachable*(): bool =
   ## Cheap probe used by the CLI to decide whether to fall back to the
   ## path-mode bypass. On Windows we first do a fast WaitNamedPipeW
@@ -1503,33 +1566,10 @@ proc isRunQuotaDaemonReachable*(): bool =
   ## owner and spawn fresh. The Hello/HelloOk round-trip still runs for
   ## the healthy case; a healthy classifier means the round-trip will
   ## complete in milliseconds.
-  when defined(windows):
-    let endpoint = defaultEndpoint()
-    if endpoint.kind == endpointNamedPipe:
-      let probe = probeWindowsPipeOwner(endpoint.path)
-      case probe.status
-      of wpsAbsent, wpsStale:
-        # Nothing to talk to, and the caller may act on the name.
-        return false
-      of wpsAccessDenied:
-        # A daemon is there and this token may not use it. Reported as
-        # UNREACHABLE, because it is -- but ``startAutoRunQuotaIfNeeded``
-        # reads the same probe and refuses to terminate or spawn on the
-        # strength of it. Returning early also avoids a
-        # ``connectDefault`` that would fail with the same error 5 after
-        # a timeout, turning a millisecond answer into a wedge.
-        return false
-      of wpsHealthy, wpsBusy, wpsIndeterminate:
-        # Something is serving the name. Let the Hello/HelloOk
-        # round-trip below decide; the one thing none of these may do is
-        # authorise recovery.
-        discard
-  try:
-    var client = connectDefault()
-    client.close()
-    true
-  except CatchableError:
-    false
+  ##
+  ## A daemon that REFUSES this client is not reachable either; callers that
+  ## must tell the two apart use `probeRunQuotaDaemon`.
+  probeRunQuotaDaemon().answer == rdaAnswered
 
 type
   RunQuotaHandover* = enum
@@ -1573,8 +1613,7 @@ type
 # the auto-start twice -- once while they prepare the dev env, and again when
 # the build opens its session -- and each step paired it with a release. The
 # first release let go of an adopted, retiring daemon from another build, and
-# it exited before the build's step (reprobuild-pm issue 2026-11-22, "the
-# adoption hold on a retiring `runquotad` ends with the dev-env preparation").
+# it exited before the build's step, which then found no daemon.
 # Inside `withInvocationRunQuotaHold` a step's release is deferred to the end
 # of the scope, so the hold covers the whole command.
 # ---------------------------------------------------------------------------
@@ -1630,9 +1669,8 @@ proc holdRunQuotaDaemon*(): bool =
   ##
   ## The hold of an arm ``decideRunQuotaHandover`` does not cover: on POSIX
   ## every invocation that adopts OR STARTS the shared per-user daemon keeps
-  ## one connection to it until it ends (reprobuild-pm
-  ## ``spec/RunQuota-Host-Configuration.md``, "The shared per-user daemon
-  ## (POSIX)") -- a daemon that could not be asked to retire, and the one
+  ## one connection to it until it ends (see the
+  ## RunQuota host configuration notes on the shared per-user daemon) -- a daemon that could not be asked to retire, and the one
   ## this invocation has just started, included. Without it the daemon could
   ## idle out, or be retired by another install's ``repro``, in the gap
   ## before the build opens its first session. The launcher uses it as its
@@ -1655,8 +1693,7 @@ proc decideRunQuotaHandover*(candidate: string;
   ##
   ## WHY. On Windows the daemon outlives every build, so after an installer
   ## replaced the bundle it kept serving the new ``repro`` from the old image
-  ## for as long as its user stayed logged on (reprobuild-pm issue
-  ## 2026-10-26-windows-runquotad-from-a-replaced-bundle-keeps-serving-the-new-repro).
+  ## for as long as its user stayed logged on.
   ## Since 2026-11-11 the shared per-user daemon on POSIX outlives every
   ## build too, and its adopt-or-start asks the same question of it
   ## (reprobuild-specs/RunQuota-Host-Configuration.md, "The shared per-user

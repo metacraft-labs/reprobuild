@@ -952,6 +952,119 @@ dev_shell_pin_relation() {
   fi
 }
 
+# Succeed when revision `$2` of the repository at `$1` has a regular file
+# named `flake.nix` at the root of its tree. The answer comes from the tree
+# entry (`ls-tree` prints `<mode> <type> <oid><TAB><path>`), so it needs the
+# commit and its root tree but not the blob, which a partial clone may lack
+# (see dev_shell_unflakeable_pin_state).
+dev_shell_tree_has_flake_nix() {
+  local dir="$1" rev="$2" entry
+  entry="$(dev_shell_git -C "$dir" ls-tree "$rev" -- flake.nix 2>/dev/null)" ||
+    return 1
+  [[ "$entry" == *" blob "*$'\t'"flake.nix" ]]
+}
+
+# Explain an `unflakeable` finding: the sibling directory has no `flake.nix`,
+# but WHY? Two very different repositories present identically on disk:
+#
+#   * one that has no `flake.nix` at all — the plugin can never override it,
+#     and the remedy is to add one or to declare the pin;
+#   * one whose `flake.nix` exists at the revision `flake.lock` pins, while
+#     the checkout simply predates the commit that added it. Adding a
+#     `flake.nix` there would duplicate a file the repository already has, and
+#     declaring the pin would excuse a stale checkout. The remedy is to bring
+#     the checkout up to its pin.
+#
+# The second case used to be reported as the first: a `nim-shm-queue`
+# checkout seven commits behind its pin `8dff4ad` failed the pre-commit
+# `just lint` with "add a flake.nix to that repository", and neither remedy it
+# named was right.
+#
+# Prints `state<TAB>pin<TAB>behind` on one line, where `state` is
+#
+#   no-pin       flake.lock gives no revision for the input (no lock, a
+#                `follows`, a `path:` input, or the input is not in the lock),
+#                so the pin cannot be consulted — report the finding as before
+#   not-git      the sibling is not a git checkout whose HEAD can be read
+#   unfetched    the pinned revision is not an object in the sibling, so
+#                whether it has a `flake.nix` cannot be told offline
+#   pin-unflaked the pinned revision has no `flake.nix` either: the repository
+#                genuinely is not a flake at its pin
+#   behind       the pin has a `flake.nix` and HEAD is an ancestor of the pin:
+#                fast-forwarding to the pin is the whole remedy
+#   diverged     the pin has a `flake.nix` and HEAD is NOT an ancestor of it:
+#                the checkout carries its own commits and lacks the pin's
+#   worktree-deleted  HEAD's own tree has a `flake.nix`; only the working tree
+#                lacks it
+#   removed-since-pin HEAD contains the pin, so a commit after the pin removed
+#                the `flake.nix` the pin has
+#
+# `behind` carries the number of pin commits HEAD lacks (0 for other states).
+#
+# It reads the committed lock and the sibling's object database. Whether a
+# revision has a `flake.nix` is answered from its TREE (`ls-tree`), never by
+# reading the blob: workspace checkouts are partial clones (`blob:none`) of a
+# promisor pool, so the pin's `flake.nix` blob is routinely absent locally.
+# `cat-file -e <rev>:flake.nix` on such a checkout lazy-fetches the blob, and
+# with the pool unreachable it fails — which would classify the pin as
+# `pin-unflaked` and print "add a flake.nix", the very misreport this function
+# exists to prevent. Commit presence is tested with `cat-file -e`, as in
+# `dev_shell_pin_relation`; in a promisor checkout git may lazily fetch a
+# missing commit to answer that, exactly as it does there.
+dev_shell_unflakeable_pin_state() {
+  local lock="$1" input="$2" sibling="$3"
+  local pin="" l_input l_rev
+  if [[ -f "$lock" ]]; then
+    while IFS=$'\t' read -r l_input l_rev; do
+      [[ "$l_input" == "$input" ]] || continue
+      pin="$l_rev"
+      break
+    done < <(dev_shell_flake_lock_pins "$lock")
+  fi
+  if [[ -z "$pin" || "$pin" == "-" || "$pin" == "follows" ]]; then
+    printf 'no-pin\t-\t0\n'
+    return 0
+  fi
+  local head
+  if [[ ! -e "$sibling/.git" ]] ||
+    ! head="$(dev_shell_git -C "$sibling" rev-parse --verify -q 'HEAD^{commit}' 2>/dev/null)"; then
+    printf 'not-git\t%s\t0\n' "$pin"
+    return 0
+  fi
+  if ! dev_shell_git -C "$sibling" cat-file -e "$pin^{commit}" 2>/dev/null; then
+    printf 'unfetched\t%s\t0\n' "$pin"
+    return 0
+  fi
+  # Only the root of the tree counts: a flake.nix the repository keeps in a
+  # subdirectory is not one the plugin would read either.
+  if ! dev_shell_tree_has_flake_nix "$sibling" "$pin"; then
+    printf 'pin-unflaked\t%s\t0\n' "$pin"
+    return 0
+  fi
+  # The pin has one. Before blaming the checkout's distance from the pin, rule
+  # out the two shapes where distance is not the cause: HEAD's own tree has a
+  # flake.nix (so it was deleted in the working tree), or HEAD already contains
+  # the pin (so the checkout's own commits removed it). "Fast-forward to the
+  # pin" would be wrong for both.
+  if dev_shell_tree_has_flake_nix "$sibling" "$head"; then
+    printf 'worktree-deleted\t%s\t0\n' "$pin"
+    return 0
+  fi
+  local behind
+  behind="$(dev_shell_git -C "$sibling" rev-list --count "$head..$pin" 2>/dev/null)" ||
+    behind=""
+  if [[ "$behind" == "0" ]]; then
+    printf 'removed-since-pin\t%s\t0\n' "$pin"
+    return 0
+  fi
+  [[ -n "$behind" ]] || behind=0
+  if dev_shell_git -C "$sibling" merge-base --is-ancestor "$head" "$pin" 2>/dev/null; then
+    printf 'behind\t%s\t%s\n' "$pin" "$behind"
+  else
+    printf 'diverged\t%s\t%s\n' "$pin" "$behind"
+  fi
+}
+
 # ---------------------------------------------------------------------------
 # The §3.2 ambient drift report, at shell entry
 # ---------------------------------------------------------------------------
@@ -1111,14 +1224,26 @@ dev_shell_report_override_drift() {
 # that is what is compared. A check keyed on store paths would have shouted
 # about three healthy tools and taught everyone to ignore it.
 #
-# SCOPE: the programs reprobuild itself spawns to reach a remote — `git` and
-# the `git-remote-*` helpers it execs. `ssh` is deliberately NOT in the list:
-# every remote this workspace declares is `https://`, git's ssh transport is
-# not on reprobuild's path to them, and the system `ssh` measured here
-# satisfies both channels anyway. If that ever changes the remedy is the same
-# one this check prescribes for `git` — have the dev shell provide the tool
-# instead of inheriting it — so add `ssh` here and `pkgs.openssh` to the
-# devShell's `packages` together.
+# SCOPE: the programs reprobuild itself spawns — `git` and the `git-remote-*`
+# helpers it execs to reach a remote, and `ssh-keygen`, which signs and
+# verifies test certificates and mints the certificate signer's keys. A host
+# `ssh-keygen` links `libcrypto.so.3`, which `LD_LIBRARY_PATH` resolves to the
+# shell's OpenSSL: on an Ubuntu runner (glibc 2.35) `/usr/bin/ssh-keygen` died
+# with "version `GLIBC_2.38' not found (required by .../libcrypto.so.3)" and
+# no certificate could be signed. That scope is the rule's, not the reach of
+# the injection: every other program started in the shell gets the same
+# `LD_LIBRARY_PATH`, and "host programs the rule does not cover", at the end
+# of this file, is the warning that names the ones it breaks.
+#
+# `ssh` is deliberately NOT in the list: every remote this workspace declares
+# is `https://`, and git's ssh transport is not on reprobuild's path to them.
+# The system `ssh` measured when this was written satisfied both channels, but
+# that host was NixOS; on a distribution host whose glibc is older than the
+# shell's, `ssh` links libcrypto, loads the shell's copy and dies — which the
+# host-program warning reports, because reprobuild does not run it. If
+# reprobuild ever does, the remedy is the same one this check prescribes for
+# `git` — have the dev shell provide the tool instead of inheriting it — so add
+# `ssh` here and `pkgs.openssh` to the devShell's `packages` together.
 #
 # Plus one program the shell names by VARIABLE rather than on PATH:
 # `$REPRO_SYSTEMD_ANALYZE`, which `just lint`'s CONF-3/CONF-4 checks run with
@@ -1130,6 +1255,7 @@ dev_shell_report_override_drift() {
 # The programs the dev shell must be able to hand its own loader state to.
 DEV_SHELL_SUBPROCESS_TOOLS=(
   git
+  ssh-keygen
 )
 
 # glibc satellite libraries: the ones that are separate `.so` files carrying
@@ -1154,14 +1280,33 @@ _dev_shell_glibc_prefixes() {
     sort -u
 }
 
-# The glibc an executable will actually run on: the store path of its
-# PT_INTERP. Prints nothing when the file is not an ELF with a nix-store
-# interpreter (a script, a static binary, a non-nix host).
+# The glibc an executable will actually run on. For a nix-store PT_INTERP it is
+# that glibc's store path. For a host interpreter (`/lib64/ld-linux-x86-64.so.2`
+# on Debian, Ubuntu or Fedora) it is the `libc.so.6` installed beside the
+# interpreter the link resolves to, which is where those distributions keep the
+# pair. Prints nothing when the file is not a dynamic ELF, or when no libc sits
+# beside its interpreter (NixOS's `/lib64` stub loader), because nothing can be
+# said about it then.
+#
+# The host arm is not optional. A runner that is not NixOS runs its own
+# `/usr/bin` programs on its own glibc, and those are the programs a dev shell
+# leaves on PATH when it does not provide them. Without this arm the check said
+# nothing about them, and an Ubuntu runner's `ssh-keygen` loaded this shell's
+# OpenSSL and died while `just lint` reported one glibc.
 dev_shell_elf_glibc() {
-  local file="$1" interp
+  local file="$1" interp resolved libc
   [[ -f "$file" ]] || return 0
   interp="$(patchelf --print-interpreter "$file" 2>/dev/null)" || return 0
-  _dev_shell_glibc_prefixes "$interp"
+  [[ -n "$interp" ]] || return 0
+  if [[ "$interp" == /nix/store/* ]]; then
+    _dev_shell_glibc_prefixes "$interp"
+    return 0
+  fi
+  resolved="$(readlink -f "$interp" 2>/dev/null)" || return 0
+  [[ -n "$resolved" ]] || return 0
+  libc="$(dirname "$resolved")/libc.so.6"
+  [[ -f "$libc" ]] || return 0
+  printf '%s\n' "$libc"
 }
 
 # The glibc(s) a library directory would drag in: the store paths its shared
@@ -1188,8 +1333,23 @@ dev_shell_libdir_glibc() {
 # reads exactly like "this libc defines nothing", i.e. a conflict against every
 # injected glibc. Hence also the non-zero return below: a caller must be able
 # to tell "nothing defined" from "nothing parsed".
+#
+# The argument is a glibc store prefix, or a host `libc.so.6` itself as
+# `dev_shell_elf_glibc` reports one for a program outside the nix store.
 dev_shell_glibc_defined_versions() {
-  local prefix="$1" libc="$1/lib/libc.so.6" out
+  if [[ -f "$1" ]]; then
+    dev_shell_libc_defined_versions "$1"
+  else
+    dev_shell_libc_defined_versions "$1/lib/libc.so.6"
+  fi
+}
+
+# The same table, for a `libc.so.6` named by its FILE rather than by a glibc
+# store prefix. A host program on a distribution host runs on
+# `/lib/x86_64-linux-gnu/libc.so.6`, which has no `/nix/store/<hash>-glibc-…`
+# prefix to name, and the host-program scan below has to read it all the same.
+dev_shell_libc_defined_versions() {
+  local libc="$1" out
   [[ -f "$libc" ]] || return 0
   out="$(readelf -V "$libc" 2>/dev/null |
     sed -n "/Version definition/,/^\$/p" |
@@ -1209,21 +1369,27 @@ dev_shell_glibc_required_versions() {
   for soname in "${DEV_SHELL_GLIBC_SATELLITES[@]}"; do
     file="$prefix/lib/$soname"
     [[ -f "$file" ]] || continue
-    readelf -V "$file" 2>/dev/null |
-      sed -n "/Version need/,/^\$/p" |
-      awk '
-        /File: / {
-          current = ""
-          if (match($0, /File: [^ ]+/)) {
-            current = substr($0, RSTART + 6, RLENGTH - 6)
-          }
-          next
-        }
-        current == "libc.so.6" && match($0, /Name: GLIBC_[A-Za-z0-9_.]+/) {
-          print substr($0, RSTART + 6, RLENGTH - 6)
-        }
-      '
+    dev_shell_elf_libc_requirements "$file"
   done | sort -u
+}
+
+# The symbol versions one ELF object requires FROM `libc.so.6`, one per line.
+# The `.gnu.version_r` scan above, for a single file of any kind.
+dev_shell_elf_libc_requirements() {
+  readelf -V "$1" 2>/dev/null |
+    sed -n "/Version need/,/^\$/p" |
+    awk '
+      /File: / {
+        current = ""
+        if (match($0, /File: [^ ]+/)) {
+          current = substr($0, RSTART + 6, RLENGTH - 6)
+        }
+        next
+      }
+      current == "libc.so.6" && match($0, /Name: GLIBC_[A-Za-z0-9_.]+/) {
+        print substr($0, RSTART + 6, RLENGTH - 6)
+      }
+    '
 }
 
 # Every glibc the dev shell can inject into a subprocess, one `channel<TAB>
@@ -1320,9 +1486,10 @@ dev_shell_loader_glibc_conflicts() {
   while IFS=$'\t' read -r tool binary; do
     [[ -n "$binary" ]] || continue
     host="$(dev_shell_elf_glibc "$binary")"
-    # No nix-store interpreter: a script, a static binary, or a non-nix host.
-    # Nothing here can say anything about it, and saying nothing is the
-    # honest answer rather than a pass or a fail.
+    # No interpreter whose libc can be located: a script, a static binary,
+    # or a loader with no `libc.so.6` beside it (NixOS's stub loader, a musl
+    # host). Nothing here can say anything about it, and saying nothing is
+    # the honest answer rather than a pass or a fail.
     [[ -n "$host" ]] || continue
     if [[ -z "${defined_cache[$host]+set}" ]]; then
       rc=0
@@ -1358,4 +1525,431 @@ dev_shell_loader_glibc_conflicts() {
     done
   done < <(dev_shell_subprocess_tool_binaries)
   return $((found == 0 ? 0 : 1))
+}
+
+# ---------------------------------------------------------------------------
+# Loader injection, continued: host programs the rule does not cover
+# ---------------------------------------------------------------------------
+#
+# THE SCOPE OF THE RULE ABOVE IS "PROGRAMS REPROBUILD ITSELF RUNS", and this
+# section exists because channel A reaches further than that. `LD_LIBRARY_PATH`
+# applies to EVERY program started in the shell, so a host program that links
+# one of the sonames the shell injects (`libssl.so.3`, `libcrypto.so.3`,
+# `libzstd.so.1`, `libpcre.so.1`, …) gets the shell's copy instead of its own,
+# and with it the shell's glibc. On a host whose `libc.so.6` is older, that
+# program dies before `main`. Measured on an Ubuntu 22.04 runner (glibc 2.35)
+# against the flake's openssl, built on glibc 2.42:
+#
+#   /usr/bin/ssh-keygen: version `GLIBC_2.38' not found (required by
+#   .../openssl-3.6.1/lib/libcrypto.so.3)
+#
+# The programs that fail this way on such a host include `ssh`, `scp`,
+# `openssl`, `zstd` and `systemctl` (the last through `libsystemd-shared`,
+# which links libcrypto and libzstd). The shell cannot PROVIDE every program a
+# contributor might start, so for programs reprobuild does not run the rule is
+# a warning, not a refusal: `scripts/check_dev_shell_env.sh` names each program
+# on PATH that this shell breaks, the injected library that breaks it, and the
+# remedy. A program that reprobuild (or a recipe `just` runs) DOES start is a
+# different matter and belongs in `DEV_SHELL_SUBPROCESS_TOOLS` together with a
+# dev-shell-provided copy, where check 6 refuses instead of warning.
+#
+# HOW A PROGRAM IS JUDGED, and why each step is there:
+#
+#   1. Which libc it runs on: the `libc.so.6` beside its resolved PT_INTERP.
+#      That covers both a nix-store loader and a distribution's
+#      `/lib64/ld-linux-x86-64.so.2` (a symlink into `/lib/x86_64-linux-gnu`),
+#      which is the case the defect was found on. It is the resolution
+#      `dev_shell_elf_glibc` makes for check 6's programs, applied to all of
+#      PATH.
+#   2. Whether ANY injected glibc requires a symbol version that libc lacks.
+#      If none does, the program is fine whatever it links, and the expensive
+#      step is skipped. This is the same version comparison check 6 makes, for
+#      the reason given there (a store-path comparison is wrong both ways).
+#   3. What the injection adds to the process. The loader's mapping of the
+#      program's dependencies is simulated twice — with this shell's
+#      `LD_LIBRARY_PATH` and without it — breadth-first, each soname loaded
+#      once, as ld.so does it (see `_dev_shell_simulate_load` for the search
+#      order). Every object only the injected run maps, and that needs a
+#      symbol version the program's libc lacks, is a reason the program dies.
+#      That is the object the loader names ("required by <object>"), often not
+#      the injected library itself: `curl` died on the shell glibc's
+#      `libdl.so.2`, which the injected libcrypto pulled in. Transitive,
+#      because `systemctl` reaches libcrypto only through `libsystemd-shared`.
+#
+# Static, not behavioural: nothing on PATH is executed, not even its loader in
+# trace mode, because this scan reads every executable on PATH and a lint gate
+# must not start arbitrary programs to find out whether they would start.
+
+# The sonames this shell injects through `LD_LIBRARY_PATH`, one `soname<TAB>
+# library-dir<TAB>glibc-prefix` row each, in the order the loader would find
+# them: the first directory that holds a soname wins, as it does for ld.so. The
+# glibc is read from the RPATH of that library file itself, not of its
+# directory, so a directory mixing builds is attributed correctly. A soname
+# whose library names no store glibc carries no glibc into a process, and is
+# not reported.
+dev_shell_injected_sonames() {
+  local dir file soname glibc
+  local -a dirs=()
+  local -A seen=()
+  if [[ -n "${LD_LIBRARY_PATH:-}" ]]; then
+    IFS=: read -r -a dirs <<<"$LD_LIBRARY_PATH"
+  fi
+  for dir in ${dirs[@]+"${dirs[@]}"}; do
+    [[ -n "$dir" && -d "$dir" ]] || continue
+    for file in "$dir"/*.so "$dir"/*.so.*; do
+      [[ -f "$file" ]] || continue
+      soname="$(basename "$file")"
+      [[ -z "${seen[$soname]+set}" ]] || continue
+      seen["$soname"]=1
+      while read -r glibc; do
+        [[ -n "$glibc" ]] || continue
+        printf '%s\t%s\t%s\n' "$soname" "$dir" "$glibc"
+      done < <(_dev_shell_glibc_prefixes \
+        "$(patchelf --print-rpath "$file" 2>/dev/null)")
+    done
+  done
+}
+
+# Every executable regular file on PATH, once per resolved file, as
+# `name<TAB>resolved-path`. The first PATH entry that provides a name wins, as
+# it does for a shell looking the name up; a later entry of the same name is
+# never what a contributor starts, so it is not judged.
+#
+# Builtins for the per-file work and ONE `readlink -f` for the lot: a dev
+# shell's PATH holds well over a thousand files, and a fork per file made this
+# enumeration alone take 45 s.
+dev_shell_path_executables() {
+  local dir file name i
+  local -a dirs=() picked_names=() picked_files=() resolved=()
+  local -A names=() files=()
+  IFS=: read -r -a dirs <<<"${PATH:-}"
+  for dir in ${dirs[@]+"${dirs[@]}"}; do
+    [[ -n "$dir" && -d "$dir" ]] || continue
+    for file in "$dir"/*; do
+      name="${file##*/}"
+      [[ -z "${names[$name]+set}" ]] || continue
+      [[ -f "$file" && -x "$file" ]] || continue
+      names["$name"]=1
+      picked_names+=("$name")
+      picked_files+=("$file")
+    done
+  done
+  [[ ${#picked_files[@]} -gt 0 ]] || return 0
+  mapfile -t resolved < <(printf '%s\0' "${picked_files[@]}" |
+    xargs -0 readlink -f -- 2>/dev/null)
+  # `readlink -f` prints nothing for a name it cannot resolve, which would
+  # shift every later pairing by one; refuse the pairing rather than misname.
+  if [[ ${#resolved[@]} -ne ${#picked_files[@]} ]]; then
+    resolved=("${picked_files[@]}")
+  fi
+  for i in "${!picked_files[@]}"; do
+    file="${resolved[$i]}"
+    [[ -z "${files[$file]+set}" ]] || continue
+    files["$file"]=1
+    printf '%s\t%s\n' "${picked_names[$i]}" "$file"
+  done
+}
+
+# `file<TAB>PT_INTERP` for every dynamic ELF among the files named on stdin
+# (one per line), read by `readelf` in batches rather than a process per file.
+# `readelf` heads its output with `File: <name>` only when it is given more
+# than one file, so each batch starts with `/dev/null`, which readelf rejects
+# on stderr and which guarantees the header for the files after it.
+dev_shell_elf_interpreters() {
+  tr '\n' '\0' |
+    xargs -0 -n 256 readelf -lW /dev/null 2>/dev/null |
+    awk '
+      /^File: / { file = substr($0, 7); next }
+      /\[Requesting program interpreter: / {
+        interp = $0
+        sub(/.*\[Requesting program interpreter: /, "", interp)
+        sub(/\]$/, "", interp)
+        if (file != "") print file "\t" interp
+      }
+    '
+}
+
+# The dynamic section of one ELF object, memoised in the caller's
+# `_dsh_needed` / `_dsh_rpath` / `_dsh_runpath` (keyed by path) from ONE
+# `readelf -d`: NEEDED entries in order, DT_RPATH and DT_RUNPATH kept apart,
+# because the loader treats them differently (below).
+_dev_shell_read_dynamic() {
+  local obj="$1" line needed="" rpath="" runpath="" value
+  [[ -z "${_dsh_needed[$obj]+set}" ]] || return 0
+  while IFS= read -r line; do
+    [[ "$line" == *"["*"]"* ]] || continue
+    value="${line#*[}"
+    value="${value%]*}"
+    case "$line" in
+      *"(NEEDED)"*) needed+="$value " ;;
+      *"(RPATH)"*) rpath="$value" ;;
+      *"(RUNPATH)"*) runpath="$value" ;;
+    esac
+  done < <(readelf -dW "$obj" 2>/dev/null)
+  _dsh_needed["$obj"]="$needed"
+  _dsh_rpath["$obj"]="$rpath"
+  _dsh_runpath["$obj"]="$runpath"
+}
+
+# Simulate the loader mapping a program's dependencies, leaving the objects
+# it would load in the caller's `_dsh_loaded` (path -> the injected soname
+# through which it was reached, or `-`).
+#
+# Why a simulation and not a closure. ld.so maps DT_NEEDED breadth-first and
+# loads each soname ONCE: a later request for a name already in the process is
+# satisfied by the copy already there, wherever the requester would have found
+# its own. So a host program whose own dependencies load its own glibc's
+# `libdl.so.2` before the injected libcrypto asks for one keeps its own, and
+# starts. Measured: of 36 programs on glibc 2.40 that a closure-based version
+# of this scan flagged in a glibc-2.42 shell, 10 (`nix`, `openssl`, `pw-cat`,
+# …) started fine for exactly this reason, while `curl` really died on the
+# 2.42 `libdl.so.2`. Charging an injected library with its whole closure is
+# wrong; charging what the process would actually load is right.
+#
+# Search order for a name `N` requested by object `O` (ld.so(8)): if `O` has
+# no DT_RUNPATH, `O`'s DT_RPATH and then the executable's DT_RPATH;
+# `LD_LIBRARY_PATH` (only when `$3` is `inject`); `O`'s DT_RUNPATH; then the
+# directory of the libc the program runs on (`$2`, which on a distribution is
+# the multiarch directory `ld.so.cache` mostly points into) and the default
+# directories. `$ORIGIN` expands to `O`'s directory. The interpreter and every
+# name that resolves to nothing are skipped: the first is already mapped, and
+# a missing library is a different failure from the one this is about.
+_dev_shell_simulate_load() {
+  local exe="$1" libc_dir="$2" mode="$3"
+  local -a queue=("$exe") llp=() search=() part=()
+  local -A by_name=()
+  local obj origin needed dir found exe_rpath="" via from_llp
+  _dsh_loaded=()
+  [[ "$mode" != inject || -z "${LD_LIBRARY_PATH:-}" ]] ||
+    IFS=: read -r -a llp <<<"$LD_LIBRARY_PATH"
+  _dev_shell_read_dynamic "$exe"
+  [[ -n "${_dsh_runpath[$exe]}" ]] || exe_rpath="${_dsh_rpath[$exe]}"
+  _dsh_loaded["$exe"]=-
+  while [[ ${#queue[@]} -gt 0 ]]; do
+    obj="${queue[0]}"
+    queue=("${queue[@]:1}")
+    _dev_shell_read_dynamic "$obj"
+    origin="${obj%/*}"
+    for needed in ${_dsh_needed[$obj]}; do
+      [[ -z "${by_name[$needed]+set}" ]] || continue
+      [[ "$needed" != ld-linux* ]] || continue
+      search=()
+      if [[ -z "${_dsh_runpath[$obj]}" && -n "${_dsh_rpath[$obj]}" ]]; then
+        IFS=: read -r -a part <<<"${_dsh_rpath[$obj]}"; search+=("${part[@]}")
+      fi
+      # The executable's DT_RPATH is inherited only by an object that has no
+      # DT_RUNPATH of its own: ld.so ignores the whole RPATH chain for a
+      # requester that carries a RUNPATH.
+      if [[ -n "$exe_rpath" && -z "${_dsh_runpath[$obj]}" ]]; then
+        IFS=: read -r -a part <<<"$exe_rpath"; search+=("${part[@]}")
+      fi
+      # Tagged entries: `L:` marks an LD_LIBRARY_PATH directory, so a hit
+      # there can be told apart from the same directory named by an RPATH.
+      for dir in ${llp[@]+"${llp[@]}"}; do search+=("L:$dir"); done
+      part=()
+      [[ -z "${_dsh_runpath[$obj]}" ]] ||
+        IFS=: read -r -a part <<<"${_dsh_runpath[$obj]}"
+      search+=(${part[@]+"${part[@]}"} "$libc_dir" /lib /usr/lib /lib64 /usr/lib64)
+      found=""
+      via="${_dsh_loaded[$obj]}"
+      for dir in "${search[@]}"; do
+        from_llp=no
+        if [[ "$dir" == L:* ]]; then from_llp=yes; dir="${dir#L:}"; fi
+        dir="${dir//\$\{ORIGIN\}/$origin}"
+        dir="${dir//\$ORIGIN/$origin}"
+        [[ -n "$dir" && -f "$dir/$needed" ]] || continue
+        found="$dir/$needed"
+        # Found through LD_LIBRARY_PATH: this is the injection itself.
+        if [[ "$from_llp" == yes && -n "${_dsh_injected[$needed]+set}" ]]; then
+          via="$needed"
+        fi
+        break
+      done
+      by_name["$needed"]=1
+      [[ -n "$found" ]] || continue
+      # Memoised in the caller's `_dsh_real`: a fork per resolved library
+      # per program is what made this scan take minutes on a PATH where most
+      # programs run on another libc.
+      if [[ -z "${_dsh_real[$found]+set}" ]]; then
+        _dsh_real["$found"]="$(readlink -f "$found" 2>/dev/null ||
+          printf '%s' "$found")"
+      fi
+      found="${_dsh_real[$found]}"
+      [[ -z "${_dsh_loaded[$found]+set}" ]] || continue
+      _dsh_loaded["$found"]="$via"
+      queue+=("$found")
+    done
+  done
+}
+
+# An UPPER BOUND on what an injected library can drag into a process: the
+# symbol versions `libc.so.6` must define for the library and its whole
+# dependency closure, resolved through `LD_LIBRARY_PATH` and then each
+# object's RPATH/RUNPATH. Used only as the step-2 filter: a libc that defines
+# all of these cannot be broken by this injection, whatever a program on it
+# links. It is NOT the verdict for any one program — a program that already
+# loads its own copy of one of those dependencies is never charged with it;
+# see `_dev_shell_simulate_load`.
+_dev_shell_injected_requirements() {
+  local file="$1"
+  local -a queue=("$file") search=() llp=()
+  local -A visited=()
+  local obj origin rpath needed dir found
+  [[ -z "${LD_LIBRARY_PATH:-}" ]] || IFS=: read -r -a llp <<<"$LD_LIBRARY_PATH"
+  while [[ ${#queue[@]} -gt 0 ]]; do
+    obj="${queue[0]}"
+    queue=("${queue[@]:1}")
+    [[ -z "${visited[$obj]+set}" ]] || continue
+    visited["$obj"]=1
+    dev_shell_elf_libc_requirements "$obj"
+    origin="${obj%/*}"
+    rpath="$(patchelf --print-rpath "$obj" 2>/dev/null)" || rpath=""
+    rpath="${rpath//\$\{ORIGIN\}/$origin}"
+    rpath="${rpath//\$ORIGIN/$origin}"
+    search=(${llp[@]+"${llp[@]}"})
+    if [[ -n "$rpath" ]]; then
+      local -a rp=()
+      IFS=: read -r -a rp <<<"$rpath"
+      search+=("${rp[@]}")
+    fi
+    while read -r needed; do
+      [[ -n "$needed" && "$needed" != libc.so.6 && "$needed" != ld-linux* ]] ||
+        continue
+      found=""
+      for dir in ${search[@]+"${search[@]}"}; do
+        [[ -n "$dir" && -f "$dir/$needed" ]] || continue
+        found="$(readlink -f "$dir/$needed" 2>/dev/null ||
+          printf '%s' "$dir/$needed")"
+        break
+      done
+      [[ -z "$found" ]] || queue+=("$found")
+    done < <(patchelf --print-needed "$obj" 2>/dev/null)
+  done | sort -u
+}
+
+# The scan. One row per finding, tab-separated, kind first:
+#
+#   broken<TAB>name<TAB>binary<TAB>libc-dir<TAB>object<TAB>injected-soname<TAB>library-dir<TAB>injected-glibc<TAB>missing-versions
+#
+# `object` is the library the loader would name ("required by <object>"):
+# the injected library itself, or one it pulls in, such as the shell glibc's
+# `libdl.so.2`. `injected-soname` is the LD_LIBRARY_PATH entry it came in
+# through.
+#   unreadable<TAB>libc.so.6-path
+#
+# plus a final `examined<TAB><count>` row, so a report can say how much it
+# looked at. Always returns 0: these are warnings about programs reprobuild
+# does not run, and the caller decides how loudly to report them.
+dev_shell_host_programs_broken_by_injection() {
+  local -A _dsh_injected=() _dsh_needed=() _dsh_rpath=() _dsh_runpath=()
+  local -A _dsh_loaded=() own_requires=() soname_dir=() in_baseline=()
+  local -A _dsh_real=() missing_of=()
+  local -A soname_glibc=() soname_requires=() defined_cache=() unreadable=()
+  local -A libc_risky=() interp_of=() libc_dir_of=() requires_of_file=()
+  local soname dir glibc name binary libc_dir libc rc missing row
+  local interp real file all_required obj via injected_row
+  local -a executables=() injected_run=()
+  local examined=0
+  while IFS=$'\t' read -r soname dir glibc; do
+    [[ -n "$glibc" ]] || continue
+    _dsh_injected["$soname"]=1
+    soname_dir["$soname"]="$dir"
+    soname_glibc["$soname"]="$glibc"
+    # Memoised by resolved file: `libzstd.so`, `libzstd.so.1` and
+    # `libzstd.so.1.5.7` are one library.
+    file="$(readlink -f "$dir/$soname" 2>/dev/null || printf '%s' "$dir/$soname")"
+    if [[ -z "${requires_of_file[$file]+set}" ]]; then
+      requires_of_file["$file"]="$(_dev_shell_injected_requirements "$file")"
+    fi
+    soname_requires["$soname"]="${requires_of_file[$file]}"
+  done < <(dev_shell_injected_sonames)
+  if [[ ${#_dsh_injected[@]} -eq 0 ]]; then
+    printf 'examined\t0\n'
+    return 0
+  fi
+  all_required="$(printf '%s\n' "${soname_requires[@]}" | grep -v '^$' | sort -u)"
+
+  mapfile -t executables < <(dev_shell_path_executables)
+  while IFS=$'\t' read -r binary interp; do
+    interp_of["$binary"]="$interp"
+  done < <(printf '%s\n' ${executables[@]+"${executables[@]}"} | cut -f2 |
+    dev_shell_elf_interpreters)
+
+  for row in ${executables[@]+"${executables[@]}"}; do
+    IFS=$'\t' read -r name binary <<<"$row"
+    interp="${interp_of[$binary]:-}"
+    [[ -n "$interp" ]] || continue
+    # Step 1, once per interpreter: the `libc.so.6` in the directory of the
+    # resolved PT_INTERP. Cached per loader, so it costs one fork per distinct
+    # loader rather than one per program.
+    if [[ -z "${libc_dir_of[$interp]+set}" ]]; then
+      libc_dir_of["$interp"]=""
+      real="$(readlink -f "$interp" 2>/dev/null)" || real=""
+      if [[ -n "$real" && -f "${real%/*}/libc.so.6" ]]; then
+        libc_dir_of["$interp"]="${real%/*}"
+      fi
+    fi
+    libc_dir="${libc_dir_of[$interp]}"
+    [[ -n "$libc_dir" ]] || continue
+    examined=$((examined + 1))
+    libc="$libc_dir/libc.so.6"
+    if [[ -z "${defined_cache[$libc]+set}" ]]; then
+      rc=0
+      defined_cache["$libc"]="$(dev_shell_libc_defined_versions "$libc")" ||
+        rc=$?
+      if [[ "$rc" -ne 0 ]]; then
+        unreadable["$libc"]=1
+        printf 'unreadable\t%s\n' "$libc"
+      fi
+    fi
+    [[ -z "${unreadable[$libc]+set}" ]] || continue
+    # Step 2, once per libc: can any injected library conflict with it at
+    # all? If not, the program is fine whatever it links.
+    if [[ -z "${libc_risky[$libc]+set}" ]]; then
+      libc_risky["$libc"]=no
+      if [[ -n "$(comm -23 <(printf '%s\n' "$all_required") \
+        <(printf '%s\n' "${defined_cache[$libc]}" | grep -v '^$' | sort -u) |
+        head -n 1)" ]]; then
+        libc_risky["$libc"]=yes
+      fi
+    fi
+    [[ "${libc_risky[$libc]}" == yes ]] || continue
+    # Step 3: what would the process load with and without the injection?
+    # The objects only the injected run maps are what LD_LIBRARY_PATH adds;
+    # each of them that needs a version this libc lacks is a reason the
+    # program dies, and is reported as the loader would report it ("required
+    # by <object>").
+    # The injected run first: a program that reaches no injected soname
+    # (most of PATH) needs no baseline at all.
+    _dev_shell_simulate_load "$binary" "$libc_dir" inject
+    injected_run=()
+    for obj in "${!_dsh_loaded[@]}"; do
+      [[ "${_dsh_loaded[$obj]}" == - ]] ||
+        injected_run+=("$obj"$'\t'"${_dsh_loaded[$obj]}")
+    done
+    [[ ${#injected_run[@]} -gt 0 ]] || continue
+    _dev_shell_simulate_load "$binary" "$libc_dir" plain
+    in_baseline=()
+    for obj in "${!_dsh_loaded[@]}"; do in_baseline["$obj"]=1; done
+    for injected_row in "${injected_run[@]}"; do
+      IFS=$'\t' read -r obj via <<<"$injected_row"
+      [[ -z "${in_baseline[$obj]+set}" ]] || continue
+      if [[ -z "${own_requires[$obj]+set}" ]]; then
+        own_requires["$obj"]="$(dev_shell_elf_libc_requirements "$obj" | sort -u)"
+      fi
+      if [[ -z "${missing_of[$libc|$obj]+set}" ]]; then
+        missing_of["$libc|$obj"]="$(comm -23 \
+          <(printf '%s\n' "${own_requires[$obj]}" | grep -v '^$' | sort -u) \
+          <(printf '%s\n' "${defined_cache[$libc]}" | grep -v '^$' | sort -u) |
+          paste -sd, -)"
+      fi
+      missing="${missing_of[$libc|$obj]}"
+      [[ -n "$missing" ]] || continue
+      printf 'broken\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$name" "$binary" \
+        "$libc_dir" "$obj" "$via" "${soname_dir[$via]}" \
+        "${soname_glibc[$via]}" "$missing"
+    done
+  done
+  printf 'examined\t%s\n' "$examined"
+  return 0
 }

@@ -930,6 +930,44 @@ const ReprobuildRepoRoot* =
   ## this is the repository that CONTAINS this file — never the directory the
   ## test process happened to be launched from.
 
+proc reprobuildRecipeText*(root = ReprobuildRepoRoot): string =
+  ## The checkout's ``repro.nim`` as the engine's compiles read it: each
+  ## ``include "<file>"`` line replaced by the text of that file. The recipe
+  ## keeps its engine-only part (its imports, tables and helper procedures)
+  ## in ``repro_recipe_support.nim``, which it includes under a mode guard so
+  ## that a program importing ``repro.nim`` compiles none of it; a test that
+  ## audits the recipe's text reads both files through this.
+  const Head = "include \""
+  for line in readFile(root / "repro.nim").splitLines(keepEol = true):
+    let stripped = line.strip()
+    if stripped.len > Head.len and stripped.startsWith(Head) and
+        stripped.endsWith("\""):
+      let included = readFile(root / stripped[Head.len ..< stripped.len - 1])
+      result.add(included)
+      if included.len > 0 and not included.endsWith("\n"):
+        result.add("\n")
+    else:
+      result.add(line)
+
+proc nimProcessedModules*(output: string): seq[string] =
+  ## The files a ``nim`` run names in its ``Processing`` hints, each once, in
+  ## the order first named. Run the compiler with ``--hint:all:off
+  ## --hint:Processing:on --processing:filenames``: every imported or
+  ## included file, Nim's library too, is then named by its full path, warm
+  ## nimcache or cold, as ``Hint: >> <importer>: import: <path>
+  ## [Processing]`` (or ``include:``).
+  const Suffix = " [Processing]"
+  for line in output.splitLines:
+    if not line.endsWith(Suffix):
+      continue
+    for marker in [": import: ", ": include: "]:
+      let at = line.find(marker)
+      if at >= 0:
+        let path = line[at + marker.len ..< line.len - Suffix.len]
+        if path notin result:
+          result.add(path)
+        break
+
 const ReproEvalModeFlag* = "--define:reproEvalMode"
   ## The flag that gives a test's own out-of-tree compile of DSL code the full
   ## project DSL. Without a mode define, `import reprobuild` is the thin mode

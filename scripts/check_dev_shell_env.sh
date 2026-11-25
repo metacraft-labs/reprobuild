@@ -315,13 +315,69 @@ else
       refresh flake.lock), or add a row to
       scripts/dev-shell-pinned-siblings.tsv saying why the pin is deliberate."
     else
-      fail "flake input '$input' has a sibling checkout at '$sibling', but that
+      # "No flake.nix in the directory" has more than one cause, and the remedy
+      # has to match the cause: a checkout that merely predates the commit
+      # adding the flake.nix its pin has is cured by a fast-forward, and
+      # "add a flake.nix" would be wrong for it. So the pin is consulted
+      # before a remedy is chosen (dev_shell_unflakeable_pin_state).
+      IFS=$'\t' read -r u_state u_pin u_behind < <(
+        dev_shell_unflakeable_pin_state "$REPO_ROOT/flake.lock" "$input" "$sibling")
+      unflakeable_head="flake input '$input' has a sibling checkout at '$sibling', but that
       directory has no flake.nix, so the flake-overrides plugin will not emit
       an --override-input for it. The input therefore builds from its
       flake.lock pin while the checkout beside it moves, and nothing else in
-      this gate can tell. Remedy: add a flake.nix to that repository, or add
-      a row to scripts/dev-shell-pinned-siblings.tsv saying why the pin is
-      deliberate."
+      this gate can tell."
+      case "$u_state" in
+        behind)
+          fail "$unflakeable_head The repository DOES have a flake.nix at the
+      revision flake.lock pins for this input ($u_pin); the checkout is
+      $u_behind commit(s) BEHIND that pin and simply predates the commit that
+      added it. Remedy: fast-forward the checkout to its pin —
+      'git -C $sibling merge --ff-only $u_pin' (or pull its branch, if that
+      contains the pin) — and re-run. Do not add a flake.nix or a row to
+      scripts/dev-shell-pinned-siblings.tsv: the repository already has one."
+          ;;
+        diverged)
+          fail "$unflakeable_head The repository DOES have a flake.nix at the
+      revision flake.lock pins for this input ($u_pin), but the checkout has
+      DIVERGED from that pin: it lacks $u_behind of the pin's commit(s),
+      including the one that added flake.nix, and carries commits of its own.
+      Remedy: merge or rebase $u_pin into $sibling, and re-run. Do not add a
+      flake.nix or a row to scripts/dev-shell-pinned-siblings.tsv: the
+      repository already has one."
+          ;;
+        worktree-deleted)
+          fail "$unflakeable_head The checkout's own HEAD has a flake.nix, and so
+      does the revision flake.lock pins ($u_pin); only the working tree lacks
+      it. Remedy: 'git -C $sibling restore flake.nix', or commit its removal
+      and then add a row to scripts/dev-shell-pinned-siblings.tsv saying why
+      the pin is deliberate."
+          ;;
+        removed-since-pin)
+          fail "$unflakeable_head The revision flake.lock pins for this input
+      ($u_pin) has a flake.nix, and the checkout contains that pin, so a
+      commit after the pin removed it. Remedy: restore the flake.nix in that
+      repository, or add a row to scripts/dev-shell-pinned-siblings.tsv
+      saying why the pin is deliberate."
+          ;;
+        unfetched)
+          fail "$unflakeable_head The revision flake.lock pins for this input
+      ($u_pin) is not an object in that checkout, so this offline check cannot
+      tell whether the repository has a flake.nix there. Remedy:
+      'git -C $sibling fetch' and re-run; if the pin has a flake.nix, the next
+      run names the fast-forward. Otherwise add a flake.nix to that
+      repository, or add a row to scripts/dev-shell-pinned-siblings.tsv saying
+      why the pin is deliberate."
+          ;;
+        *)
+          # no-pin, not-git, pin-unflaked: the repository is not a flake at its
+          # pin either (or there is no pin to consult), which is the case the
+          # original remedy was written for.
+          fail "$unflakeable_head Remedy: add a flake.nix to that repository,
+      or add a row to scripts/dev-shell-pinned-siblings.tsv saying why the pin
+      is deliberate."
+          ;;
+      esac
     fi
   done
 
@@ -905,6 +961,84 @@ case "$(uname -s)" in
             '  parser; do not relax the check.' >&2
           failures=$((failures + 1))
         fi
+      fi
+
+      # --- 6b. host programs on PATH that the injection breaks -------------
+      #
+      # Check 6 holds the rule for the programs reprobuild itself runs. The
+      # same LD_LIBRARY_PATH reaches every other program started in this
+      # shell, and on a host whose libc is older than the shell's, a host
+      # program that links one of the injected sonames (ssh / scp / openssl
+      # through libcrypto, zstd through libzstd, systemctl through
+      # libsystemd-shared) dies before main. The shell cannot provide every
+      # program a contributor might start, so this is a WARNING and does not
+      # fail lint; what it must not be is silent, because the failure itself
+      # names a library and a symbol version and nothing that points here.
+      # See "host programs the rule does not cover" in
+      # scripts/lib/dev_shell_overrides.sh.
+      host_broken=()
+      host_unreadable=()
+      host_examined=0
+      while IFS=$'\t' read -r _kind h2 h3 h4 h5 h6 h7 h8 h9; do
+        case "$_kind" in
+          broken) host_broken+=("$h2"$'\t'"$h3"$'\t'"$h4"$'\t'"$h5"$'\t'"$h6"$'\t'"$h7"$'\t'"$h8"$'\t'"$h9") ;;
+          unreadable) host_unreadable+=("$h2") ;;
+          examined) host_examined="$h2" ;;
+        esac
+      done < <(dev_shell_host_programs_broken_by_injection)
+      if [[ ${#host_broken[@]} -eq 0 && ${#host_unreadable[@]} -eq 0 ]]; then
+        printf 'dev-shell: no host program on PATH is broken by LD_LIBRARY_PATH %s\n' \
+          "($host_examined dynamic executable(s) examined)."
+      fi
+      if [[ ${#host_broken[@]} -gt 0 ]]; then
+        # One entry per PROGRAM, with a line per library that sinks it.
+        host_programs=()
+        declare -A host_seen=()
+        for finding in "${host_broken[@]}"; do
+          IFS=$'\t' read -r h2 h3 _ <<<"$finding"
+          [[ -n "${host_seen[$h3]+set}" ]] && continue
+          host_seen["$h3"]=1
+          host_programs+=("$h3")
+        done
+        printf 'WARNING: %d program(s) on PATH cannot start in this dev shell; LD_LIBRARY_PATH gives them a library that needs a newer glibc than the one they run on:\n' \
+          "${#host_programs[@]}" >&2
+        for program in "${host_programs[@]}"; do
+          header=no
+          for finding in "${host_broken[@]}"; do
+            IFS=$'\t' read -r h2 h3 h4 h5 h6 h7 h8 h9 <<<"$finding"
+            [[ "$h3" == "$program" ]] || continue
+            if [[ "$header" == no ]]; then
+              printf '  %s\n      binary:   %s\n      runs on:  %s/libc.so.6\n' \
+                "$h2" "$h3" "$h4" >&2
+              header=yes
+            fi
+            printf '      loads:    %s\n                which needs %s\n                (through %s from LD_LIBRARY_PATH entry %s, built on %s)\n' \
+              "$h5" "$h9" "$h6" "$h7" "$h8" >&2
+          done
+        done
+        # shellcheck disable=SC2016  # backticks quote commands for a reader.
+        printf '%s\n' \
+          '  Each program above aborts before main inside this shell with' \
+          '  "version `GLIBC_…'"'"' not found (required by <library>)". The libraries' \
+          '  are on LD_LIBRARY_PATH for the bare-soname dlopen() calls of the' \
+          '  binaries this repository builds (see flake.nix); these programs are' \
+          '  not among them, so this is a warning and lint still passes.' \
+          '  Remedy: run such a program outside the dev shell, or as' \
+          '  `env -u LD_LIBRARY_PATH <program> …`. If reprobuild, a test or a' \
+          '  script that `just` runs starts it, have the dev shell PROVIDE it' \
+          '  instead: add its package to the devShell'"'"'s `packages` in flake.nix' \
+          '  and the program to DEV_SHELL_SUBPROCESS_TOOLS in' \
+          '  scripts/lib/dev_shell_overrides.sh, where check 6 then guards it.' >&2
+      fi
+      if [[ ${#host_unreadable[@]} -gt 0 ]]; then
+        printf 'WARNING: the host-program scan could not read the symbol-version table of:\n' >&2
+        for finding in "${host_unreadable[@]}"; do
+          printf '  %s\n' "$finding" >&2
+        done
+        printf '%s\n' \
+          '  Programs running on that libc were not judged. If it is a glibc, this' \
+          '  is a bug in dev_shell_libc_defined_versions (scripts/lib/' \
+          '  dev_shell_overrides.sh) against the readelf on this PATH.' >&2
       fi
     fi
     ;;
