@@ -3347,7 +3347,7 @@
             "src",
             "tmp"
           ],
-          "line": 67,
+          "line": 61,
           "path": "tests/e2e/addon/t_e2e_addon_confinement_settings_each_hold.nim",
           "patterns": [
             "static-c-compiler"
@@ -10801,7 +10801,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_addon/tests/t_addon_floor_round21.nim",
       "sourceSuiteCount": 5,
-      "staticCaseCount": 19,
+      "staticCaseCount": 22,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

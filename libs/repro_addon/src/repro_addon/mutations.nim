@@ -2114,6 +2114,10 @@ const
                           # the conservative branch ignores a failed
                           # ``ls`` and holds nothing.
                           "boot-hold-ls-failure-ignored",
+                          # A9 review round 22: a line of the conservative
+                          # list that cannot be written is hidden by the
+                          # loop's last status.
+                          "boot-hold-list-write-failure-ignored",
                           # the fetch unit drops MemoryDenyWriteExecute=.
                           "fetch-unit-without-mdwe",
                           # the record of none is written in two steps,
