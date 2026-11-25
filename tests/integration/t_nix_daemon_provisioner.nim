@@ -32,6 +32,12 @@ from repro_local_store import ffpChecksum
 import repro_tool_profiles
 import repro_test_support/owned_processes
 
+# Re-entry used by the helper-key test: print the key this process computes
+# (run under `unshare --mount` to observe another mount namespace).
+if paramCount() == 2 and paramStr(1) == "--print-helper-key":
+  echo nixDaemonHelperKey(paramStr(2))
+  quit(0)
+
 const RepoMarker = "repro.nim"
 const FixtureRelRoot = "tests/fixtures/nix-daemon-local-flake"
 const FixtureSelector = ".#hello-sh"
@@ -694,6 +700,23 @@ suite "Nix Evaluation Daemon and Foreign Provisioner Integration Tests":
       if previousCache.len > 0: putEnv("XDG_CACHE_HOME", previousCache)
       else: delEnv("XDG_CACHE_HOME")
       check nixDaemonHelperKey(root / "a") == keyA
+      # A caller in another mount namespace (an agent sandbox sharing /tmp
+      # but not $HOME) must not be served by this one's helper: the helper
+      # cannot open the caller's paths. Needs unprivileged user namespaces.
+      if hostOs == "linux" and nixHelperMountNamespace().len > 0:
+        let unshareExe = findExe("unshare")
+        if unshareExe.len > 0:
+          let probe = execCmdEx(quoteShell(unshareExe) &
+            " --user --map-root-user --mount readlink /proc/self/ns/mnt")
+          if probe.exitCode == 0:
+            check probe.output.strip() != nixHelperMountNamespace()
+            let probeKey = execCmdEx(quoteShell(unshareExe) &
+              " --user --map-root-user --mount " &
+              quoteShell(getAppFilename()) & " --print-helper-key " &
+              quoteShell(root / "a"))
+            check probeKey.exitCode == 0
+            check probeKey.output.strip().len == 16
+            check probeKey.output.strip() != keyA
       let previousDir = getEnv(NixDaemonSocketDirEnv)
       putEnv(NixDaemonSocketDirEnv, root)
       defer: putEnv(NixDaemonSocketDirEnv, previousDir)
