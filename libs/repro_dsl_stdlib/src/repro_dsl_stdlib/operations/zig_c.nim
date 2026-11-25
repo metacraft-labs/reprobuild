@@ -48,7 +48,7 @@ proc requireZigDeclared*(caller: string) =
     raise newException(ValueError, "recipe '" & state.packageName & "': " &
       caller & " builds for the zig target '" & peekActiveCrossTarget().triple &
       "' with `zig cc`, but the package does not declare `zig` in " &
-      "`nativeBuildDeps:`. Add `\"zig >=0.13 <0.15\"` there (it is unused by " &
+      "`nativeBuildDeps:`. Add `\"zig >=0.14 <0.15\"` there (it is unused by " &
       "a native build).")
 
 proc targetKeyedPath*(path: string): string =

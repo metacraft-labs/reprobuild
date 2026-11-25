@@ -46,6 +46,20 @@ permissions:
 # scripts/check_workflows.sh asserts both.
 on:
   workflow_call:
+    inputs:
+      # A PROVING RUN, never a release. Empty (every tag push, and the
+      # default dispatch) builds every row of `platforms` in
+      # .github/release-platforms.json, as before. A list of `<platform>-<arch>`
+      # names (comma- or space-separated) builds only those legs, and may name
+      # a row of `candidates`: a leg that is not part of the release yet and
+      # must first build green through THIS job, on its own runner, before it
+      # is moved into `platforms` ("Prove, then gate"). `plan` refuses a
+      # filter on a tag ref, so a filtered run can never reach the publish
+      # job's asset assertion with a partial set.
+      platforms:
+        type: string
+        required: false
+        default: ""
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Release shape: build everything, THEN publish once, atomically.
@@ -96,6 +110,12 @@ on:
 # from a branch (the normal case: every dispatch run to date was against `dev`)
 # builds and publishes nothing, which is what made the 2026-08-01 dispatch run
 # show green macOS and Linux legs yet add nothing to any release.
+#
+# A branch dispatch may also name legs (the `platforms` input), to prove one
+# without building the rest, including a `candidates` row of
+# .github/release-platforms.json that is not part of the release yet. That is
+# how a new platform goes green through THIS job before it is allowed to gate
+# a release. `plan` refuses the input on a tag.
 # ─────────────────────────────────────────────────────────────────────────────
 
 jobs:
@@ -133,6 +153,10 @@ jobs:
       # `addon_static.arches`, space-separated: what the job builds, and what
       # the expected asset set above already names.
       addon-arches: ${{ steps.plan.outputs.addon-arches }}
+      # `true` unless the run was given a `platforms` filter (a proving run).
+      # Jobs that only make sense for a whole release -- the Nix cache push --
+      # are skipped when it is `false`.
+      full-release: ${{ steps.plan.outputs.full-release }}
     steps:
       - uses: actions/checkout@v4
 
@@ -211,16 +235,48 @@ jobs:
       - name: Derive matrix and expected asset set
         id: plan
         uses: actions/github-script@v7
+        env:
+          PLATFORM_FILTER: ${{ inputs.platforms }}
         with:
           script: |
             const fs = require('fs');
 
             const spec = JSON.parse(fs.readFileSync('.github/release-platforms.json', 'utf8'));
-            const platforms = spec.platforms;
-            if (!Array.isArray(platforms) || platforms.length === 0) {
+            const released = spec.platforms;
+            if (!Array.isArray(released) || released.length === 0) {
               core.setFailed('.github/release-platforms.json declares no platforms; a release with no platforms is not a release.');
               return;
             }
+            const legName = p => `${p.platform}-${p.arch}`;
+
+            // The proving-run filter (the `platforms` input). Without one the
+            // matrix is exactly `platforms`, and `candidates` are never built.
+            // With one, the matrix is exactly the named legs, which may be
+            // candidates; it is refused on a tag, where the publish job would
+            // otherwise compare a partial build against a partial asset list
+            // and could publish a release missing a promised platform.
+            const filter = (process.env.PLATFORM_FILTER || '').split(/[\s,]+/).filter(Boolean);
+            let platforms = released;
+            if (filter.length) {
+              if ((context.ref || '').startsWith('refs/tags/')) {
+                core.setFailed(
+                  `a platform filter (${filter.join(', ')}) was given for ${context.ref}. A tag builds and ` +
+                  `publishes every platform in .github/release-platforms.json or nothing; filter only a ` +
+                  `dispatch from a branch, which publishes nothing.`);
+                return;
+              }
+              const known = [...released, ...(spec.candidates || [])];
+              const unknown = filter.filter(n => !known.some(p => legName(p) === n));
+              if (unknown.length) {
+                core.setFailed(
+                  `unknown platform(s) ${unknown.join(', ')}; .github/release-platforms.json declares ` +
+                  `${known.map(legName).join(', ')}`);
+                return;
+              }
+              platforms = known.filter(p => filter.includes(legName(p)));
+              core.info(`proving run: building only ${platforms.map(legName).join(', ')}; nothing is published`);
+            }
+            core.setOutput('full-release', filter.length ? 'false' : 'true');
 
             const nimble = fs.readFileSync('reprobuild.nimble', 'utf8');
             const m = nimble.match(/^\s*version\s*=\s*"([^"]+)"/m);
@@ -254,13 +310,17 @@ jobs:
             // archives above, and are then ordinary members of the asset set.
             const archiveOf = Object.fromEntries(platforms.map(p =>
               [`${p.platform}-${p.arch}`, `reprobuild-${version}-${p.platform}-${p.arch}.${p['archive_ext']}`]));
+            // Validated against the RELEASED platforms on every run, so a
+            // proving run still catches a declaration error; built only when
+            // the platform they come from is in this run's matrix.
+            const isReleased = n => released.some(p => legName(p) === n);
             const packages = (spec.packages || []).map(p => {
-              if (!archiveOf[p.from]) {
+              if (!isReleased(p.from)) {
                 throw new Error(`package ${p.asset} is built from '${p.from}', which is not a platform in this release`);
               }
               return { ecosystem: p.ecosystem, archive: archiveOf[p.from],
                        asset: p.asset.replaceAll('{version}', version) };
-            });
+            }).filter(p => p.archive);
             assets.push(...packages.map(p => p.asset));
 
             // The static add-on binaries, built by their own job
@@ -269,16 +329,18 @@ jobs:
             // absent).
             const addon = spec.addon_static;
             if (addon) {
-              const host = platforms.find(p => `${p.platform}-${p.arch}` === addon.from);
-              if (!host) {
+              if (!isReleased(addon.from)) {
                 throw new Error(`addon_static is built on '${addon.from}', which is not a platform in this release`);
               }
-              for (const a of addon.arches) {
-                assets.push(addon.asset.replaceAll('{version}', version).replaceAll('{arch}', a));
+              const host = platforms.find(p => legName(p) === addon.from);
+              if (host) {
+                for (const a of addon.arches) {
+                  assets.push(addon.asset.replaceAll('{version}', version).replaceAll('{arch}', a));
+                }
+                core.setOutput('addon-runner', JSON.stringify(addon.runner ?? host.runner));
+                core.setOutput('addon-env-flavor', host['env-flavor']);
+                core.setOutput('addon-arches', addon.arches.join(' '));
               }
-              core.setOutput('addon-runner', JSON.stringify(addon.runner ?? host.runner));
-              core.setOutput('addon-env-flavor', host['env-flavor']);
-              core.setOutput('addon-arches', addon.arches.join(' '));
             }
 
             const dupes = assets.filter((a, i) => assets.indexOf(a) !== i);
@@ -290,7 +352,14 @@ jobs:
             core.info(`release ${version} will consist of exactly ${assets.length} assets:`);
             for (const a of assets) core.info(`  - ${a}`);
 
-            core.setOutput('matrix', JSON.stringify(platforms));
+            // `native-packages`: whether a declared package is built from
+            // this leg's archive. The leg's package steps run only then, so a
+            // Linux leg no package names (linux-aarch64) neither builds nor
+            // claims to have checked one, while a leg that does name one still
+            // fails if none was checked.
+            core.setOutput('matrix', JSON.stringify(platforms.map(p => ({
+              ...p, 'native-packages': packages.some(k => k.archive === archiveOf[legName(p)]),
+            }))));
             core.setOutput('version', version);
             core.setOutput('expected-assets', assets.join('\n'));
             // One `ecosystem archive asset` line per package: the publish job
@@ -1006,9 +1075,11 @@ jobs:
       # Each gets a `.sha256`, so the publish job's asset assertion, the
       # SHA256SUMS manifest, signing and the draft verification treat them as
       # ordinary release members. .github/release-platforms.json's `packages`
-      # list declares them; a leg builds only those made from ITS archive.
+      # list declares them; a leg builds only those made from ITS archive, and
+      # a leg none is made from (`matrix.native-packages`, set by `plan`) skips
+      # this step and the install check below.
       - name: Build native packages from this leg's archive
-        if: matrix.os-name == 'linux'
+        if: matrix.native-packages
         shell: bash
         env:
           PACKAGES: ${{ needs.plan.outputs.packages }}
@@ -1040,7 +1111,7 @@ jobs:
       # archive gate is re-run against what the .deb installs, and each
       # package's file set is compared with the archive's, entry for entry.
       - name: Verify the native packages install the archive intact
-        if: matrix.os-name == 'linux'
+        if: matrix.native-packages
         shell: bash
         timeout-minutes: 60
         env:
@@ -1263,6 +1334,9 @@ jobs:
     # `plan`, which gates every leg, waits for general capacity. Nothing a
     # leg builds is needed here.
     needs: plan
+    # Not on a proving run (a `platforms` filter): it proves one leg, and the
+    # cache push of the x86_64 package is no part of that.
+    if: needs.plan.outputs.full-release == 'true'
     # `[self-hosted, linux, x64]`, like `plan`: the `eph-linux-x64-release`
     # scale set has a single runner and the Linux leg holds it for hours.
     runs-on: [self-hosted, linux, x64]
