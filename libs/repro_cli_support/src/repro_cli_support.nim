@@ -56497,6 +56497,7 @@ proc executeMainlineSync(args: WorkspaceSyncArgs): MainlineSyncReport =
       continue
     let idSeg = safeRepoIdSegment(repo.name) & "-" & $idx
     let actionId = "workspace-mainline-sync-fetch-" & idSeg
+    let fetchRole = repo.roles.findRole(args.role)
     var action = gitFetchAction(actionId, identity,
       remoteName = gitRemoteNameFor(repo),
       repoPath = repo.path,
@@ -56506,7 +56507,12 @@ proc executeMainlineSync(args: WorkspaceSyncArgs): MainlineSyncReport =
       # cached: a receipt from an earlier sync would answer for a remote that
       # has since moved, and the role tip read below would be stale. Like the
       # ordinary sync's fetch (``syncFetchActionFor``), it always runs.
-      cacheable = false)
+      cacheable = false,
+      # The role tip read below is the only remote-tracking ref this sync
+      # consults, so it fetches that branch by an explicit refspec, whatever
+      # the checkout's fetch configuration or upstream names (CLI/sync.md).
+      branchName =
+        if fetchRole.isSome: fetchRole.get().branch else: "")
     action.cwd = args.workspaceRoot
     fetchActions.add(action)
     fetchIdByPath[repo.path] = actionId
@@ -89438,11 +89444,22 @@ proc executeWorkspaceSwitch(parsed: SwitchArgs): SwitchReport =
         continue
       let idSeg = safeRepoIdSegment(repo.name) & "-" & $idx
       let actionId = "workspace-switch-prefetch-" & idSeg
+      # Classification below reads only the TARGET branch's remote-tracking
+      # ref, so the prefetch refreshes that branch by an explicit refspec:
+      # under ``--to=<role>`` the branch the role resolves to for this repo,
+      # otherwise the named branch. The checkout's own fetch configuration or
+      # current upstream cannot then fail it (CLI/switch.md §"Fetching").
+      let prefetchBranch =
+        if byRole:
+          let r = repo.roles.findRole(parsed.role.role)
+          if r.isSome: r.get().branch else: ""
+        else: parsed.branchName
       var action = gitFetchAction(actionId, identity,
         remoteName = gitRemoteNameFor(repo),
         repoPath = repo.path,
         receiptPath = ".repro" / "workspace" / "receipts" /
-          ("switch-prefetch-" & idSeg & ".receipt"))
+          ("switch-prefetch-" & idSeg & ".receipt"),
+        branchName = prefetchBranch)
       action.cwd = parsed.workspaceRoot
       fetchActions.add(action)
       fetchIdByPath[repo.path] = actionId
@@ -89888,7 +89905,10 @@ proc executeWorkspaceSwitch(parsed: SwitchArgs): SwitchReport =
       var fetchAction = gitFetchAction(fetchActionId, identity,
         remoteName = rName,
         repoPath = state.repo.path,
-        receiptPath = fetchReceiptRel)
+        receiptPath = fetchReceiptRel,
+        # The switch below creates the branch from ``<remote>/<target>``,
+        # so that is the ref this fetch must produce.
+        branchName = state.target)
       fetchAction.cwd = parsed.workspaceRoot
       actions.add(fetchAction)
       let switchReceiptRel = ".repro" / "workspace" / "receipts" /
@@ -89897,13 +89917,15 @@ proc executeWorkspaceSwitch(parsed: SwitchArgs): SwitchReport =
       let switchActionId = "workspace-checkout-switch-" &
         safeRepoIdSegment(state.repo.name) & "-" & $idx
       # The switch declares the fetch action's id as a dep so the
-      # engine orders them. ``git switch`` DWIMs the tracking branch
-      # off the ``origin/<name>`` ref the fetch just populated.
+      # engine orders them. It creates the branch from the
+      # ``<remote>/<target>`` ref the fetch just populated, explicitly
+      # (``trackRemote``), never through git's refspec-based guess.
       var switchAction = gitSwitchAction(switchActionId, identity,
         branchName = state.target,
         repoPath = state.repo.path,
         receiptPath = switchReceiptRel,
-        deps = @[fetchActionId])
+        deps = @[fetchActionId],
+        trackRemote = rName)
       switchAction.cwd = parsed.workspaceRoot
       actions.add(switchAction)
       switchActionByIdx[idx] = switchActionId
@@ -92244,7 +92266,11 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
         receiptPath = "mainline-fetch-" & $idx & ".receipt",
         # A fetch that is asked for must actually reach the remote; a cache hit
         # would answer "refreshed" without a round-trip.
-        cacheable = false)
+        cacheable = false,
+        # The role branch, by an explicit refspec: what the source checkout's
+        # own fetch configuration or current branch's upstream names is not
+        # what the fork cuts from (CLI/branch.md §"Fetching").
+        branchName = state.roleBranch)
       fetch.cwd = remoteProbeRoot
       fetch.pool = "vcs/fetch"
       fetch.poolUnits = 1'u32
@@ -92256,7 +92282,8 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
         remoteName = "origin",
         repoPath = parsed.workspaceRoot,
         receiptPath = "mainline-fetch-root.receipt",
-        cacheable = false)
+        cacheable = false,
+        branchName = rootRoleBranch)
       rootFetch.cwd = remoteProbeRoot
       rootFetch.pool = "vcs/fetch"
       rootFetch.poolUnits = 1'u32

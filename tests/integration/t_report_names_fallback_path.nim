@@ -88,6 +88,13 @@ suite "report_names_fallback_path":
 
       # ---- 3. two- and three-step chains --------------------------------------
       ws.resetFeatureBranches()
+      # A dry run fetches nothing and plans against the remote-tracking refs on
+      # disk, and the role syncs above refreshed only their own role branches
+      # (Workspace-Branch-Roles.md §4.6). Fetch every branch here so the plan
+      # below sees `release` and `latest` where the remote has them, and both
+      # repos have a fast-forward to report.
+      for name in ["core", "docs"]:
+        discard ws.gitIn(ws.root / name, "fetch -q origin")
       let prod = ws.runRepro(@["sync", rootArg, "--production", "--dry-run",
         "--json"])
       checkpoint("sync --production exit=" & $prod.code & "\n" & prod.stdout &

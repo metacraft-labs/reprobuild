@@ -32530,7 +32530,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g14",
+    group: "t_group_tests_integration_g13",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_restored_outputs_match_the_recorded_digests.nim",
@@ -32556,6 +32556,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     selfInterposes: false,
     group: "",
     singleReason: "suite-scope statement runs at every start-up: for c in cases():"),
+  TestSpec(
+    source: "tests/integration/t_role_refresh_fetches_the_role_branch_not_the_configured_refspec.nim",
+    binary: "build/test-bin/t_role_refresh_fetches_the_role_branch_not_the_configured_refspec",
+    defines: @[],
+    requiresReproBinary: true,
+    requiresMonitorShim: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_tests_integration_g14",
+    singleReason: ""),
   TestSpec(
     source: "tests/integration/t_role_validation_refused_through_repro.nim",
     binary: "build/test-bin/t_role_validation_refused_through_repro",
