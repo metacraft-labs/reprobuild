@@ -5072,6 +5072,13 @@ proc runCommand*(command: openArray[string];
       creationFlags = 0x00000400'u32
     let created = winCreateProcessW(nil, pCmd, nil, nil, 1,
       ProviderLockDword(creationFlags), pEnv, pCwd, addr si, addr pi)
+    # Read at once: the next two calls (CreateFileW, CloseHandle) are
+    # successful Win32 calls, which are free to reset the thread's last-error
+    # value, and the failure below then reported "(0)" for a CreateProcessW
+    # that really failed with 206 (ERROR_FILENAME_EXCED_RANGE,
+    # https://learn.microsoft.com/windows/win32/debug/system-error-codes--0-499-),
+    # so a >32,767-unit command line no longer said why it was refused.
+    let createError = if created == 0: providerLockGetLastError() else: 0
     # Progress is read through a SECOND handle to the sink: read-only and
     # NOT inheritable. The inheritable write handle is closed at once, as
     # before; kept open for the whole wait, every child that a concurrent
@@ -5083,7 +5090,7 @@ proc runCommand*(command: openArray[string];
     discard providerLockCloseHandle(sinkHandle)
 
     if created == 0:
-      let err = providerLockGetLastError()
+      let err = createError
       if probeHandle != ProviderLockInvalidHandle and probeHandle != nil:
         discard providerLockCloseHandle(probeHandle)
       try:

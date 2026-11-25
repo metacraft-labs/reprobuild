@@ -143,6 +143,32 @@ Check "a missing shared version key is a violation" {
   if (-not ($v -match 'NIM_VERSION is missing')) { throw "not reported: $($v -join '; ')" }
 }
 
+Write-Host "windows/release-os-dlls.txt"
+Check "every allowlisted OS DLL has a name and a reason" {
+  $os = Get-WindowsReleaseOsDlls
+  if ($os.Count -lt 1) { throw "the allowlist is empty" }
+  foreach ($k in $os.Keys) {
+    if ($k -notmatch '^[A-Za-z0-9_]+\.dll$') { throw "not a DLL name: $k" }
+    if ([string]::IsNullOrWhiteSpace($os[$k])) { throw "$k has no reason" }
+  }
+}
+Check "no Visual C++ or other redistributable runtime is allowlisted" {
+  foreach ($k in (Get-WindowsReleaseOsDlls).Keys) {
+    if ($k -match '^(?i)(vcruntime|msvcp|concrt|vccorlib|vcomp|vcamp|mfc|ucrtbased|libgcc|libstdc|libwinpthread|libc\+\+|libunwind)') {
+      throw "$k is a redistributable, not part of Windows"
+    }
+  }
+}
+Check "a line without a reason is refused" {
+  $bad = Join-Path ([IO.Path]::GetTempPath()) ("os-dlls-" + [Guid]::NewGuid().ToString("N") + ".txt")
+  Set-Content -LiteralPath $bad -Value @("# comment", "KERNEL32.dll") -Encoding ascii
+  try {
+    Assert-Throws { Get-WindowsReleaseOsDlls -Path $bad } 'KERNEL32\.dll has no reason'
+  } finally {
+    Remove-Item -LiteralPath $bad
+  }
+}
+
 Write-Host "PE readers and the release closure audit (synthetic images, any host)"
 
 function New-TestPeImage {
@@ -235,19 +261,22 @@ $synthSys = Join-Path $synth "system"
 $synthBin = Join-Path $synth "bin"
 New-Item -ItemType Directory -Path $synthSys, $synthBin | Out-Null
 try {
-  # The stand-in system directory holds the OS DLLs the fixtures import.
-  foreach ($n in @("KERNEL32.dll", "ADVAPI32.dll", "bcrypt.dll")) {
+  # The stand-in system directory holds the OS DLLs the fixtures import, all
+  # on windows/release-os-dlls.txt, and one redistributable that is not: a
+  # Visual C++ runtime DLL sits in System32 on any host that installed the
+  # VC++ redistributable or Visual Studio, but Windows does not ship it.
+  foreach ($n in @("KERNEL32.dll", "ADVAPI32.dll", "USER32.dll", "vcruntime140.dll")) {
     New-TestPeImage -Path (Join-Path $synthSys $n) -Machine $arm64
   }
   $tool = Join-Path $synth "tool.exe"
-  New-TestPeImage -Path $tool -Machine $arm64 -Imports @("KERNEL32.dll", "libfoo.dll") -DelayImports @("bcrypt.dll", "libbar.dll")
+  New-TestPeImage -Path $tool -Machine $arm64 -Imports @("KERNEL32.dll", "libfoo.dll") -DelayImports @("USER32.dll", "libbar.dll")
   Check "the import directory is read" {
     $names = @(Get-PeImportNames -Path $tool)
     if (($names -join ",") -ne "KERNEL32.dll,libfoo.dll") { throw "got '$($names -join ",")'" }
   }
   Check "the delay-load import directory is read" {
     $names = @(Get-PeDelayImportNames -Path $tool)
-    if (($names -join ",") -ne "bcrypt.dll,libbar.dll") { throw "got '$($names -join ",")'" }
+    if (($names -join ",") -ne "USER32.dll,libbar.dll") { throw "got '$($names -join ",")'" }
   }
   Check "a delay-load descriptor in the old VA form is read" {
     $old = Join-Path $synth "old.exe"
@@ -288,6 +317,37 @@ try {
         'libfoo\.dll is a PE image for machine 0x8664, not the arm64 machine 0xAA64'
     } finally {
       New-TestPeImage -Path (Join-Path $synthBin "libfoo.dll") -Machine $arm64 -Imports @("KERNEL32.dll")
+    }
+  }
+
+  Check "a redistributable in System32 is not an operating-system DLL: it fails the audit" {
+    $vc = Join-Path $synthBin "uses-vcrt.dll"
+    New-TestPeImage -Path $vc -Machine $arm64 -Imports @("KERNEL32.dll", "vcruntime140.dll")
+    try {
+      Assert-Throws { Assert-WindowsDllClosure -BinDir $synthBin -Arch arm64 -SystemDir $synthSys } `
+        'uses-vcrt\.dll imports vcruntime140\.dll, which the system directory holds but which is not a Windows component on windows/release-os-dlls\.txt'
+    } finally {
+      Remove-Item -LiteralPath $vc
+    }
+  }
+  Check "an allowlisted OS DLL missing from the system directory fails the audit" {
+    $ws = Join-Path $synthBin "uses-ws2.dll"
+    New-TestPeImage -Path $ws -Machine $arm64 -Imports @("WS2_32.dll")
+    try {
+      Assert-Throws { Assert-WindowsDllClosure -BinDir $synthBin -Arch arm64 -SystemDir $synthSys } `
+        'uses-ws2\.dll imports WS2_32\.dll, which is neither in bin/ nor an operating-system DLL'
+    } finally {
+      Remove-Item -LiteralPath $ws
+    }
+  }
+  Check "an operating-system DLL is matched by name without regard to case" {
+    $lc = Join-Path $synthBin "lowercase.dll"
+    New-TestPeImage -Path $lc -Machine $arm64 -Imports @("kernel32.dll")
+    try {
+      Assert-WindowsDllClosure -BinDir $synthBin -Arch arm64 -SystemDir $synthSys `
+        -OsDlls @("KERNEL32.dll", "ADVAPI32.dll", "USER32.dll")
+    } finally {
+      Remove-Item -LiteralPath $lc
     }
   }
 
@@ -347,7 +407,9 @@ if ($onWindows) {
   try {
     Copy-Item -LiteralPath $cmdExe -Destination (Join-Path $dir "ok.exe")
     Check "a bin/ of system-only imports passes the closure audit" {
-      Assert-WindowsDllClosure -BinDir $dir -Arch $hostArch
+      # cmd.exe is a Windows image, so its imports are OS DLLs by construction;
+      # they stand in for the allowlist, which names only what reprobuild uses.
+      Assert-WindowsDllClosure -BinDir $dir -Arch $hostArch -OsDlls $cmdImports
     }
     # Negative control: the same image with one import renamed to a DLL that
     # exists nowhere. Same length, so the PE stays well formed.
@@ -366,12 +428,12 @@ if ($onWindows) {
       [Array]::Copy($fake, 0, $bytes, $at, $fake.Length)
       [IO.File]::WriteAllBytes((Join-Path $dir "bad.exe"), $bytes)
       Check "an import that is neither in bin/ nor in System32 fails the audit" {
-        Assert-Throws { Assert-WindowsDllClosure -BinDir $dir -Arch $hostArch } ("bad\.exe imports " + [regex]::Escape($fakeName))
+        Assert-Throws { Assert-WindowsDllClosure -BinDir $dir -Arch $hostArch -OsDlls $cmdImports } ("bad\.exe imports " + [regex]::Escape($fakeName))
       }
     }
     Check "an image of another machine fails the audit" {
       $other = if ($hostArch -eq "arm64") { "x64" } else { "arm64" }
-      Assert-Throws { Assert-WindowsDllClosure -BinDir $dir -Arch $other } 'not the .* machine'
+      Assert-Throws { Assert-WindowsDllClosure -BinDir $dir -Arch $other -OsDlls $cmdImports } 'not the .* machine'
     }
   } finally {
     Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue
