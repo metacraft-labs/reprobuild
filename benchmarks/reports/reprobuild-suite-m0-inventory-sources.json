@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 36,
-    "nimTestBinaries": 3261,
+    "nimTestBinaries": 3264,
     "pureUnitConsolidationGroups": 96,
     "pureUnitTests": 853,
-    "staticallyDetectedRuntimeCompilerFlowTests": 163,
-    "testEntries": 3320
+    "staticallyDetectedRuntimeCompilerFlowTests": 164,
+    "testEntries": 3323
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1860,7 +1860,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 29,
-      "integration": 1835,
+      "integration": 1838,
       "platform/destructive": 206,
       "pure unit": 853,
       "unclassified": 397
@@ -2083,9 +2083,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 3261,
+    "nimTestBinaryCount": 3264,
     "pythonTestFileCount": 59,
-    "testEntryCount": 3320
+    "testEntryCount": 3323
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -9194,6 +9194,26 @@
           "executedVariables": [
             "args"
           ],
+          "line": 99,
+          "path": "tests/integration/test_cs_m14_idiomatic_program.nim",
+          "patterns": [
+            "nim-argv"
+          ],
+          "snippet": "var args = @[\"nim\", \"c\", \"--hint:all:off\", \"--hint:Processing:on\","
+        }
+      ],
+      "source": "tests/integration/test_cs_m14_idiomatic_program.nim"
+    },
+    {
+      "class": "integration",
+      "matches": [
+        {
+          "assignedCommandVariable": "args",
+          "commandVariableExecuted": true,
+          "directExecutionLine": false,
+          "executedVariables": [
+            "args"
+          ],
           "line": 76,
           "path": "tests/integration/test_cs_m14_reprobuild_repro_nim_imports_thin.nim",
           "patterns": [
@@ -9214,7 +9234,7 @@
           "executedVariables": [
             "cmd"
           ],
-          "line": 91,
+          "line": 93,
           "path": "tests/unit/t_build_package_fragment_outside_provider_mode_names_the_define.nim",
           "patterns": [
             "nim-compile-verb"
@@ -24204,6 +24224,23 @@
       "source": "libs/repro_lock/tests/t_a_lock_value_spread_over_lines_reads_whole.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 7,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_a_lock_writes_one_dependency_per_line",
+      "class": "integration",
+      "classificationReason": "subprocess or repro CLI invocation in test body",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_lock"
+      ],
+      "owner": "libs/repro_lock",
+      "requiresReproBinary": false,
+      "source": "libs/repro_lock/tests/t_a_lock_writes_one_dependency_per_line.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 5,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -53028,6 +53065,7 @@
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
+        "repro_lock",
         "repro_test_support"
       ],
       "owner": "tests/integration",
@@ -61749,6 +61787,23 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_user_docs_health_table_names_every_health_check",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_core"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": false,
+      "source": "tests/integration/t_user_docs_health_table_names_every_health_check.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_uses_refuses_a_package_declared_for_another_platform",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -63741,6 +63796,23 @@
       "source": "tests/integration/test_cs_m12_thin_import_cost.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 5,
+      "staticallyDetectedRuntimeCompilerFlow": true,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/test_cs_m14_idiomatic_program",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/test_cs_m14_idiomatic_program.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 6,
       "staticallyDetectedRuntimeCompilerFlow": true,
       "targetOs": "soAny"
     },

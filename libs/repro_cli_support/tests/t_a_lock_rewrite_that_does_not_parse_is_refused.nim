@@ -69,9 +69,15 @@ proc threeDepLock(libB = repeat('2', 40)): LockedDependencies =
 
 proc spreadLayout(doc: string): string =
   ## codetracer `a0efd6494`'s layout: each record after the first on its own
-  ## line, opened by the separating comma.
-  let line = committedLockDepsLine(parseLockedDependencies(doc))
-  doc.replace(line, line.replace("}, { name", "}\n, { name"))
+  ## line, opened by the separating comma. The writer now lays `deps` out one
+  ## record per line, so the records are lifted out of the writer's statement and
+  ## re-laid-out in the hand-edited layout.
+  var records: seq[string]
+  let statement = lockStatementSource(doc, "deps")
+  for line in statement.splitLines():
+    let l = line.strip().strip(chars = {','})
+    if l.startsWith("{"): records.add(l)
+  doc.replace(statement, "deps = [" & records.join("\n, ") & "]")
 
 proc firstPhysicalLine(statement: string): string =
   statement.splitLines()[0]

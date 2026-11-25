@@ -49,6 +49,7 @@
 ## path (a `repro` on PATH cannot stand in for the one under test); its body
 ## is the managed body's dispatch line.
 
+import repro_lock
 import std/[algorithm, envvars, os, strutils, unittest]
 import repro_test_support
 import ./committed_lock_siblings_fixture
@@ -79,7 +80,7 @@ proc platformOf(lockBody: string): string =
 proc depNames(lockBody: string): seq[string] =
   ## Every sibling `deps` entry's name, sorted. The lock's own entry (marked
   ## `self = "true"`, named after its origin) is compared separately.
-  let line = linePrefixed(lockBody, "deps = [")
+  let line = lockStatementSource(lockBody, "deps").replace("\n", " ")
   var i = 0
   while true:
     let at = line.find("{ name = \"", i)
@@ -95,8 +96,9 @@ proc depNames(lockBody: string): seq[string] =
 proc nonDepsLines(lockBody: string): seq[string] =
   ## The lock with its `deps` line taken out: the solve, the platform and
   ## everything else a sibling re-pin must leave byte-identical.
-  for line in lockBody.splitLines():
-    if not line.startsWith("deps = ["): result.add(line)
+  for line in lockBody.replace(lockStatementSource(lockBody, "deps"),
+      "").splitLines():
+    result.add(line)
 
 proc clearAllowEnv() =
   ## `REPRO_ALLOW_PIN_REGRESSION` unset in this process, so a value exported

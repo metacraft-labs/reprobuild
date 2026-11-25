@@ -199,7 +199,7 @@ suite "pre-commit re-pins the committed lock's siblings":
       var fx = setupSiblingFixture("continuation-repin")
       defer: removeDir(fx.scratch)
       fx.refreshAndPublishLock()
-      let canonical = readFile(fx.app / "repro.lock")
+      let canonical = oneLineDepsLayout(readFile(fx.app / "repro.lock"))
       let packagesBefore = linePrefixed(canonical, "packages = ")
       let depsLine = linePrefixed(canonical, "deps = ")
       # The issue's layout: a record on its own line, opened by the
