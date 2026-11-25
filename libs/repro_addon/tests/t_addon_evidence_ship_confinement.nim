@@ -130,9 +130,9 @@ suite "the shipping unit runs as a dedicated user (§13 decision 181)":
       check "IPAddressDeny=any" in ls
     check "CapabilityBoundingSet=CAP_NET_ADMIN" in
       egressUnit("/usr/sbin/nft", "ab").lines
-    # the check also writes into the dynamic user's outbox
-    check "CapabilityBoundingSet=CAP_NET_ADMIN CAP_DAC_OVERRIDE" in
-      egressCheckUnit(Exe).lines
+    # The check writes a root drop directory, not the dynamic user's
+    # outbox, so it holds CAP_NET_ADMIN alone (§13 decision 188).
+    check "CapabilityBoundingSet=CAP_NET_ADMIN" in egressCheckUnit(Exe).lines
 
   test "a confined run carries exactly the unit's confinement":
     let conf = EvidenceConf(sinkEndpoint: "10.0.2.100:7443",
