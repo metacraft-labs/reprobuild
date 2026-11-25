@@ -638,6 +638,8 @@
 ##                                           hold (decisions 171 and 177)
 ## ``restart-success-by-exit-code``        a restart's exit code is taken as
 ##                                           its outcome (round 11, H1)
+## ``dropin-refusal-before-writes-skipped``
+##     the refusal of a prefix or template drop-in that re-points triggers is not called before writes (round 15)
 ## ``interrupted-apply-unrecorded``
 ##     an apply that raises between its hold and its release records nothing (round 14, the known gap closed)
 ## ``trigger-targets-by-name``
@@ -2240,6 +2242,8 @@ const
                           "post-reload-requirers-released",
                           # A13 review round 11.
                           "restart-success-by-exit-code",
+                          # A13 review round 15.
+                          "dropin-refusal-before-writes-skipped",
                           # A13 review round 14.
                           "interrupted-apply-unrecorded",
                           "trigger-targets-by-name",
