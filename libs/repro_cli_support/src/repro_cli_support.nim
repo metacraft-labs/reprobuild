@@ -62509,6 +62509,17 @@ proc resolveRepoFetchUrl(workspaceRoot, repoAbsPath: string): string =
   if matched.isNone: return ""
   matched.get().fetchUrl
 
+proc logCachePushSkipped(workspaceRoot, diagnostic: string) =
+  ## Record a cache push that pushed nothing in the post-commit trace. Every
+  ## line of the trace is ``<ISO-8601 timestamp> <tag> <diagnostic>`` (the
+  ## shape ``repro health``'s ``lock-writer`` row reads), so the skip is
+  ## written in that shape under its own non-outcome tag, which that row
+  ## ignores. It used to be appended as bare text, which
+  ## broke the trace's shape and doubled its line count per commit in every
+  ## workspace without a shared bare.
+  appendPostCommitLog(workspaceRoot,
+    cachePushSkippedTraceLine(isoTimestampNow(), diagnostic))
+
 proc runCachePushCommand*(repoRoot, workspaceName: string): int =
   ## Internal entry point for the detached post-commit cache push:
   ## ``repro hooks cache-push --repo-root=PATH --workspace-name=NAME``.
@@ -62530,8 +62541,8 @@ proc runCachePushCommand*(repoRoot, workspaceName: string): int =
     if matched.isNone:
       # Say so: this return used to be silent, which made a repo outside the
       # resolved project set indistinguishable from a working push.
-      appendPostCommitLog(workspaceRoot,
-        "repro cache-push: skipped: " & repoAbs & " is not a repo of the " &
+      logCachePushSkipped(workspaceRoot,
+        repoAbs & " is not a repo of the " &
         "workspace's active projects (" & $repos.len & " repos resolved)")
       return 0
     # HL-6 (§7.2): evidence-only / source-secret repos are EXCLUDED from the
@@ -62546,8 +62557,7 @@ proc runCachePushCommand*(repoRoot, workspaceName: string): int =
     # the sync/init clone path — NOT the bare remote base (`fetchUrl`).
     let fetchUrl = cloneUrlFor(matched.get())
     if fetchUrl.len == 0:
-      appendPostCommitLog(workspaceRoot,
-        "repro cache-push: skipped: " & repoAbs & " resolves no clone URL")
+      logCachePushSkipped(workspaceRoot, repoAbs & " resolves no clone URL")
       return 0
     let cacheRoot = defaultCacheRoot(workspaceRoot)
     # Absolutized here because ``pushCacheRef`` will only push to an absolute
@@ -62562,8 +62572,7 @@ proc runCachePushCommand*(repoRoot, workspaceName: string): int =
     # No shared bare on disk → nothing to push into. Common before the
     # first ``init``/``shared-clones rewire`` wires the cache.
     if not dirExists(bare / "objects"):
-      appendPostCommitLog(workspaceRoot,
-        "repro cache-push: skipped: no shared bare at " & bare &
+      logCachePushSkipped(workspaceRoot, "no shared bare at " & bare &
         " (run `repro workspace shared-clones rewire`)")
       return 0
     let gitBin = findExe("git")
