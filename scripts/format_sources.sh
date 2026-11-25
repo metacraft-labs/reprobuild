@@ -77,11 +77,21 @@ printf '%s\0' "${nim_files[@]}" |
   xargs -0 -P "$jobs_n" -I{} bash -c '
     f=$1; scratch=$2; mode=$3
     out="$scratch/out.$$.nim"
+    again="$scratch/again.$$.nim"
+    # Publish only a fixed point: formatting the output again must change
+    # nothing, or `just format` would be followed by a `--check` that reports
+    # the file it just wrote. Such a file is refused like any other
+    # failure, and left unchanged.
     if ! nimpretty --out:"$out" "$f" >"$out.log" 2>&1 ||
         [ ! -f "$out" ] ||
         ! nimpretty --checkEquivalent:"$f" "$out" >>"$out.log" 2>&1; then
       printf "%s\n" "$f" >>"$scratch/failed"
       cat "$out.log" >&2
+    elif ! nimpretty --out:"$again" "$out" >>"$out.log" 2>&1 ||
+        ! cmp -s "$out" "$again"; then
+      printf "%s\n" "$f" >>"$scratch/failed"
+      cat "$out.log" >&2
+      printf "%s: formatted output is not a fixed point of the formatter\n" "$f" >&2
     elif ! cmp -s "$f" "$out"; then
       if [ "$mode" = check ]; then
         printf "%s\n" "$f" >>"$scratch/would_change"
@@ -96,7 +106,7 @@ printf '%s\0' "${nim_files[@]}" |
         rm -f "$staged"
       fi
     fi
-    rm -f "$out" "$out.log"
+    rm -f "$out" "$again" "$out.log"
   ' _ {} "$scratch" "$MODE"
 
 if [ -f "$scratch/failed" ]; then

@@ -26,6 +26,13 @@
 ##      keep their own outcome, with no explanation added and no health
 ##      finding.
 ##
+##   5. A chained hook that is missing or not executable is refused when the
+##      repository's `.pre-commit-config.yaml` installs that stage (its
+##      `default_install_hook_types`, or `pre-commit` when unset), naming the
+##      fix; it stays the silent "no local hook" when nothing installs the
+##      stage, when there is no configuration, and under a displaced
+##      dispatcher.
+##
 ## Test-double policy: the `repro` binary, `git`, `hooks ensure` and the
 ## commits and pushes are all real. The chained bodies are the condition under
 ## test: their shapes are those of the shims the installers write, with the
@@ -283,3 +290,127 @@ suite "chained hook that cannot start":
 
       let healthy = chainedHooksRow(reproBin, repo)
       check healthy{"status"}.getStr() == "ok"
+
+  test "t_declared_chained_hook_that_is_missing_is_refused":
+    # A repository that installs pre-commit and pre-push, whose installer
+    # chained only pre-commit: every push ran Reprobuild's gate alone, because
+    # a missing `.repro-local` was skipped without a word.
+    let gitBin = findExe("git")
+    if gitBin.len == 0 or findExe("sh").len == 0:
+      skip("git or sh not on PATH; this case commits and pushes in a real " &
+        "repository")
+    else:
+      let scratch = createTempDir("repro-chained-declared-", "")
+      defer: removeDir(scratch)
+      let reproBin = reproBinary()
+      let git = q(gitBin)
+      let remote = scratch / "remote.git"
+      let repo = scratch / "repo"
+      discard must(git & " init -q --bare -b main " & q(remote))
+      discard must(git & " init -q -b main " & q(repo))
+      discard must(git & " -C " & q(repo) &
+        " config user.email tester@example.invalid")
+      discard must(git & " -C " & q(repo) & " config user.name Tester")
+      discard must(git & " -C " & q(repo) & " remote add origin " & q(remote))
+      writeFile(repo / "README.md", "fixture\n")
+      discard must(git & " -C " & q(repo) & " add README.md")
+      discard must(git & " -C " & q(repo) & " commit -q -m fixture")
+      let ensured = run(q(reproBin) & " hooks ensure --vcs " & q(repo), repo)
+      if ensured.code != 0:
+        checkpoint("ensure output: " & ensured.output)
+      check ensured.code == 0
+      let hooksDir = repo / ".git" / "hooks"
+      let localPreCommit = hooksDir / "pre-commit.repro-local"
+      let localPrePush = hooksDir / "pre-push.repro-local"
+      let config = repo / ".pre-commit-config.yaml"
+      let marker = scratch / "chained-ran.txt"
+
+      let env = "env REPROBUILD_REPRO=" & q(reproBin) & " "
+      var serial = 0
+      proc commit(): tuple[code: int; output: string] =
+        inc serial
+        let name = "c" & $serial & ".txt"
+        writeFile(repo / name, name & "\n")
+        discard must(git & " -C " & q(repo) & " add " & q(name))
+        run(env & git & " -C " & q(repo) & " commit -q -m " & q(name))
+      proc push(): tuple[code: int; output: string] =
+        run(env & git & " -C " & q(repo) & " push -q origin HEAD:refs/heads/x")
+      proc remoteHasX(): bool =
+        run(git & " -C " & q(remote) &
+          " rev-parse --verify -q refs/heads/x").code == 0
+      const Refusal = "Refusing rather than skipping them."
+
+      # ---- pre-push declared, pre-commit chained, pre-push missing -----
+      writeFile(config, "default_install_hook_types: [pre-commit, pre-push]\n")
+      writeExecutable(localPreCommit,
+        "#!/usr/bin/env sh\necho ran >> " & q(marker) & "\n")
+      let committed = commit()
+      checkpoint("chained commit output: " & committed.output)
+      check committed.code == 0
+      check fileExists(marker)
+      let missing = push()
+      checkpoint("missing pre-push output: " & missing.output)
+      check missing.code != 0
+      check not remoteHasX()
+      check missing.output.contains("pre-push: .pre-commit-config.yaml " &
+        "installs the pre-push stage, but its chained hook " & localPrePush &
+        " does not exist")
+      check missing.output.contains(Refusal)
+      # The remedy is one line the operator pastes as it is.
+      check missing.output.contains("repro hooks: fix: `cd " & repo &
+        " && nix run nixpkgs#prek -- install --hook-type pre-push && " &
+        reproBin & " hooks ensure --vcs " & repo & "`\n")
+      check not missing.output.contains("chmod +x")
+
+      # Present but not executable: the same refusal, naming `chmod +x`.
+      writeFile(localPrePush, "#!/usr/bin/env sh\nexit 0\n")
+      let unexecutable = push()
+      checkpoint("non-executable pre-push output: " & unexecutable.output)
+      check unexecutable.code != 0
+      check not remoteHasX()
+      check unexecutable.output.contains(localPrePush & " is not executable")
+      check unexecutable.output.contains("--hook-type pre-push && ")
+      check unexecutable.output.contains("`chmod +x " & localPrePush & "`")
+      removeFile(localPrePush)
+
+      # ---- pre-commit by default, in each spelling --------------------
+      removeFile(localPreCommit)
+      for declaring in [
+          "repos: []\n",
+          "default_install_hook_types: ['pre-commit']  # the default\n",
+          "default_install_hook_types:\n  - pre-push\n  - \"pre-commit\"\n",
+          "default_install_hook_types:\n- pre-commit\nrepos: []\n"]:
+        writeFile(config, declaring)
+        let refused = commit()
+        checkpoint("declared pre-commit output: " & refused.output)
+        check refused.code != 0
+        check refused.output.contains("pre-commit: .pre-commit-config.yaml " &
+          "installs the pre-commit stage")
+        check refused.output.contains(Refusal)
+        discard must(git & " -C " & q(repo) & " reset -q")
+
+      # ---- nothing installs the stage: still silent -------------------
+      for silent in [
+          "default_install_hook_types: [pre-push]\n",
+          "default_install_hook_types: *types\n"]:
+        writeFile(config, silent)
+        let allowed = commit()
+        checkpoint("undeclared pre-commit output: " & allowed.output)
+        check allowed.code == 0
+        check not allowed.output.contains(Refusal)
+      removeFile(config)
+      let unconfigured = commit()
+      checkpoint("unconfigured commit output: " & unconfigured.output)
+      check unconfigured.code == 0
+      check not unconfigured.output.contains(Refusal)
+
+      # ---- displaced: the framework running `.legacy` ran its checks ---
+      writeFile(config, "repos: []\n")
+      moveFile(hooksDir / "pre-commit", hooksDir / "pre-commit.legacy")
+      writeExecutable(hooksDir / "pre-commit",
+        "#!/usr/bin/env sh\n" &
+        "exec \"$(dirname \"$0\")/pre-commit.legacy\" \"$@\"\n")
+      let displaced = commit()
+      checkpoint("displaced commit output: " & displaced.output)
+      check displaced.code == 0
+      check not displaced.output.contains(Refusal)

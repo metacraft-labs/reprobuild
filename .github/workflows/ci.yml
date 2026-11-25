@@ -1504,11 +1504,13 @@ jobs:
           bash scripts/ci_nix_builder_logs.sh run test-logs flake-metadata -- \
             dev-exec nix flake metadata --no-update-lock-file --json > /dev/null
       - name: Check the trace-format pin against CodeTracer's lock
-        # Decided at evaluation time, so it builds nothing: it fails when
-        # ``ct-trace-format-src`` is not the revision the pinned
-        # ``codetracer-src``'s ``repro.lock`` names (see the check in
-        # flake.nix). Nothing else would run it -- CI builds only
-        # ``.#default``, not ``checks.*``.
+        # Decided at evaluation time, so it builds nothing: it fails when the
+        # trace-format source is not the revision the pinned CodeTracer's
+        # ``repro.lock`` names, or when ``.github/sibling-repos`` clones
+        # either at another revision than pins/codetracer.json implies (see
+        # the check in flake.nix). CI builds only ``.#default``, not
+        # ``checks.*``; `just lint` runs the same comparison through
+        # scripts/check_sibling_lock_pins.py.
         run: |
           system="$(bash scripts/ci_nix_builder_logs.sh run test-logs current-system -- \
             dev-exec nix eval --impure --raw --expr builtins.currentSystem)"

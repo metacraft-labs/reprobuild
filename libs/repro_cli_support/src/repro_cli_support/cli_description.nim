@@ -4146,8 +4146,10 @@ proc reproCommandLineDescription*(): NimNode {.compileTime.} =
       boolFlag json is bool,
         help = "Print one JSON object (schema reprobuild.version.v1)"
     subcmd "completion", help = "Print a shell's completion script":
-      pos shell is string, values = ["bash", "zsh", "fish", "powershell"],
-        help = "The shell whose completion script to print"
+      pos shell is string,
+        values = ["bash", "zsh", "fish", "powershell", "pwsh"],
+        help = "The shell whose completion script to print (`pwsh` is " &
+          "`powershell`)"
 
     # ---- Role processes ----------------------------------------------------
     # The commands repro spawns of itself. Listed only by
