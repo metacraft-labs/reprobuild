@@ -20,7 +20,7 @@
 ## path ("the certificate signer closed the connection").
 ##
 ## Falsifying builds, each red under Nim 2.2.4 only, which
-## ``scripts/run_nim224_lane.sh`` builds this test with:
+## ``scripts/run_nim_floor_lane.sh`` builds this test with:
 ## ``signer-close-in-finally`` (the server's close in the ``finally``, as
 ## before: ``failedConnections`` counts the first early return) and
 ## ``signer-constant-tuple-return`` (that refusal as a constant literal,

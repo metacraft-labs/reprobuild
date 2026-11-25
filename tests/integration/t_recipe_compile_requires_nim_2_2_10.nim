@@ -37,8 +37,12 @@ proc runList(reproBin, recipe: string; compiler: string): tuple[output: string,
   for key, value in envPairs():
     env[key] = value
   env["REPRO_NIM_COMPILER"] = compiler
+  # `--no-runquota`: the refusal under test happens before any action runs,
+  # and a RunQuota daemon that cannot start in a sandbox would fail the
+  # command first for a reason that has nothing to do with the compiler.
   execCmdEx(quoteShellCommand([reproBin, "build", "--list-targets",
-    "--daemon=off", "--tool-provisioning=path", recipe]), env = env)
+    "--no-runquota", "--daemon=off", "--tool-provisioning=path", recipe]),
+    env = env)
 
 when defined(windows):
   suite "recipe compile requires Nim 2.2.10":

@@ -92,7 +92,7 @@ proc engineBin*(): string =
   ## test helpers; converting the others is a milestone of its own
   ## (reprobuild-pm issue 2026-11-07-tests-run-build-bin-helpers-without-
   ## checking-they-are-built-from-the-tree). Under ``$REPRO_TEST_BUILD_DIR``
-  ## when set, like the sink: the Nim 2.2.4 lane builds its own engine there.
+  ## when set, like the sink: the Nim floor lane builds its own engine there.
   helperBuildDir(repoRootDir()) / "bin" / addFileExt("reprobuild", ExeExt)
 
 proc newTestNode*(base, name: string): TestNode =

@@ -476,7 +476,7 @@ scripts/regenerate_suite_artifacts.py	2
 scripts/release/stage_release_macos_tools.sh	1
 scripts/repro_binary_reachability.nim	1
 scripts/reprobuild_suite_inventory.py	2
-scripts/run_nim224_lane.sh	2
+scripts/run_nim_floor_lane.sh	2
 scripts/run_tests.sh	2
 scripts/run_tests_windows.ps1	1
 scripts/uninvoked-shell-tests-baseline.txt	1
@@ -766,7 +766,7 @@ tests/unit/test_ci_test_budget.py	1
 tests/unit/test_daemon_worker_confinement_systemd_analyze.py	3
 tests/unit/test_graph_owned_test_artifacts.py	2
 tests/unit/test_lint_gate_ordering.py	1
-tests/unit/test_nim224_lane_selection.py	2
+tests/unit/test_nim_floor_lane_selection.py	2
 tests/unit/test_nix_daemon_descriptors.py	2
 tests/unit/test_nix_daemon_runs_nix_with_the_requesting_clients_configuration.py	1
 tests/unit/test_package_nix_pending_sources.py	1
