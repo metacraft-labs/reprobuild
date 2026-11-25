@@ -2038,6 +2038,7 @@ tests/integration/t_cloud_attestation_launch_manifest_identity.nim	nim	28
 tests/integration/t_cmake_fresh_configure.nim	nim	1
 tests/integration/t_cmake_install_mirror_tools.nim	nim	1
 tests/integration/t_commit_gate_defaults_to_gate_mode.nim	nim	1
+tests/integration/t_commit_keeps_a_lock_ahead_of_the_shared_siblings.nim	nim	4
 tests/integration/t_commit_records_the_sibling_revision_the_shell_actually_used.nim	nim	3
 tests/integration/t_commit_refuses_a_backward_sibling_pin.nim	nim	10
 tests/integration/t_commit_repin_plans_both_locks.nim	nim	7
@@ -2729,7 +2730,7 @@ tests/integration/t_shorthand_equals_to.nim	nim	1
 tests/integration/t_sibling_exact_pin_guidance.nim	nim	4
 tests/integration/t_signer_roster_rotation_and_revocation.nim	nim	22
 tests/integration/t_single_platform_entries_declare_platforms.nim	nim	8
-tests/integration/t_skip_lock_refresh_leaves_the_flake_lock_alone.nim	nim	1
+tests/integration/t_skip_lock_refresh_leaves_the_flake_lock_alone.nim	nim	2
 tests/integration/t_skip_lock_refresh_leaves_the_repro_lock_alone.nim	nim	1
 tests/integration/t_snp_agent_backend.nim	nim	42
 tests/integration/t_snp_chain_requires_amd_root.nim	nim	27

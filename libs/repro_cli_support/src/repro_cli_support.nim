@@ -27220,17 +27220,17 @@ proc runHooksDispatchCommand(c: ReproCommandLineHooksDispatch): int =
     # `repro.lock` from the sibling revisions actually checked out, and STAGE
     # them, so the locks are files of the revision being formed (§13.1).
     #
-    # A non-zero status here ABORTS `git commit`, and it is returned for three
-    # reasons only (see `runPreCommitLockCommand`): the re-pin would move a
-    # sibling's pin BACKWARD and `REPRO_ALLOW_PIN_REGRESSION` does not name
-    # that sibling (§13.3, "A pin never moves backward silently"); a recipe
-    # constraint excludes the revision a sibling checkout is at (§16.4: the
-    # re-pin moves lock resolutions, never a constraint); or the recipe and the
-    # locks are inconsistent (§16.3 H1 / H2). Nothing else this hook meets is a
-    # reason to reject a developer's work: a dirty sibling skips the flake refresh
+    # A non-zero status here ABORTS `git commit`, and it is returned for two
+    # reasons only (see `runPreCommitLockCommand`): a recipe constraint
+    # excludes the revision a sibling checkout is at (§16.4: the re-pin moves
+    # lock resolutions, never a constraint); or the recipe and the locks are
+    # inconsistent (§16.3 H1 / H2). Nothing else this hook meets is a reason
+    # to reject a developer's work: a sibling checkout behind, diverged from or
+    # lacking its pin keeps the pin with a notice (§13.3, "What 'backward' is
+    # judged against"), a dirty sibling skips the flake refresh
     # (Nix-Flake-Coexistence.md §4 "Dirty siblings") and is pinned at its HEAD
     # in `repro.lock` with a warning (§13.3, "Dirty siblings are recorded and
-    # said out loud"), neither of which refuses the commit, and every other
+    # said out loud"), none of which refuses the commit, and every other
     # failure is a tooling fault, logged. The PUSH is where a stale
     # pin is refused (NF-3, §13.5), because that is the boundary where a wrong
     # pin can reach somebody else.
@@ -62961,16 +62961,32 @@ proc probePostCommitPublication(identity: GitToolIdentity;
 #   * unprovable — the pinned commit is absent from the checkout, so the
 #                  direction cannot be decided.
 #
-# The last three would move a published pin backward (or sideways, which drops
-# the pin's own commits just the same), so the commit is REFUSED unless the
-# committer names the sibling in `REPRO_ALLOW_PIN_REGRESSION` for that one
-# commit. A sibling behind its pin almost always means a stale checkout rather
-# than a chosen downgrade, and a hook that re-pinned it silently would turn "my
-# checkout is old" into "the published lock is old" for every consumer.
+# Recording the checkout for the last three would move a published pin
+# backward (or sideways, which drops the pin's own commits just the same), so
+# it happens only when the committer names the sibling in
+# `REPRO_ALLOW_PIN_REGRESSION` for that one commit. A sibling behind its pin
+# almost always means a stale checkout rather than a chosen downgrade, and a
+# hook that re-pinned it silently would turn "my checkout is old" into "the
+# published lock is old" for every consumer.
 #
-# Both locks answer through the classifier, the refusal text and the variable
-# below, so the two refreshes cannot grow different opinions about what a
-# regression is or how to allow one.
+# What happens otherwise depends on the site (§13.3, "What 'backward' is judged
+# against", amended 2026-11-25):
+#
+#   * the managed `pre-commit` hook KEEPS the pin: the entry (or `flake.lock`
+#     node) is committed exactly as the lock records it, a notice names the
+#     sibling and the remedies, and the commit proceeds. Backward is a
+#     property of the commit — it moves a pin older than the lock already
+#     carries — not of a checkout, and keeping the pin moves nothing. Refusing
+#     here made a repository whose lock is ahead of a shared workspace root's
+#     checkouts (they sit at another project's pins) uncommittable from it;
+#   * the HL-10 lock-update node and the explicit door (`repro lock refresh`)
+#     REFUSE: each is about to make a recorded claim from the checkouts, so
+#     keeping the pin there would certify or record a state that does not
+#     match them.
+#
+# Both locks answer through the classifier, the refusal and kept-pin texts and
+# the variable below, so the two refreshes cannot grow different opinions about
+# what a regression is or how to allow one.
 
 const PinRegressionAllowEnv* = "REPRO_ALLOW_PIN_REGRESSION"
   ## `REPRO_ALLOW_PIN_REGRESSION=<sibling>[,<sibling>…] git commit …`. An
@@ -63366,9 +63382,12 @@ proc renderPinRegressionRefusal*(refused: openArray[PinRegression];
   ## then the usual course (bring the checkout forward) and the deliberate one
   ## (`REPRO_ALLOW_PIN_REGRESSION`), with when each is appropriate.
   ##
-  ## ``action`` is what was refused: ``"commit"`` (the managed `pre-commit`
-  ## hook) or ``"refresh"`` (`repro lock refresh`). For a refresh, ``rerun``
-  ## is the command that repeats it with the regressing siblings allowed.
+  ## ``action`` is what was refused: ``"lock update"`` (the HL-10 node),
+  ## ``"refresh"`` (`repro lock refresh`), or ``"commit"`` (the default, for a
+  ## caller acting inside `git commit`; the managed `pre-commit` hook itself
+  ## keeps such pins instead, ``renderPinRegressionKeptNotice``). With a
+  ## ``rerun``, it is the command that repeats the action with the regressing
+  ## siblings allowed.
   ##
   ## A move whose direction could not be judged (``sprUnknown``) is refused
   ## too, failing closed, but it is not called backward: the refusal says
@@ -63452,6 +63471,53 @@ proc renderPinRegressionRefusal*(refused: openArray[PinRegression];
   result.add("  It is NOT appropriate when you have not pulled, or do not " &
     "know why the sibling is behind: read what the commit would drop first.")
 
+proc pinRegressionKeptCommitCourse*(sibling: string): string =
+  ## The deliberate course a kept-pin notice names, for `repro.lock` and
+  ## `flake.lock` alike: amend the commit the notice was printed for, with
+  ## the sibling named, so the hook runs again over it and records the
+  ## checkout's revision. A plain `git commit` would not do: with nothing
+  ## else staged, git reports "nothing to commit" although the hook stages
+  ## the re-pinned lock.
+  PinRegressionAllowEnv & "=" & pinRegressionShellWord(sibling) &
+    " git commit --amend --no-edit"
+
+proc renderPinRegressionKeptNotice*(r: PinRegression; workspaceRoot: string;
+    identity: GitToolIdentity): string =
+  ## The managed `pre-commit` hook's notice for ONE sibling whose checkout is
+  ## behind, diverged from, or lacks the pin the lock carries, when
+  ## `REPRO_ALLOW_PIN_REGRESSION` does not name it (§13.3, "What the hook
+  ## prints for a kept pin"). One line, printed on stderr and logged as a
+  ## `repro-lock kept-pin:` line: the sibling, the relation and its distance,
+  ## both revisions, that the pin was kept and the commit proceeds, the
+  ## forward command(s) — the same ``pinRegressionForwardCommands`` the
+  ## refusal prints — and the variable for recording the checkout
+  ## deliberately. Backticks hold runnable command lines only.
+  ##
+  ## The deliberate course is ``pinRegressionKeptCommitCourse``: the notice
+  ## is printed for a commit that went through, so the command amends THAT
+  ## commit, re-running the hook over it with the sibling named.
+  result = pinRegressionSubject(r) & ": " & pinRegressionDistance(r)
+  if r.relation == sprUnprovable:
+    # The distance already names the pinned commit and the checkout.
+    result.add(" (observed " & r.observed & ")")
+  else:
+    result.add(" (pinned " & r.pinned & ", observed " & r.observed &
+      (if r.path.len > 0: ", checkout " & remedyProsePath(r.path) else: "") &
+      ")")
+  result.add(". The checkout does not contain the pinned commit, so there " &
+    "is nothing to advance the pin to; the pin was kept as the lock " &
+    "records it and the commit proceeds.")
+  let forward = pinRegressionForwardCommands(r, workspaceRoot, identity)
+  if forward.len > 0:
+    let lead =
+      if r.relation == sprUnprovable: " To fetch it so the direction can be " &
+        "decided: `"
+      else: " To bring the checkout forward: `"
+    result.add(lead & forward.join("` or `") & "`.")
+  result.add(" To record the checkout's revision deliberately instead, in " &
+    "the commit just made: `" & pinRegressionKeptCommitCourse(r.sibling) &
+    "`.")
+
 proc pinRegressionAllowanceNotes*(allowance: PinRegressionAllowance;
     used, examined: openArray[string]; action = "commit"): seq[string] =
   ## A name in `REPRO_ALLOW_PIN_REGRESSION` that allowed nothing is ignored
@@ -63474,7 +63540,7 @@ proc refreshFlakeLockAtCommit*(workspaceRoot, currentRepo: string;
   toolProvisioning: ToolProvisioningMode;
   allowRegression: seq[string] = @[]; planOnly = false;
   label = "repro pre-commit"; deriveFields = true;
-  announce = true): FlakeCommitRefresh
+  announce = true; refuseRegressions = true): FlakeCommitRefresh
   ## NF-2 — forward declaration. The implementation lives beside the rest of
   ## the flake-coexistence code far below (it needs the NF-1 override-set
   ## machinery); the commit hook that drives it is here.
@@ -64047,12 +64113,14 @@ proc runPostCommitLockCommand*(currentRepo: string): int =
 # a missing `git`. Those paths return 0 and say what happened in
 # `pre-commit-lock.log`; the PUSH is where a stale pin is refused (NF-3).
 #
-# The exception is a re-pin that would move a pin BACKWARD (§3.2 "Rule, at
-# commit"; Unified-Locking-And-Hooks.md §13.3): a sibling behind its pin,
-# diverged from it, or missing the pinned commit refuses the commit unless
-# `REPRO_ALLOW_PIN_REGRESSION` names it. Committing a downgrade is a different
-# act from testing one, and a stale checkout must not become a stale published
-# lock.
+# A re-pin that would move a pin BACKWARD (§3.2 "Rule, at commit";
+# Unified-Locking-And-Hooks.md §13.3) is not one either, since 2026-11-25: a
+# sibling behind its pin, diverged from it, or missing the pinned commit keeps
+# the pin (the input is withheld, its node byte-identical, with a notice)
+# unless `REPRO_ALLOW_PIN_REGRESSION` names it. Committing a downgrade is a
+# different act from testing one, and a stale checkout must not become a stale
+# published lock — but a checkout older than the pin is not the commit moving
+# it backward. The refusals this hook still makes are §16.4's and §16.3 H1/H2.
 
 # ---------------------------------------------------------------------------
 # `.github/sibling-repos` follows `flake.lock`
@@ -65154,7 +65222,15 @@ type
     warnings: seq[string]
     refused: seq[PinRegression]
       ## siblings whose pin would move backward and were not named in
-      ## `REPRO_ALLOW_PIN_REGRESSION`; their entries are left untouched
+      ## `REPRO_ALLOW_PIN_REGRESSION`; their entries are left untouched.
+      ## Empty with ``keepNonAdvancing`` (the hook), which fills ``kept``.
+    kept: seq[PinRegression]
+      ## ``keepNonAdvancing`` only (the managed `pre-commit` hook): siblings
+      ## whose checkout is behind, diverged from or lacks the pin and that
+      ## the variable did not name. Their entries are left exactly as the
+      ## lock records them and nothing is refused for them (§13.3, "What
+      ## 'backward' is judged against"); they are not in ``moves``, so §16.3
+      ## H3 sees the repository as unmoved in `repro.lock`.
     allowed: seq[PinRegression]
       ## siblings whose pin moves backward because the variable named them
     examined: seq[string]     ## every sibling name this re-pin considered
@@ -65270,7 +65346,8 @@ proc holdCommittedLockEntries(plan: var CommittedLockRepinPlan;
   summarizeCommittedLockRepin(plan)
 
 proc planCommittedLockRepin(repoRoot: string;
-    allowRegression: openArray[string]): CommittedLockRepinPlan =
+    allowRegression: openArray[string];
+    keepNonAdvancing = false): CommittedLockRepinPlan =
   ## §13.3 — the commit-path re-pin of a committed ``repro.lock``, computed
   ## but not written. Observation only: existing non-root VCS entries whose
   ## checkout is present are re-observed; nothing is added or removed, the
@@ -65281,11 +65358,16 @@ proc planCommittedLockRepin(repoRoot: string;
   ## longer exist (owner decision 2026-11-05).
   ##
   ## A pin never moves backward silently: an entry whose checkout is behind
-  ## its pin, has diverged from it, or lacks the pinned commit is REFUSED
-  ## unless ``allowRegression`` names it, and a refused entry is left exactly
-  ## as it is. An entry whose direction cannot be computed at all (a git
-  ## failure) is left alone and said to be, without refusing — a malfunction
-  ## is not a regression.
+  ## its pin, has diverged from it, or lacks the pinned commit is re-pinned
+  ## only when ``allowRegression`` names it. Otherwise it is left exactly as
+  ## it is and lands in ``refused`` — the HL-10 lock-update node and the
+  ## explicit door refuse on it — or, with ``keepNonAdvancing`` (set by the
+  ## managed `pre-commit` hook alone), in ``kept``: the hook keeps the pin
+  ## and the commit proceeds, because a checkout older than the pin is not a
+  ## commit moving it backward (§13.3, "What 'backward' is judged against").
+  ## An entry whose direction cannot be computed at all (a git failure) is
+  ## left alone and said to be, without refusing — a malfunction is not a
+  ## regression.
   ##
   ## Each entry the plan moves or adds is listed in ``moves``, so the hook can
   ## hold a repository back when `flake.lock` or a recipe constraint does not
@@ -65344,7 +65426,8 @@ proc planCommittedLockRepin(repoRoot: string;
               relation: o.relation, aheadBy: o.aheadBy, behindBy: o.behindBy,
               pinned: pinned, observed: fresh.coordinates.revision)
             if o.name notin allowRegression:
-              result.refused.add(reg)
+              if keepNonAdvancing: result.kept.add(reg)
+              else: result.refused.add(reg)
               break
             result.allowed.add(reg)
           else:
@@ -65936,6 +66019,23 @@ proc preCommitReproLock(site: CommitTimeWriterSite;
   if plan.warnings.len > 0:
     line.add("; " & plan.warnings.join("; "))
   appendCommitTimeWriterLog(site, workspaceRoot, line)
+  # §13.3 "What the hook prints for a kept pin": one notice per sibling the
+  # hook kept (only the hook plans with ``keepNonAdvancing``), on both
+  # channels. Only when the commit proceeds — the notice says it does; a
+  # commit refused for another reason reports that reason instead.
+  if plan.kept.len > 0 and apply:
+    var identity: GitToolIdentity
+    try:
+      identity = ensureGitToolResolvable(tpmPathOnly, getEnv("PATH"))
+    except CatchableError:
+      # The re-pin already resolved git to classify these siblings; were it
+      # to vanish now, only the upstream name in the forward command is lost.
+      discard
+    for r in plan.kept:
+      let notice = renderPinRegressionKeptNotice(r, workspaceRoot, identity)
+      stderr.writeLine(label & ": " & notice)
+      appendCommitTimeWriterLog(site, workspaceRoot, timestamp &
+        " repro-lock kept-pin: " & notice)
 
 # ---------------------------------------------------------------------------
 # Test-Certificates TC-9b — the `[certificate_policy]` snapshot in repro.lock.
@@ -66102,8 +66202,12 @@ proc preCommitFlakeLock(site: CommitTimeWriterSite;
   ## once the caller knows both locks agree and nothing refuses.
   let label = commitTimeWriterLabel(site)
   try:
+    # The hook WITHHOLDS an input whose checkout is behind, diverged from or
+    # lacks its pin (node byte-identical, the withholding notice printed);
+    # the lock-update node refuses on it (Nix-Flake-Coexistence.md §3.2).
     result = refreshFlakeLockAtCommit(workspaceRoot, repoRoot,
-      toolProvisioning, allowRegression, planOnly = true, label = label)
+      toolProvisioning, allowRegression, planOnly = true, label = label,
+      refuseRegressions = site != ctwsPreCommitHook)
   except CatchableError as err:
     # Belt and braces: the refresh already downgrades its own failures, and a
     # raise reaching here would still not be a reason to reject the commit.
@@ -66622,7 +66726,7 @@ proc planCommitTimeLockWriters*(workspaceRoot, repoRoot: string;
     toolProvisioning: ToolProvisioningMode;
     allowance: PinRegressionAllowance;
     certificatePolicy = CertificatePolicySnapshotPlan();
-    announce = true):
+    announce = true; site = ctwsLockUpdateNode):
     CommitTimeWritersPlan =
   ## The would-write predicate (HL-10): what ``applyCommitTimeLockWriters``
   ## would do to ``repoRoot`` now, for each writer the managed `pre-commit`
@@ -66630,6 +66734,14 @@ proc planCommitTimeLockWriters*(workspaceRoot, repoRoot: string;
   ## `flake.lock` refresh (§13.6). Writes nothing and stages nothing. (The
   ## Pre-Commit-Check-Sets PCS-5 managed block is not built; when it is, it
   ## is a third writer and is planned here too.)
+  ##
+  ## ``site`` is whose rules to plan by. The lock-update node (the default)
+  ## refuses on a pin regression, so a regressing sibling comes back in
+  ## ``refused`` and — for `flake.lock`, which then plans nothing — keeps the
+  ## other inputs out of ``wouldWrite``. ``ctwsPreCommitHook`` (the
+  ## `REPRO_SKIP_LOCK_REFRESH` notice) plans as the hook does: such a pin is
+  ## kept and the inputs that advance are still reported as would-writes
+  ## (§13.3, "What 'backward' is judged against").
   ##
   ## It does not run the HL-11 reconciliation of the two plans (§16.3 H3), so
   ## it may report a lock the writers then hold back. That over-estimate is
@@ -66646,7 +66758,8 @@ proc planCommitTimeLockWriters*(workspaceRoot, repoRoot: string;
   let hasReproLock = commitTimeHasReproLock(root)
   if hasReproLock:
     try:
-      let plan = planCommittedLockRepin(root, allowance.names)
+      let plan = planCommittedLockRepin(root, allowance.names,
+        keepNonAdvancing = site == ctwsPreCommitHook)
       let failure = committedLockRepinFailure(plan)
       if failure.len > 0:
         result.failures.add(failure)
@@ -66660,8 +66773,9 @@ proc planCommitTimeLockWriters*(workspaceRoot, repoRoot: string;
     try:
       flake = refreshFlakeLockAtCommit(workspaceRoot, root, toolProvisioning,
         allowance.names, planOnly = true,
-        label = commitTimeWriterLabel(ctwsLockUpdateNode),
-        deriveFields = false, announce = announce)
+        label = commitTimeWriterLabel(site),
+        deriveFields = false, announce = announce,
+        refuseRegressions = site != ctwsPreCommitHook)
     except CatchableError as err:
       flake.failure = "flake-lock error: " & err.msg
     if flake.failure.len > 0:
@@ -66806,8 +66920,11 @@ proc applyCommitTimeLockWriters*(site: CommitTimeWriterSite;
   ## `flake.lock` refresh (§13.6). The managed `pre-commit` hook and the
   ## HL-10 lock-update node both call this, and nothing else writes a lock
   ## on either path. Under the same rules for both: no solve, write only on
-  ## change, and a pin regression the allowance does not name refuses and
-  ## writes NEITHER lock.
+  ## change. They differ on a sibling whose checkout is behind, diverged from
+  ## or lacks its pin and that the allowance does not name: the lock-update
+  ## node refuses and writes NEITHER lock; the hook keeps that pin (entry and
+  ## `flake.lock` node unchanged, a notice per sibling) and the commit
+  ## proceeds (§13.3, "What 'backward' is judged against").
   ##
   ## ONE PLAN OVER BOTH LOCKS (§16.3 H3). The two re-pins are each PLANNED by
   ## their own code (a few local git queries per sibling), and neither writes.
@@ -66818,7 +66935,7 @@ proc applyCommitTimeLockWriters*(site: CommitTimeWriterSite;
   ## leave must then be consistent with their recipes and with each other
   ## (§16.3 H1 / H2, ``inconsistencies``). Only when nothing refuses is
   ## anything written — so a refusal leaves the tree and the index exactly as
-  ## it found them, and every regression in both locks is reported at once.
+  ## it found them, and every reason in both locks is reported at once.
   ##
   ## Prints what it changes and the allowance notes; the caller renders a
   ## refusal (its wording depends on what was refused: a commit, or a lock
@@ -66834,7 +66951,9 @@ proc applyCommitTimeLockWriters*(site: CommitTimeWriterSite;
   var reproPlanned = false
   if hasReproLock:
     try:
-      reproPlan = planCommittedLockRepin(repoRoot, allowance.names)
+      # Only the hook keeps a non-advancing pin; the node refuses on it.
+      reproPlan = planCommittedLockRepin(repoRoot, allowance.names,
+        keepNonAdvancing = site == ctwsPreCommitHook)
       reproPlanned = true
       let failure = committedLockRepinFailure(reproPlan)
       if failure.len > 0:
@@ -67019,18 +67138,24 @@ proc applyCommitTimeLockWriters*(site: CommitTimeWriterSite;
 proc runPreCommitLockCommand*(currentRepo: string): int =
   ## ``repro hooks dispatch pre-commit --repo-root=<repo>`` routes here.
   ##
-  ## Returns 0 — the commit proceeds — except in three cases, each of which
+  ## Returns 0 — the commit proceeds — except in two cases, each of which
   ## returns 1 so git refuses the commit, with nothing written or staged:
   ##
-  ## * a re-pin would move a sibling's pin BACKWARD (the checkout is behind
-  ##   the pin, has diverged from it, or lacks the pinned commit), unless
-  ##   ``REPRO_ALLOW_PIN_REGRESSION`` names that sibling
-  ##   (Unified-Locking-And-Hooks.md §13.3, Nix-Flake-Coexistence.md §3.2);
   ## * a recipe constraint excludes the revision a sibling checkout is at
   ##   (§16.4): the re-pin moves lock resolutions only, never a constraint;
   ## * the recipe and the locks the commit carries are inconsistent (§16.3 H1
   ##   / H2, ``checkRecipeLockConsistency``), which no variable waives. This
   ##   one is also checked outside an initialised workspace.
+  ##
+  ## A sibling whose checkout is behind its pin, has diverged from it, or
+  ## lacks the pinned commit is NOT a reason to refuse: the pin is kept as
+  ## the lock records it (the `flake.lock` input withheld), one notice per
+  ## sibling names the remedies, and the commit proceeds — unless
+  ## ``REPRO_ALLOW_PIN_REGRESSION`` names that sibling, which records the
+  ## checkout's revision (Unified-Locking-And-Hooks.md §13.3, "What
+  ## 'backward' is judged against"; Nix-Flake-Coexistence.md §3.2). It used
+  ## to refuse the commit, which made a repository whose lock is ahead of a
+  ## shared workspace root's checkouts uncommittable from that root.
   ##
   ## Every other failure is logged to ``pre-commit-lock.log`` and the commit
   ## proceeds.
@@ -67138,14 +67263,19 @@ proc runPreCommitLockCommand*(currentRepo: string): int =
   # index exactly as for a commit made outside a workspace.
   if skipLockRefreshRequested(getEnv(SkipLockRefreshEnv)):
     var would: seq[string]
-    var regressions: seq[string]
     try:
+      # Planned by the hook's rules: a regressing sibling would only have
+      # been kept (§13.3), so it is neither something this commit would have
+      # written nor a refusal it escaped, and the notice says nothing about
+      # it — while the siblings that advance beside it are still reported.
+      # (By the lock-update node's rules a `flake.lock` regression would plan
+      # nothing at all and hide them.)
       let plan = planCommitTimeLockWriters(workspaceRoot, repoRoot,
-        parsed.toolProvisioning, allowance, announce = false)
+        parsed.toolProvisioning, allowance, announce = false,
+        site = ctwsPreCommitHook)
       for path in plan.wouldWrite:
         let name = extractFilename(path)
         if name notin would: would.add(name)
-      for r in plan.refused: regressions.add(r.lock & " " & r.sibling)
     except CatchableError:
       # The plan is a courtesy for the message; the skip does not depend on it.
       discard
@@ -67156,10 +67286,6 @@ proc runPreCommitLockCommand*(currentRepo: string): int =
          "checkouts and staged, and " &
          (if would.len > 1: "were" else: "was") & " left exactly as committed"
        else: "no lock needed re-pinning") &
-      (if regressions.len > 0:
-         " (the refresh would have REFUSED this commit over a backward pin: " &
-         regressions.join(", ") & ")"
-       else: "") &
       ". Nothing was written or staged. The pre-push gate refuses a lock " &
       "that lags its sibling checkouts, so record the pins before pushing — " &
       "with a later commit made without " & SkipLockRefreshEnv &
@@ -100688,9 +100814,12 @@ proc refreshForeignPlatformLockPins(projectDir, lockP, lockPlatform,
   ## present is re-observed, missing develop-set siblings are added, nothing
   ## is removed, the root entry is untouched, and only the `deps` line is
   ## rewritten, so the solve and the platform stay byte-identical. It is
-  ## held to the same rules as the hook: a pin never moves backward unless
+  ## held to the hook's rules, except that a pin never moves backward unless
   ## ``--allow-pin-regression`` / ``REPRO_ALLOW_PIN_REGRESSION`` names it
-  ## (exit 4, nothing written), a repository `flake.lock` also resolves
+  ## and is otherwise REFUSED (exit 4, nothing written) where the hook keeps
+  ## it: this records the checkouts, so keeping the pin would record a state
+  ## that does not match them (§13.3, "Where the refusal still applies"); a
+  ## repository `flake.lock` also resolves
   ## moves in both locks or in neither (§16.3 H3; this verb never writes
   ## `flake.lock`, so such a repository is held and named), a recipe
   ## constraint excluding the observed revision refuses (§16.4), and the
@@ -106955,8 +107084,9 @@ type
       ## Inputs whose pin the refresh would move BACKWARD (behind, diverged,
       ## or a pinned commit absent from the checkout) and that
       ## `REPRO_ALLOW_PIN_REGRESSION` did not name. Filled only when the
-      ## caller asks for regressions to refuse (the commit path); when it is
-      ## non-empty nothing was written (§3.2 "Rule, at commit").
+      ## caller asks for regressions to refuse (the HL-10 lock-update node);
+      ## when it is non-empty nothing was written. The managed `pre-commit`
+      ## hook withholds them instead (§3.2 "Rule, at commit").
     allowed*: seq[PinRegression]
       ## Inputs whose pin DID move backward because it was asked for — named
       ## in `REPRO_ALLOW_PIN_REGRESSION`, or a behind row under the verb's
@@ -107060,7 +107190,7 @@ proc flakeRefreshDirtyScope(workspaceRoot, currentRepo: string;
     result.add((name: name, path: pathOf[name]))
 
 proc flakeWithheldNotice(row: FlakeOverrideStateRow;
-    flakeRoot, workspaceRoot: string): string =
+    flakeRoot, workspaceRoot: string; commitAllowance = false): string =
   ## The §3.2 announcement for ONE input whose pin the refresh declined to move.
   ##
   ## Naming the sibling, the DISTANCE and the reconciling command is the rule
@@ -107102,6 +107232,11 @@ proc flakeWithheldNotice(row: FlakeOverrideStateRow;
       "` first, since publication is judged from local remote-tracking refs " &
       "alone and never over the network.")
     return
+  # At commit (``commitAllowance``) the deliberate course is the variable on
+  # an amend of the commit just made, the one `repro.lock`'s kept-pin notice
+  # names (§3.2, Unified-Locking-And-Hooks.md §13.3); the verb's is its own
+  # flag.
+  let commitCourse = pinRegressionKeptCommitCourse(row.input)
   case row.relation
   of fprBehind:
     result.add("Recording this checkout's HEAD would file a DOWNGRADE nobody " &
@@ -107112,7 +107247,8 @@ proc flakeWithheldNotice(row: FlakeOverrideStateRow;
       " run: `" &
       flakeReconcileCommand(row, flakeRoot, workspaceRoot) &
       "` — or, to record the downgrade deliberately, `" &
-      flakeReconcileAlternative(row, flakeRoot, workspaceRoot) & "`")
+      (if commitAllowance: commitCourse
+       else: flakeReconcileAlternative(row, flakeRoot, workspaceRoot)) & "`")
   of fprDiverged:
     result.add("Recording this checkout's HEAD would replace the pin with a " &
       "revision that lacks the pin's own commits — the history was rebased, " &
@@ -107122,7 +107258,8 @@ proc flakeWithheldNotice(row: FlakeOverrideStateRow;
       remedyProsePath(flakeRoot) & " run: `" &
       flakeReconcileCommands(row, flakeRoot, workspaceRoot).join("` then `") &
       "` — or, to record this revision deliberately, `" &
-      flakeReconcileAlternative(row, flakeRoot, workspaceRoot) & "`")
+      (if commitAllowance: commitCourse
+       else: flakeReconcileAlternative(row, flakeRoot, workspaceRoot)) & "`")
   else:
     result.add("A pin that cannot be classified must not be filed: recording " &
       "this checkout's HEAD would commit to whichever direction happened to " &
@@ -107130,7 +107267,11 @@ proc flakeWithheldNotice(row: FlakeOverrideStateRow;
       "an error: nothing was written and no operation was refused. From " &
       remedyProsePath(flakeRoot) & " run: `" &
       flakeReconcileCommand(row, flakeRoot, workspaceRoot) &
-      "`, then re-run the refresh to learn where this sibling really stands.")
+      "`, then re-run the refresh to learn where this sibling really stands" &
+      (if commitAllowance and row.relation == fprUnfetched:
+         " — or, to record this checkout's revision deliberately, `" &
+           commitCourse & "`"
+       else: "") & ".")
 
 proc executeFlakeLockRefresh(flakeRoot, workspaceRoot, currentRepo: string;
     developSet: DevelopSetSelection; suffixes: openArray[string];
@@ -107139,6 +107280,7 @@ proc executeFlakeLockRefresh(flakeRoot, workspaceRoot, currentRepo: string;
     label = flakeRefreshLockLabel;
     allowRegression: seq[string] = @[];
     refuseRegressions = false;
+    commitAllowance = false;
     planOnly = false;
     preset = none(FlakeDevelopSelection);
     deriveFields = true;
@@ -107163,9 +107305,15 @@ proc executeFlakeLockRefresh(flakeRoot, workspaceRoot, currentRepo: string;
   ## "Regressions"): a row that is behind its pin, has diverged from it, or
   ## whose pinned commit is absent is recorded only when ``allowRegression``
   ## names its input (`REPRO_ALLOW_PIN_REGRESSION`), or — for a behind row —
-  ## under the verb's ``recordDowngrade``. Otherwise the commit hook
-  ## (``refuseRegressions``) gets it back in ``refused`` with NOTHING written,
-  ## and the verb withholds that input and writes the rest.
+  ## under the verb's ``recordDowngrade``. Otherwise a caller that asks for
+  ## ``refuseRegressions`` (the HL-10 lock-update node) gets it back in
+  ## ``refused`` with NOTHING written, and every other caller — the verb, and
+  ## the managed `pre-commit` hook — withholds that input (its node
+  ## byte-identical) and writes the rest. ``commitAllowance`` (the commit
+  ## path) makes such a withholding notice name
+  ## `REPRO_ALLOW_PIN_REGRESSION=<input> git commit --amend --no-edit` as the
+  ## deliberate course,
+  ## where the verb's notice names its own (`--record-downgrade`).
   ##
   ## ``planOnly`` (the commit hook) computes and reports everything and stops
   ## exactly where it would write: the outcome is tagged `planned` and carries
@@ -107312,10 +107460,15 @@ proc executeFlakeLockRefresh(flakeRoot, workspaceRoot, currentRepo: string;
   # commit" (owner-decided 2026-09-30) replaced that for the three relations
   # that would move a pin backward — behind, diverged, and a pinned commit
   # absent from the checkout: on the commit path (`refuseRegressions`) they
-  # come back in `refused` and NOTHING is written, and the commit is refused
-  # unless `REPRO_ALLOW_PIN_REGRESSION` names the input. The operator verb keeps
-  # the per-input withholding. A direction git cannot compute (`unknown`) is not
-  # a regression and is still merely withheld.
+  # came back in `refused` and NOTHING was written, and the commit was refused
+  # unless `REPRO_ALLOW_PIN_REGRESSION` named the input. Amended 2026-11-25:
+  # the managed hook no longer refuses — a checkout older than the pin is not
+  # a commit moving it backward, and refusing made a repository whose lock is
+  # ahead of a shared workspace root's checkouts uncommittable — so it
+  # withholds such an input like the operator verb does, naming the variable
+  # (`commitAllowance`). Only the HL-10 lock-update node still asks for
+  # `refuseRegressions`. A direction git cannot compute (`unknown`) is not a
+  # regression and is still merely withheld.
   #
   # The classification is `flakeOverrideStateReport`'s — the same derivation the
   # ambient §3.2 report and the pre-push gate use — over the SAME lock bytes
@@ -107379,7 +107532,8 @@ proc executeFlakeLockRefresh(flakeRoot, workspaceRoot, currentRepo: string;
       if refuseRegressions:
         result.refused.add(regression)
         continue
-      result.withheld.add(flakeWithheldNotice(row, flakeRoot, workspaceRoot))
+      result.withheld.add(flakeWithheldNotice(row, flakeRoot, workspaceRoot,
+        commitAllowance))
       result.withheldInputs.add(row.input)
       continue
     if flakeRowIsRecordable(row):
@@ -107397,10 +107551,11 @@ proc executeFlakeLockRefresh(flakeRoot, workspaceRoot, currentRepo: string;
       stderr.writeLine(label & ": WARNING: " & w)
 
   if result.refused.len > 0:
-    # §3.2 "Rule, at commit": the commit is refused, so NOTHING is written —
-    # not even the inputs that would have advanced. The refusal itself is
-    # rendered by the caller, together with any `repro.lock` regression, so a
-    # commit refused for both locks says so once.
+    # Only a caller that asked for ``refuseRegressions`` (the HL-10
+    # lock-update node) gets here: the update is refused, so NOTHING is
+    # written — not even the inputs that would have advanced. The refusal
+    # itself is rendered by the caller, together with any `repro.lock`
+    # regression, so an update refused for both locks says so once.
     result.tag = "refused-pin-regression"
     var parts: seq[string]
     for r in result.refused: parts.add(pinRegressionLogFragment(r))
@@ -107516,10 +107671,11 @@ proc executeFlakeLockRefresh(flakeRoot, workspaceRoot, currentRepo: string;
       # The lock is NOT correct afterwards — see `flakeRefreshWithheldExit`.
       # The COMMIT path does not read this status: it reaches this refresh
       # through `refreshFlakeLockAtCommit`, which carries no exit code. A
-      # withheld input does not refuse a commit by itself; the hook refuses
-      # one for a pin regression (`refused`, above) and for a declined pin
-      # whose `flake.nix` revision excludes the observed one
-      # (``declinedPins``, §16.4).
+      # withheld input does not refuse a commit by itself — a pin regression
+      # included, which the hook withholds here since 2026-11-25 (§3.2); the
+      # hook refuses one for a declined pin whose `flake.nix` revision
+      # excludes the observed one (``declinedPins``, §16.4), and the HL-10
+      # lock-update node for a pin regression (`refused`, above).
       result.exitCode = flakeRefreshWithheldExit
       return
     result.tag = "up-to-date"
@@ -108786,15 +108942,20 @@ proc refreshFlakeLockAtCommit*(workspaceRoot, currentRepo: string;
     toolProvisioning: ToolProvisioningMode;
     allowRegression: seq[string] = @[]; planOnly = false;
     label = "repro pre-commit"; deriveFields = true;
-    announce = true): FlakeCommitRefresh =
+    announce = true; refuseRegressions = true): FlakeCommitRefresh =
   ## The commit-path entry point, driven by the managed `pre-commit` hook
   ## (§13.1: an in-tree lock is written "as part of forming the revision").
   ## Returns one log line, whether the file was rewritten, and the lock's path
-  ## so the caller can stage it. Never raises. ``refused`` names the inputs
-  ## whose pin it would move BACKWARD and that ``allowRegression``
-  ## (`REPRO_ALLOW_PIN_REGRESSION`) did not name (Nix-Flake-Coexistence.md
-  ## §3.2 "Rule, at commit"); the caller refuses the commit on them, and
-  ## nothing was written. With ``planOnly`` (the `pre-commit` hook) nothing is
+  ## so the caller can stage it. Never raises. With ``refuseRegressions``
+  ## (the HL-10 lock-update node, the would-write predicate) ``refused`` names
+  ## the inputs whose pin it would move BACKWARD and that ``allowRegression``
+  ## (`REPRO_ALLOW_PIN_REGRESSION`) did not name; the caller refuses on them,
+  ## and nothing was written. The managed `pre-commit` hook passes
+  ## ``refuseRegressions = false``: such an input is WITHHELD instead — its
+  ## node byte-identical, the withholding notice naming the remedies and
+  ## `REPRO_ALLOW_PIN_REGRESSION=<input> git commit --amend --no-edit` — and
+  ## the commit proceeds
+  ## (Nix-Flake-Coexistence.md §3.2 "Rule, at commit", amended 2026-11-25). With ``planOnly`` (the `pre-commit` hook) nothing is
   ## written at all: the plan comes back in ``planned`` / ``plannedText``, and
   ## ``declinedPins`` names the inputs a `flake.nix` revision holds, which the
   ## hook refuses the commit over (Unified-Locking-And-Hooks.md §16.4).
@@ -109082,7 +109243,8 @@ proc refreshFlakeLockAtCommit*(workspaceRoot, currentRepo: string;
       defaultFlakeInputStripSuffixes,
       toolProvisioning, recordDowngrade = false,
       label = label, allowRegression = allowRegression,
-      refuseRegressions = true, planOnly = planOnly,
+      refuseRegressions = refuseRegressions, commitAllowance = true,
+      planOnly = planOnly,
       preset = some(hookFlakeSelection(substituted.hookSet, workspaceRoot,
         flakeRoot)),
       deriveFields = deriveFields, announce = announce)
