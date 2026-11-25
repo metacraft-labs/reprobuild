@@ -91,6 +91,8 @@ suite "TC-8e — repro certify materializes the declared set":
 
       # ---- 4. a plain git push carries what certify stored ------------------
       putEnv("REPROBUILD_REPRO", fx.cf.sib.repro)
+      # The push hook runs ``repro``; it stays off the caller's daemon.
+      for (name, value) in ownDaemonEnv(): putEnv(name, value)
       let hooks = fx.reproIn(["hooks", "ensure", "--vcs", fx.cf.sib.ws])
       checkpoint(hooks.output)
       check hooks.code == 0
