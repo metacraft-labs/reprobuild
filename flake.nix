@@ -426,7 +426,11 @@
       # monitored edge whose bare `gcc` resolves to the SIP-protected
       # `/usr/bin/gcc` shim (the C conventions' link edge on a Nix host) is
       # observed and can be cached instead of re-running on every build.
-      url = "github:metacraft-labs/io-mon/0220662775e1c79028522d2d1787fa4d9ce7479a";
+      # Bumped 02206627 -> 02ec1410 (2026-11-25, io-mon `agents`): io-mon
+      # builds against nim-stackable-hooks 0ada76e, the revision this flake
+      # now pins, so its ARM64 Windows shim has the ARM64 inline hook and
+      # entry park it injects and audits with.
+      url = "github:metacraft-labs/io-mon/02ec141006286d268c0fa7dfabab5a94fc69c23e";
       flake = false;
     };
     nim-shm-gset-src = {
@@ -652,7 +656,14 @@
       # Bumped d715806 -> c34e325 (2026-11-16) with io-mon-src: io-mon
       # 73572696 is built against it; it makes the raw syscall entries safe
       # for CLONE_VM clones.
-      url = "github:metacraft-labs/nim-stackable-hooks/c34e3252d413361a0f250d8921e00c119d30e114";
+      # Bumped c34e325 -> 0ada76e (2026-11-25) with io-mon-src: the Windows on
+      # Arm64 backend (ARM64 inline hook, entry park, borrowed calls) and the
+      # root injector's machine gate. A root no shim of the engine can serve
+      # (a native ARM64 action under the x64 engine on Windows on Arm, or an
+      # ARM64X image started in x64 mode) now runs uninjected and is
+      # reported as an unmonitored-subtree loss instead of failing the action
+      # with CreateRemoteThread err=6.
+      url = "github:metacraft-labs/nim-stackable-hooks/0ada76e5f62ba63753a2cadbdcc4249b91482f2e";
       flake = false;
     };
     reprobuild-ct-test-runner-src = {
