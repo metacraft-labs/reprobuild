@@ -281,7 +281,10 @@ reprobuild-packages
 # flake.nix and flake.lock: io-mon builds against nim-stackable-hooks 0ada76e
 # (the Windows on Arm64 backend and the root machine gate). 02206627 is an
 # ancestor.
-io-mon=02ec141006286d268c0fa7dfabab5a94fc69c23e
+# Moved to 1c1aa67 (2026-11-25), io-mon's `agents` tip, with `io-mon-src` in
+# flake.nix and flake.lock: the spawn hook refuses a hybrid ARM64X grandchild
+# through nim-stackable-hooks' shared machine gate. 02ec1410 is an ancestor.
+io-mon=1c1aa6783ff56eb46161b5c30ebc91b430e17200
 # `release-pipeline.yml` overrides `nim-stackable-hooks-src` to THIS clone, so the
 # clone must be the revision the flake pins, or the release compiles the
 # monitor shim from different sources than every other build. Cloned at

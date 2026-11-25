@@ -40,7 +40,7 @@ libs/repro_addon/tests/t_addon_agent_split.nim	nim	25
 libs/repro_addon/tests/t_addon_agent_staging_copy_streams.nim	nim	4
 libs/repro_addon/tests/t_addon_apt_hook_and_base_identity.nim	nim	21
 libs/repro_addon/tests/t_addon_boot_hold_and_gen0_upgrade.nim	nim	23
-libs/repro_addon/tests/t_addon_carried_state_fails_closed.nim	nim	192
+libs/repro_addon/tests/t_addon_carried_state_fails_closed.nim	nim	201
 libs/repro_addon/tests/t_addon_collision.nim	nim	38
 libs/repro_addon/tests/t_addon_confinement_probe_never_ships.nim	nim	5
 libs/repro_addon/tests/t_addon_contain_quiesces_before_record.nim	nim	7
@@ -79,7 +79,7 @@ libs/repro_addon/tests/t_addon_floor_round17.nim	nim	28
 libs/repro_addon/tests/t_addon_floor_round18.nim	nim	8
 libs/repro_addon/tests/t_addon_floor_round19.nim	nim	20
 libs/repro_addon/tests/t_addon_floor_round20.nim	nim	15
-libs/repro_addon/tests/t_addon_floor_round21.nim	nim	19
+libs/repro_addon/tests/t_addon_floor_round21.nim	nim	22
 libs/repro_addon/tests/t_addon_floor_round3.nim	nim	16
 libs/repro_addon/tests/t_addon_floor_round4.nim	nim	16
 libs/repro_addon/tests/t_addon_floor_round5.nim	nim	17
@@ -125,6 +125,7 @@ libs/repro_addon/tests/t_addon_system_file_with_mode_or_group_is_a_private_copy.
 libs/repro_addon/tests/t_addon_tmpfiles_scope.nim	nim	7
 libs/repro_addon/tests/t_addon_trace_attribution.nim	nim	6
 libs/repro_addon/tests/t_addon_uninstall_keeps_pre_bootstrap_inputs.nim	nim	73
+libs/repro_addon/tests/t_addon_uninstall_refuses_pending_switch.nim	nim	5
 libs/repro_addon/tests/t_addon_uninstall_rerun_removes_ship_state.nim	nim	5
 libs/repro_addon/tests/t_addon_units_meet_confinement_floor.nim	nim	3
 libs/repro_addon/tests/t_full_host_secrets_materialise_from_the_latest_envelope.nim	nim	9
@@ -1569,6 +1570,7 @@ tests/e2e/addon/t_e2e_addon_tick_observes_a_fresh_cycle.nim	nim	1
 tests/e2e/addon/t_e2e_addon_to_reproos_conversion_keeps_state.nim	nim	1
 tests/e2e/addon/t_e2e_addon_ubuntu_24_04_to_26_04_release_upgrade.nim	nim	1
 tests/e2e/addon/t_e2e_addon_unattended_upgrades_week.nim	nim	1
+tests/e2e/addon/t_e2e_addon_uninstall_refuses_pending_switch.nim	nim	1
 tests/e2e/addon/t_e2e_addon_uninstall_removes_revert_holds.nim	nim	3
 tests/e2e/addon/t_e2e_addon_unit_syscall_filters_cover_their_traces.nim	nim	1
 tests/e2e/addon/t_e2e_addon_validator_never_double_signs.nim	nim	1

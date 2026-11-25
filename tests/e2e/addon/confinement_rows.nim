@@ -185,6 +185,19 @@ const NotObservable* = [
   ("ReadWritePaths", "not a restriction but the exception to ProtectSystem=strict; " &
     "its extent is what the protect-system row writes outside of")]
 
+const
+  GateUnits* = ["repro-agent-apply.service", "repro-addon-reassert.service",
+    "repro-addon-boot-confirm.service", "repro-addon-secrets.service",
+    "repro-addon-store-verify.service", "repro-addon-boot-hold.service",
+    "repro-agent-fetch.service", "repro-addon-evidence.service"]
+    ## The units ``t_e2e_addon_confinement_settings_each_hold`` runs, one
+    ## list for the gate and the unit tests that check its table against
+    ## the rendered units (A9 review round 22).
+  PrivilegedUnits* = ["repro-agent-apply.service", "repro-addon-reassert.service",
+    "repro-addon-boot-confirm.service", "repro-addon-secrets.service",
+    "repro-addon-store-verify.service"]
+    ## The units ``generation0.privilegedConfinement`` confines.
+
 const UnsetByDesign* = [
   ("repro-addon-boot-hold.service", "PrivateTmp",
     "the /tmp mounts it needs are not up before sysinit.target (the unit's " &
@@ -327,13 +340,16 @@ const SigSys* = 31
   ## SIGSYS on every architecture the add-on supports (signal(7)): the
   ## signal a seccomp filter's kill action delivers (seccomp(2)).
 
-proc parseOutcome*(line, unitResult: string; mainStatus = ""): Outcome =
-  ## The probe's line ("A9PROBE <probe> <rc> <errno>"), the unit's
+proc parseOutcome*(line, probe, unitResult: string; mainStatus = ""): Outcome =
+  ## The probe's line ("A9PROBE <probe> <rc> <errno>") for the probe the
+  ## row runs -- a line naming another probe (a setup step that failed,
+  ## "mdwe-setup", or a probe the binary does not know) is no run of it
+  ## (A9 review round 22) --, the unit's
   ## ``Result=`` and its ``ExecMainStatus=``: no line, a signal result and
   ## SIGSYS as the status is a filter's kill. Any other signal -- a crash,
   ## an OOM kill, a timeout's SIGTERM -- is not (A9 review round 21, L2).
   let w = line.strip().splitWhitespace()
-  if w.len == 4 and w[0] == "A9PROBE":
+  if w.len == 4 and w[0] == "A9PROBE" and w[1] == probe:
     try: return (true, parseInt(w[2]), parseInt(w[3]), false)
     except ValueError: discard
   # systemd reports a seccomp kill as "signal", or "core-dump" where the
