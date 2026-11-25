@@ -73,7 +73,10 @@ else:
         check "operator decision of 2026-11-24" in res.output
         check "REPRO_NIM_COMPILER" in res.output
         # Refused up front, not after a compile that failed on a file name.
-        check "cannot open" notin res.output
+        # The refusal's own text explains the old compiler's `cannot open`
+        # failure, so look for the COMPILER's message, which has the form
+        # "Error: cannot open '<path>'".
+        check "Error: cannot open '" notin res.output
 
     test "a compiler that answers 2.2.10 is not refused by the check":
       let repoRoot = getCurrentDir()
