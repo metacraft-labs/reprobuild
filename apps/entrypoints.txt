@@ -1,6 +1,7 @@
 # name path [extra-nim-flags...]
 #
-# TWO USER-FACING IMAGES, AND WHICH NAME EACH GETS. `repro` on PATH is the
+# TWO USER-FACING IMAGES, AND WHICH NAME EACH GETS (plus the engine's graph
+# helper image, `reprobuild-helper`, which no user types; see its row). `repro` on PATH is the
 # THIN daemon client (last row); `reprobuild` is the full CLI. See
 # `libs/repro_core/src/repro_core/cli_images.nim` for the naming rationale and
 # `apps/repro-client/repro_client.nim` for the routing contract. The engine
@@ -19,6 +20,19 @@
 # http:// is unchanged. The reprobuild dev shell / nix build supplies the
 # OpenSSL `-L` via NIX_LDFLAGS.
 reprobuild apps/repro/repro.nim --define:ssl --define:reproVendoredHash
+# The GRAPH HELPER image: the engine's own helper commands the build graph runs
+# inside its actions (provider compile, interface extraction, profile compile
+# and platform probe, dev-env introspection and shell rendering, CMake
+# regeneration). Same sources and dispatch as the row above, and deliberately
+# WITHOUT --define:ssl, like `attestation-agent` below: with -d:ssl Nim's
+# OpenSSL wrapper maps libssl/libcrypto at start-up, and on Windows their
+# stack-protector start-up reads entropy (rand_s -> RtlGenRandom ->
+# ProcessPrng) in every process, so every action that ran an engine helper
+# carried an entropy read and was not cached on its first run. The engine keeps
+# TLS (the M7 note above); this image needs none, and must never get it --
+# tests/integration/t_graph_helper_image_loads_no_openssl.nim fails if it does.
+# --define:reproVendoredHash for the reason given on the thin client's row.
+reprobuild-helper apps/reprobuild-helper/reprobuild_helper.nim --define:reproVendoredHash
 # ReproOS-Generations-And-Foreign-Packages A2 / Windows-Runner-Binary-Cache-Deploy M1:
 # the long-lived binary-cache HTTP daemon. Serves GET /healthz, GET /cache-info,
 # GET /manifests/<hex>, GET /payloads/<hex>, POST /publish on 0.0.0.0:7878 by

@@ -705,7 +705,7 @@ class GraphOwnedFixtureRebuildOnce(unittest.TestCase):
     SHARED_ACTION = "reprobuild.test_fixtures.ct_shim_fixture_protocol_three_tests"
 
     def setUp(self):
-        self.repro_nim = (REPO_ROOT / "repro.nim").read_text()
+        self.repro_nim = inventory.read_recipe_text(REPO_ROOT)
 
     def producers_of(self, text: str, stem: str) -> list[str]:
         return [line for line in nim_c_binaries(text) if stem in line]
@@ -942,7 +942,7 @@ class BinaryCacheHelperConsumersAreDeclared(unittest.TestCase):
     """
 
     def setUp(self):
-        self.repro_nim = (REPO_ROOT / "repro.nim").read_text()
+        self.repro_nim = inventory.read_recipe_text(REPO_ROOT)
         self.users = binary_cache_helper_users(REPO_ROOT)
 
     def undeclared(self, repro_nim: str) -> list[str]:

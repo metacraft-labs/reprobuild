@@ -693,9 +693,86 @@ suite "envelope lanes -- a tarball record's gem-closure step begins at v36":
     check toolUseRealizationDigest(stepped.toolUses[0]) !=
       toolUseRealizationDigest(plain.toolUses[0])
 
-  test "v37 is the default":
-    # version-literal-ok: a pin that must fail when the envelope moves past v37, so this matrix is extended
-    check interfaceEnvelopeVersion() == 37'u16
+  test "v39 is the default":
+    # version-literal-ok: a pin that must fail when the envelope moves past v39, so this matrix is extended
+    check interfaceEnvelopeVersion() == 39'u16
+
+suite "envelope lanes -- a recipe's pinned siblings begin at v38":
+
+  proc withPins(pi: ProjectInterface): ProjectInterface =
+    result = withToolUses(pi, envPrefixArm = true)
+    result.pinnedSiblings = @["codetracer", "codetracer-vscode-extension"]
+
+  test "v38 carries the pins; v30..v37 decode none with every other " &
+      "field intact":
+    let pi = withPins(bothLanesInterface())
+    for v in 30'u16 .. 37'u16:
+      checkpoint "v" & $v
+      let back = atVersion(pi, v)
+      check back.pinnedSiblings.len == 0
+      check back.toolUses.len == 1
+      check back.toolUses[0].location.line == 30
+    for v in [38'u16, interfaceEnvelopeVersion()]:
+      checkpoint "v" & $v
+      let back = atVersion(pi, v)
+      check back.pinnedSiblings == pi.pinnedSiblings
+      check back.toolUses.len == 1
+      check back.toolUses[0].location.line == 30
+
+  test "an interface that pins nothing keeps its v37 fingerprint; a pin " &
+      "moves it, whatever order the recipe lists its pins in":
+    let plain = withToolUses(bothLanesInterface(), envPrefixArm = true)
+    check fingerprintBytes(plain, interfaceEnvelopeVersion()) ==
+      fingerprintBytes(plain, 37'u16)
+    check interfaceFingerprint(withPins(bothLanesInterface())) !=
+      interfaceFingerprint(plain)
+    var reordered = withPins(bothLanesInterface())
+    reordered.pinnedSiblings = @["codetracer-vscode-extension", "codetracer"]
+    check interfaceFingerprint(reordered) ==
+      interfaceFingerprint(withPins(bothLanesInterface()))
+
+suite "envelope lanes -- a library's required gitlinks begin at v39":
+
+  proc withGitlinks(pi: ProjectInterface): ProjectInterface =
+    # On top of the v38 lane (tool uses with an env-prefix arm, and pinned
+    # siblings), so every older block is present when v39 is exercised.
+    result = withToolUses(pi, envPrefixArm = true)
+    result.pinnedSiblings = @["codetracer", "codetracer-vscode-extension"]
+    result.publicLibraries.add(InterfaceLibrary(name: "vendored",
+      kind: lkStatic, exportedPath: "src",
+      location: SourceLocation(file: "repro.nim", line: 40),
+      sourceGitlinks: @[
+        GitlinkSourceRequirement(relativePath: "src/vendored/yoga")]))
+
+  test "v39 carries the requirement; v30..v38 refuse to encode it and " &
+      "decode a library without one with every other field intact":
+    let pi = withGitlinks(bothLanesInterface())
+    var plain = pi
+    plain.publicLibraries[^1].sourceGitlinks = @[]
+    for v in 30'u16 .. 38'u16:
+      checkpoint "v" & $v
+      expect CatchableError:
+        discard encodeInterfacePayload(pi, v)
+      let back = atVersion(plain, v)
+      check back.publicLibraries[^1].sourceGitlinks.len == 0
+      check back.publicLibraries[^1].exportedPath == "src"
+      check back.toolUses.len == 1
+    for v in [39'u16, interfaceEnvelopeVersion()]:
+      checkpoint "v" & $v
+      let back = atVersion(pi, v)
+      check back.publicLibraries[^1].sourceGitlinks ==
+        pi.publicLibraries[^1].sourceGitlinks
+      check back.pinnedSiblings == pi.pinnedSiblings
+      check back.toolUses.len == 1
+
+  test "a library that requires none keeps its v38 fingerprint; a " &
+      "requirement moves it":
+    var plain = withGitlinks(bothLanesInterface())
+    plain.publicLibraries[^1].sourceGitlinks = @[]
+    check fingerprintBytes(plain, interfaceEnvelopeVersion()) ==
+      fingerprintBytes(plain, 38'u16)
+    check interfaceFingerprint(withGitlinks(bothLanesInterface())) !=
+      interfaceFingerprint(plain)
 
 suite "envelope lanes -- the version is the ONLY thing that varies":
 

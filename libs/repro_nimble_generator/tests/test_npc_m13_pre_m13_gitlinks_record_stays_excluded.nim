@@ -96,7 +96,9 @@ suite "NPC-M13: a gitlinks record from before submodule sources":
       listedRecord().submodules
     check decodeShard(b1).packages[0].versions[0].submodules.len == 0
     check acceptsSchema(nokShard, 2)
-    check not acceptsSchema(nokRoot, 2)
+    # NPC-M15 made 2 a root schema too (`NimbleRootHistorySchema`); the one
+    # after it is no root schema.
+    check not acceptsSchema(nokRoot, NimbleRootHistorySchema + 1)
     # Relabelled as schema 1, the schema-2 bytes are refused, never read as
     # records without their list.
     var relabelled = b2

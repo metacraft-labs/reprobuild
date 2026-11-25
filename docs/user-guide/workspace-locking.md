@@ -612,6 +612,25 @@ it) and refresh again. A sibling checked out without any recipe declares
 no constraints and is not a reason to refuse. `repro lock solve` without
 `--write` prints the same finding as a warning.
 
+**A sibling that CI only clones belongs in `pinned:`, not `uses:`.** The
+clone steps of CI take each sibling's revision from the committed `repro.lock`
+and refuse one it does not pin. A repo that clones a sibling just to run a
+test harness against it can name it in a `pinned:` block of its `package`:
+
+```nim
+package consumer:
+  pinned:
+    "codetracer"
+```
+
+`repro lock refresh` then records the sibling like any other (its commit and
+integrity, as a direct dependency of your repo), without compiling the
+sibling's `repro.nim` and without recording the sibling's own dependencies,
+which `uses:` would. If the sibling is not checked out and the committed lock
+does not pin it, the refresh refuses, names it and writes nothing. The
+pre-push gate derives the same set, so a lock that still pins a sibling the
+recipe no longer names is reported as stale.
+
 **A repo that shares a tool's name does not provide that tool.** `uses:`
 discovery looks for a sibling recipe in two places only: at
 `<ancestor>/<selector>` for each directory above the recipe, and at a
@@ -1047,13 +1066,27 @@ make sense.
   | `skipped-git-operation-in-progress` | Git was mid-rebase / mid-cherry-pick / mid-bisect in the repo that fired the hook. The commit the hook saw is one of that operation's intermediate commits, so nothing was written into the working tree and no ref was pushed. The diagnostic names the marker that proved it. The pre-push gate refreshes the lock before anything is published, so no lock is lost. |
   | `inert-git-state-unknown` | The hook could not determine whether a git operation was in progress (git unresolvable, or the repo path is not a checkout). It did nothing and said so on stderr — "I could not tell" is not the same answer as "nothing is happening". |
 
-  The report also carries `pendingRecords` (unpublished records for the
-  trigger repo in the store) and `strandedRecords` — those pending
-  records whose trigger commit has **already been pushed**. A stranded
-  record means a push went out without its lock, so publication is not
-  merely pending: it is not running. Any stranded record, any refusal,
-  and any writer failure also prints a line to stderr, which git shows
-  you at the terminal. The commit still succeeds in every case.
+  The report also counts the trigger repo's unpublished records in the
+  store (`pendingRecords`) and sorts the ones whose commit has **already
+  been pushed** into two kinds:
+
+  - `strandedRecords`: no published record of the repo sits at that
+    commit or at any commit between it and the repo's upstream (`@{u}`).
+    A push went out and published nothing at or above it, so publication
+    is not merely pending: it is not running.
+  - `heldRecords`: the commit lies *below* a published record. The push
+    that published that record examined this draft too and kept it back,
+    usually because it pins a sibling revision no remote had yet (see
+    **pre-push** below), or an older `repro` left it behind. The next
+    push of the repo examines it again. A held record is not a broken
+    publisher, and it does not make the hook loud.
+
+  The count looks at no more than 256 unpublished records; the published
+  records beside them do not count toward that limit. When there are more,
+  `backlogTruncated` is `true` and every count in the log line carries a
+  `+`, because each is then a lower bound. Any stranded record, any
+  refusal, and any writer failure also prints a line to stderr, which git
+  shows you at the terminal. The commit still succeeds in every case.
 
   That stderr line is easy to miss, so `repro health` reads the log for
   you. Its `lock-writer` row sorts the outcomes above into *wrote*
@@ -1094,6 +1127,30 @@ make sense.
   or team backend that is unreachable **refuses** the push; a personal
   one **warns and allows** (see
   [Recovering from a refused push](#recovering-from-a-refused-push)).
+
+  A push publishes more than the record of the commit it pushes. For
+  every *other* commit of the pushed repo that the pushed commit reaches,
+  it also publishes the draft `post-commit` wrote for that commit, if one
+  is still unpublished in the record store and it passes three checks: it
+  is a workspace lock of this project, its entry for the pushed repo
+  names the commit the record is filed under, and every other revision it
+  pins is reachable from a remote-tracking ref of that repo's checkout in
+  this workspace. Such a draft is published exactly as `post-commit`
+  wrote it. A draft that fails a check stays a draft, the push output
+  names it and the reason (for example, it pins a sibling commit you have
+  not pushed yet), and the push still succeeds; the next push of the repo
+  checks it again, so it is published once that sibling commit is on its
+  remote. A draft is never rewritten to look current, and the push never
+  writes a record for a commit that has no draft: it cannot know which
+  sibling revisions that commit was developed against.
+
+  Published records are never changed. If another workspace has already
+  published a record for one of those commits, the push leaves that
+  record as it is: identical content needs nothing, and different content
+  is reported, removed from this workspace's store so that it can take the
+  published record, and does not fail the push. The record of the pushed
+  commit itself is still held to the strict rule: a different record
+  already published under it refuses the push.
 
 - **pre-receive** (server gate; `--no-verify`-proof) — runs on the bare
   receiving repo, so `git push --no-verify` cannot bypass it. **It gates

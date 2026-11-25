@@ -54,7 +54,8 @@ import git_fast_forward
 from shared_clones import prepareSharedBare, sharedBareFetchArgs,
   checkRegisteredLeaves, messages, registerLeafWithPool,
   withCacheEntryVcsLock, withCheckoutVcsLock, isTransientGitLockContention,
-  leafFetchNeedsPromisor
+  leafFetchNeedsPromisor, checkSubmoduleLeaves, defaultCacheRoot,
+  LeafCheckMode
 
 export GitToolIdentity, EGitToolUnresolved, ensureGitToolResolvable,
   resolveGitTool, digestHex, ToolProvisioningMode
@@ -693,6 +694,100 @@ proc workingTreeIsClean(payload: GitVcsPayload; repoPath: string): tuple[ok: boo
         res.diagnostic)
   (ok: true, clean: res.output.strip.len == 0, diagnostic: "")
 
+proc remoteTrackingRefGlob(remote: string): string =
+  ## The ``--glob`` naming the remote-tracking refs a publication question is
+  ## scoped to: ``refs/remotes/<remote>/*`` for one remote, and
+  ## ``refs/remotes/*/*`` for every remote.
+  ##
+  ## Ref globs follow ``git rev-parse --glob`` (https://git-scm.com/docs/git-rev-parse#Documentation/git-rev-parse.txt---globltglob-patterngt):
+  ## a ``*`` also matches ``/``, so ``refs/remotes/origin/*`` covers
+  ## ``origin/users/a/b`` exactly as the ``startsWith("origin/")`` test it
+  ## replaces did. The any-remote form demands a ``/`` after the remote's name
+  ## for the same reason the old parser did: a bare ``refs/remotes/<name>`` is
+  ## not a ``<remote>/<branch>`` tracking ref. Glob metacharacters cannot occur
+  ## in a valid ref name (``git check-ref-format``), so a remote name carrying
+  ## one matches nothing; escaping it keeps that true instead of letting it
+  ## widen the scope.
+  if remote.len == 0:
+    return "refs/remotes/*/*"
+  var escaped = newStringOfCap(remote.len)
+  for ch in remote:
+    if ch in {'*', '?', '[', '\\'}:
+      escaped.add('\\')
+    escaped.add(ch)
+  "refs/remotes/" & escaped & "/*"
+
+proc revisionOnRemoteTrackingRef(payload: GitVcsPayload;
+                                 repoPath, revision, remote: string):
+    tuple[ok: bool; contained: bool; diagnostic: string] =
+  ## Is ``revision`` reachable from a remote-tracking ref of ``remote`` (every
+  ## remote when ``remote`` is empty; see ``remoteTrackingRefGlob``)?
+  ##
+  ## Asked as ONE history walk: ``git rev-list -n1 <revision> --not
+  ## --glob=<scope>`` prints ``revision`` exactly when no ref in the scope
+  ## reaches it, and prints nothing when one does. That is the same predicate
+  ## ``git branch -r --contains`` and ``git for-each-ref --contains`` compute,
+  ## but those decide containment ONE REF AT A TIME, each a walk of its own, so
+  ## their cost is the number of remote-tracking refs times the depth of the
+  ## history between them and ``revision``. ``--count=1`` does not bound it:
+  ## the filter still runs for every ref before the count is applied.
+  ##
+  ## On a llvm-project checkout (1,439 remote-tracking refs) whose pool has no
+  ## commit-graph, measured with git 2.54 for a commit on no remote branch:
+  ## ``branch -r --contains`` 43 s, ``for-each-ref --count=1 --contains`` 45 s,
+  ## this walk 4.3 s. On a host with a colder and larger object store the
+  ## per-ref form never finished inside seven minutes and took `repro health`,
+  ## which asks this of every participating checkout, down with it.
+  ##
+  ## ``ok`` is false when git fails — an unborn HEAD, a revision that is not a
+  ## commit, an unreadable ref — and the caller must not read ``contained``
+  ## then: a failed probe is never evidence of publication.
+  if revision.len == 0 or revision.startsWith("-"):
+    # ``rev-list`` would read it as an option; no caller passes one.
+    return (ok: false, contained: false,
+      diagnostic: "not a revision: '" & revision & "'")
+  # The revision is resolved to a commit that is PRESENT before the walk, and
+  # the walk is then given ``--ignore-missing``. The two go together:
+  #
+  # * ``--ignore-missing`` keeps a remote-tracking ref that names a missing
+  #   object (a stale ref into a shared pool that has since pruned
+  #   pre-rewrite history) from failing the whole probe. ``branch -r
+  #   --contains`` skipped such a ref with an error line and still answered;
+  #   without the flag ``rev-list`` dies with ``bad object`` and every push
+  #   from that checkout is refused.
+  # * The flag also drops a missing POSITIVE revision, and ``rev-list`` then
+  #   prints nothing — which reads as "contained". Verifying the revision
+  #   first is what keeps that from ever becoming a false "published".
+  let resolved = runGitQuery(payload, ["-C", repoPath, "rev-parse",
+    "--verify", "--quiet", revision & "^{commit}"])
+  let commit = resolved.output.strip()
+  if resolved.exitCode != 0 or commit.len == 0:
+    return (ok: false, contained: false,
+      diagnostic: "'" & revision & "' does not name a commit in this " &
+        "checkout (git rev-parse --verify exited " & $resolved.exitCode & ")")
+  let walk = runGitQuery(payload, ["-C", repoPath, "rev-list", "-n1",
+    "--ignore-missing", commit, "--not",
+    "--glob=" & remoteTrackingRefGlob(remote), "--"])
+  if walk.exitCode != 0:
+    return (ok: false, contained: false,
+      diagnostic: "git rev-list " & revision & " --not --glob=" &
+        remoteTrackingRefGlob(remote) & " failed (" & $walk.exitCode & "): " &
+        walk.diagnostic)
+  (ok: true, contained: walk.output.strip().len == 0, diagnostic: "")
+
+proc revisionOnRemoteTrackingRef*(identity: GitToolIdentity;
+                                  repoPath, revision, remote: string):
+    tuple[ok: bool; contained: bool; diagnostic: string] =
+  ## ``revisionOnRemoteTrackingRef`` against the identity-bound git binary,
+  ## for callers outside this module that ask the publication question of a
+  ## revision other than HEAD. Every "is this on a remote-tracking branch"
+  ## probe goes through here so that none of them can reintroduce the per-ref
+  ## walk.
+  revisionOnRemoteTrackingRef(GitVcsPayload(
+    identityDigestHex: identity.digestHex(),
+    identityVersion: identity.version,
+    binaryPath: identity.binaryPath), repoPath, revision, remote)
+
 proc remoteBranchContainsHead(payload: GitVcsPayload; repoPath, remote: string;
                               localOnly = false):
     tuple[ok: bool; published: bool; scopedRemote: string;
@@ -722,12 +817,6 @@ proc remoteBranchContainsHead(payload: GitVcsPayload; repoPath, remote: string;
   ## caller that hardcoded ``origin`` against such a worktree saw every commit
   ## as unpublished, including commits sitting on the remote's own default
   ## branch, and blocked pushes on that basis.
-  let lookup = runGitQuery(payload,
-    ["-C", repoPath, "branch", "-r", "--contains", "HEAD"])
-  if lookup.exitCode != 0:
-    return (ok: false, published: false, scopedRemote: remote,
-      diagnostic: "git branch -r --contains HEAD failed (" &
-        $lookup.exitCode & "): " & lookup.diagnostic)
   # A named remote that this checkout does not actually have is a GUESS, not a
   # constraint. `gitRemoteNameFor` falls back to "origin" whenever the manifest
   # entry carries no remote name, so callers routinely arrive here asking about
@@ -737,6 +826,10 @@ proc remoteBranchContainsHead(payload: GitVcsPayload; repoPath, remote: string;
   # own default branch. Scoping is worth keeping when the caller names a remote
   # that IS configured; when it names one that is not, fall back to accepting
   # any remote-tracking branch rather than reporting a confident falsehood.
+  #
+  # The scope is settled BEFORE the containment walk because the walk is told
+  # which refs to subtract: there is no list of containing branches to filter
+  # afterwards any more (see ``revisionOnRemoteTrackingRef``).
   var anyRemote = remote.len == 0
   if not anyRemote:
     let remotes = runGitQuery(payload, ["-C", repoPath, "remote"])
@@ -752,34 +845,16 @@ proc remoteBranchContainsHead(payload: GitVcsPayload; repoPath, remote: string;
   # remote-tracking branch was accepted" — either because the caller asked for
   # that, or because the name it asked for is not a remote of this checkout.
   let answeredScope = if anyRemote: "" else: remote
-  let needle = remote & "/"
-  proc matches(candidate: string): bool =
-    if anyRemote:
-      # Any ``<remote>/<branch>`` line qualifies. Require the separator so a
-      # malformed bare line cannot be mistaken for a tracking ref.
-      candidate.len > 0 and '/' in candidate
-    else:
-      candidate.startsWith(needle)
-  for raw in lookup.output.splitLines:
-    let line = raw.strip()
-    if line.len == 0:
-      continue
-    # Lines look like ``  origin/main`` or ``* origin/HEAD -> origin/main``.
-    let normalized = line.replace("* ", "").strip()
-    # ``HEAD -> origin/main`` form: prefer the target of the arrow, since the
-    # left side is a symbolic name rather than a branch that contains HEAD.
-    let arrowIndex = normalized.find(" -> ")
-    if arrowIndex >= 0:
-      let tail = normalized[arrowIndex + 4 .. ^1].strip()
-      if matches(tail):
-        return (ok: true, published: true, scopedRemote: answeredScope,
-          diagnostic: "")
-      continue
-    if matches(normalized):
-      return (ok: true, published: true, scopedRemote: answeredScope,
-        diagnostic: "")
+  let contained = revisionOnRemoteTrackingRef(payload, repoPath, "HEAD",
+    answeredScope)
+  if not contained.ok:
+    return (ok: false, published: false, scopedRemote: remote,
+      diagnostic: contained.diagnostic)
+  if contained.contained:
+    return (ok: true, published: true, scopedRemote: answeredScope,
+      diagnostic: "")
   # A checkout materialized by fetching ONE commit by SHA (``git fetch origin
-  # <sha>``) has no remote-tracking ref, so the lookup above is empty even when
+  # <sha>``) has no remote-tracking ref, so the walk above finds none even when
   # that commit is the tip of a branch on the remote. Ask the remote directly:
   # HEAD is published when it is exactly the tip of one of the remote's branches.
   # Only tips are matched, so the check needs no objects beyond HEAD itself.
@@ -1682,7 +1757,27 @@ proc executeMergeFf(payload: GitVcsPayload;
   # effort — a submodule-update failure must NOT fail the fast-forward itself
   # (the superproject IS fast-forwarded), mirroring how ``git pull`` treats
   # submodule recursion.
+  #
+  # A submodule that borrows from a partial shared pool, directly or through
+  # a leaf of it, reads the new commit's trees through its alternates but can
+  # fetch a blob the pool only promises only through a promisor remote of its
+  # own. Without one git's checkout leaves those files out of the work tree
+  # (Shared-Clone-Pool-Integrity §3.4, "Submodules"), so each populated
+  # submodule gets the refetch chain first. Only pools under the host's
+  # shared-clone cache are configured, as the detector only ever writes into
+  # pools reprobuild owns; the cache root is resolved from this checkout's
+  # path, as ``defaultCacheRoot`` resolves it for the workspace (the
+  # payload does not carry it). Report mode: nothing in the work tree is
+  # written here; restoring files an earlier checkout left out is the
+  # detector's repair (sync, ``repro health --fix``).
   if fileExists(target / ".gitmodules"):
+    # ``defaultCacheRoot`` reads the process environment through a closure,
+    # which the effect system cannot prove GC-safe; it touches no GC'd global.
+    var cacheRoot = ""
+    {.cast(gcsafe).}:
+      cacheRoot = defaultCacheRoot(target)
+    discard checkSubmoduleLeaves(payload.binaryPath, target, lcmReport,
+      cacheRoot)
     discard runGit(payload,
       ["-C", target, "submodule", "update", "--recursive"])
   let headRes = resolveHeadSha(payload, target)

@@ -18,7 +18,11 @@ default's `rev` and hash to equal this tree's lock node (`rev`, `narHash`).
 a pending default left behind is reported.
 
 The argument -> input table is nix/package-source-inputs.json, which the flake
-check reads too. Matching is counted: an argument with no
+check reads too. Its `pin-derived` list names the sources that are read from
+the organisation's CodeTracer pin rather than locked by name (CodeTracer and
+the trace-format revision its repro.lock names). Their defaults mirror the pin
+the `src` commit's lock locks, which only an evaluation can read, so they are
+never pending here; `nixpkgs-package-src-sync` checks them. Matching is counted: an argument with no
 `<arg> ? fetchFromGitHub { ... }` default is an error, not a pass.
 """
 import argparse
@@ -66,10 +70,20 @@ def src_lock_text(root: Path, rev: str, git: str) -> tuple[str, str]:
         # in a full clone would make it shallow, which a lint must not do.
         shallow = subprocess.run([git, '-C', str(root), 'rev-parse', '--is-shallow-repository'],
                                  capture_output=True, text=True).stdout.strip() == 'true'
-        subprocess.run([git, '-C', str(root), 'fetch', '--quiet',
-                        *(['--depth', '1'] if shallow else []), 'origin', rev],
-                       capture_output=True, text=True)
+        fetched = subprocess.run([git, '-C', str(root), 'fetch', '--quiet',
+                                  *(['--depth', '1'] if shallow else []), 'origin', rev],
+                                 capture_output=True, text=True)
         shown = show()
+        if shown.returncode != 0 and fetched.returncode != 0:
+            # The commit is absent and could not be fetched. `git show` then
+            # says only "path 'flake.lock' exists on disk, but not in <rev>",
+            # which reads as a commit without a lock; the fetch's own error
+            # (no network, refused credentials, unknown commit) is the reason.
+            # Every line: the server's own reason (`remote: Duplicate header:
+            # "Authorization"`) precedes git's `fatal:` summary of it.
+            lines = [l.strip() for l in fetched.stderr.splitlines() if l.strip()]
+            return '', ('fetching it failed: ' +
+                        ('; '.join(lines) or f'git fetch exited {fetched.returncode}'))
     if shown.returncode != 0:
         return '', (shown.stderr.strip().splitlines() or ['git show failed'])[-1]
     return shown.stdout, ''
@@ -91,6 +105,7 @@ def check(root: Path, git: str = 'git') -> tuple[list[str], list[str]]:
     tree = json.loads((root / 'flake.lock').read_text())
     tree_inputs = root_inputs(tree)
     table = json.loads((root / TABLE).read_text())
+    derived = set(table.pop('pin-derived', []))
     errors, pending = [], []
     for file, args in table.items():
         rel = FILES[file]
@@ -101,8 +116,10 @@ def check(root: Path, git: str = 'git') -> tuple[list[str], list[str]]:
                 errors.append(f'{rel}: `{arg}` has no `? fetchFromGitHub {{ ... }}` default '
                               f'(the table {TABLE} names it for `{input_}`)')
                 continue
-            if input_ in src_inputs:
-                continue  # the `src` commit's lock governs it (nixpkgs-package-src-sync)
+            if input_ in src_inputs or input_ in derived:
+                # The `src` commit's lock governs it, by name or through the
+                # pin set it locks (nixpkgs-package-src-sync).
+                continue
             block, line = found
             node_id = tree_inputs.get(input_)
             if not isinstance(node_id, str):

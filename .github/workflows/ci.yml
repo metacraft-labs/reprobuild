@@ -64,7 +64,62 @@ jobs:
     name: Lint
     runs-on: [self-hosted, linux, x64]  # CIP-5: nix job (setup-dev-env) → eph-linux-x64
     steps:
+      # No persisted credential. A persisted one is an
+      # `http.https://github.com/.extraheader` in this repo's .git/config,
+      # and setup-dev-env exports a second, owner-scoped extraHeader for
+      # `https://github.com/metacraft-labs/` through GIT_CONFIG_*. Both match
+      # every request to this org, `http.extraHeader` is multi-valued, and
+      # github answers the pair `Duplicate header: "Authorization"` (HTTP
+      # 400), so every git fetch the lint gates make from this checkout
+      # failed: the attribution-base fetch below (silently) and
+      # check_package_nix_pending_sources' fetch of package.nix's `src`
+      # commit (the gate went red). This job pushes nothing; the next step
+      # gives this repository's own fetches their one credential.
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      # Exactly one Authorization header for fetches of THIS repository, and
+      # one that lives as long as the job.
+      #
+      # Without this step the only credential is setup-dev-env's, the App
+      # installation token minted below. It is frozen into GIT_CONFIG_* when
+      # setup-dev-env runs and expires an hour after it was minted, but this
+      # job runs longer than that: check_package_nix_pending_sources fetches
+      # package.nix's `src` commit late in `just lint` (72 minutes after the
+      # mint in run 45287470538). GitHub answers an expired token with 401,
+      # and git, not allowed to prompt, reports `could not read Username`.
+      # That token is not even minted for this repository (it is not in the
+      # `repositories:` list); a fresh one was accepted only because the
+      # repository is public.
+      #
+      # The job token is this repository's own credential and is valid until
+      # the job ends. It is scoped to the exact origin URL, so git sends it
+      # instead of setup-dev-env's owner-wide header, not beside it: for a
+      # multi-valued `http.<url>.extraHeader`, a key whose URL matches less
+      # specifically than one already read is skipped, and repo-local config
+      # is read before GIT_CONFIG_*. git matches URL paths at `/`
+      # boundaries, so sibling repositories (`reprobuild-packages`, ...)
+      # still get setup-dev-env's header.
+      #
+      # The header lives in a 0600 file under $RUNNER_TEMP, which the runner
+      # deletes after the job, and .git/config only includes it. The
+      # workspace outlives the job on self-hosted runners; an include of a
+      # missing file is ignored, so the next job sees neither the spent
+      # token nor a second header. `--replace-all` with a value pattern
+      # rewrites only this step's own include line.
+      - name: Authenticate this repository's own fetches with the job token
+        env:
+          JOB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          origin="$(git remote get-url origin)"
+          auth_file="${RUNNER_TEMP}/lint-origin-auth.gitconfig"
+          (
+            umask 077
+            header="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$JOB_TOKEN" | base64 | tr -d '\n')"
+            git config --file "$auth_file" --replace-all "http.${origin}.extraHeader" "$header"
+          )
+          git config --local --replace-all include.path "$auth_file" '/lint-origin-auth\.gitconfig$'
       # Mint a GitHub App installation token via the CI Token Provider
       # app.  GitHub free plan restricts org-level secrets with
       # visibility ALL from being readable inside private repos, so we
@@ -511,15 +566,33 @@ jobs:
       # .github/sibling-repos, and scripts/run_tests.sh builds ../runquota.
       # Local clones let CI pick up sibling changes without waiting for a
       # flake.lock bump.
+      # The revision is read from .github/sibling-repos, the one record of it
+      # that flake.lock and repro.lock are held equal to. It is NOT a branch:
+      # runquota develops on ``agents`` and reaches ``dev`` only by promotion,
+      # so ``dev`` lags the pin and lacks modules this tree imports
+      # (``runquota_core/measurement``), which fails every interface
+      # extraction in the Test job with "cannot open file".
+      - name: Read the runquota pin
+        id: runquota_pin
+        timeout-minutes: 2
+        run: |
+          rev="$(sed -n 's/^runquota=\([0-9a-f]\{40\}\)$/\1/p' .github/sibling-repos)"
+          if [ -z "$rev" ]; then
+            echo "::error::.github/sibling-repos has no 'runquota=<40-hex revision>' line" >&2
+            exit 1
+          fi
+          echo "rev=$rev" >> "$GITHUB_OUTPUT"
+
+      # 8, not the 10 the other clones get: the two-minute pin step above
+      # has to fit in the job's 1440-minute ceiling with every other step's
+      # limit (scripts/check_ci_test_budget.py, invariant (c)), and one
+      # repository cloned at one revision is far inside 8 minutes.
       - name: Clone runquota sibling
-        timeout-minutes: 10
+        timeout-minutes: 8
         uses: metacraft-labs/metacraft-github-actions/clone-repo@dev
         with:
           repo: metacraft-labs/runquota
-          # runquota's mainline is ``dev`` (its default branch); ``main`` is
-          # stale and lacks the b0 config.nims closure fix + the forking-lease
-          # completion fix the reprobuild b0 / cmake-develop tests depend on.
-          ref: dev
+          ref: ${{ steps.runquota_pin.outputs.rev }}
           path: ${{ github.workspace }}/../runquota
           gh-token: ${{ steps.ci_token.outputs.token }}
 
@@ -902,7 +975,7 @@ jobs:
               --fetch-only
             bash "$repro_root/scripts/reconcile_locked_siblings.sh" \
               "$repro_root/repro.lock" "$siblings_root" "$repro_name" \
-              --fetch-only )
+              --fetch-only "$repro_root/.github/sibling-repos" )
           # The ct build runs next, so leave them at CodeTracer's revisions.
           bash "$repro_root/scripts/reconcile_locked_siblings.sh" \
             "$ct_root/repro.lock" "$siblings_root" "$repro_name" --detach
@@ -940,6 +1013,18 @@ jobs:
           # This prerequisite must exercise this job's freshly built engine;
           # a pre-existing host daemon can carry another source/runtime closure.
           REPRO_DAEMON: 'off'
+          # The siblings sit at CodeTracer's lock for THIS build (the
+          # reconcile step above leaves them there on purpose: `ct` is built
+          # against codetracer/repro.lock, and `just test` re-detaches them to
+          # reprobuild's lock afterwards). Those revisions are in general
+          # behind the ones reprobuild/repro.lock pins, and the engine refuses
+          # a stale sibling unless told otherwise ("no acceptable source for
+          # SHM_QUEUE_SRC ... the sibling ... is not at or ahead of the
+          # revision this repository pins"). Saying so here is the documented
+          # opt-in (`REPRO_SIBLING_POLICY=sibling`: compile against the
+          # checkout as it is), scoped to this one step, instead of pinning a
+          # second set of trees only to satisfy the guard.
+          REPRO_SIBLING_POLICY: sibling
           GIT_CONFIG_GLOBAL: /dev/null
           GIT_CONFIG_NOSYSTEM: '1'
           GIT_TERMINAL_PROMPT: '0'
@@ -1099,9 +1184,13 @@ jobs:
           # the job limit fire before a step's own. Needs no network: both
           # revision sets were fetched while the credential config was in
           # scope, and the suite step runs with GIT_CONFIG_GLOBAL=/dev/null.
+          # The sibling-repos file is passed so that a sibling reprobuild's lock
+          # does not list, but that file pins explicitly (nim-shm-gset), returns
+          # to that pin after the ct build moved it to CodeTracer's revision.
           bash "$repro_root/scripts/reconcile_locked_siblings.sh" \
             "$repro_root/repro.lock" "$(cd "$repro_root/.." && pwd)" \
-            "$(basename "$repro_root")" --detach
+            "$(basename "$repro_root")" --detach \
+            "$repro_root/.github/sibling-repos"
 
       - name: Refresh installation token for tests
         timeout-minutes: 15
@@ -1415,11 +1504,13 @@ jobs:
           bash scripts/ci_nix_builder_logs.sh run test-logs flake-metadata -- \
             dev-exec nix flake metadata --no-update-lock-file --json > /dev/null
       - name: Check the trace-format pin against CodeTracer's lock
-        # Decided at evaluation time, so it builds nothing: it fails when
-        # ``ct-trace-format-src`` is not the revision the pinned
-        # ``codetracer-src``'s ``repro.lock`` names (see the check in
-        # flake.nix). Nothing else would run it -- CI builds only
-        # ``.#default``, not ``checks.*``.
+        # Decided at evaluation time, so it builds nothing: it fails when the
+        # trace-format source is not the revision the pinned CodeTracer's
+        # ``repro.lock`` names, or when ``.github/sibling-repos`` clones
+        # either at another revision than pins/codetracer.json implies (see
+        # the check in flake.nix). CI builds only ``.#default``, not
+        # ``checks.*``; `just lint` runs the same comparison through
+        # scripts/check_sibling_lock_pins.py.
         run: |
           system="$(bash scripts/ci_nix_builder_logs.sh run test-logs current-system -- \
             dev-exec nix eval --impure --raw --expr builtins.currentSystem)"

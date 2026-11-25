@@ -125,6 +125,7 @@ suite "e2e_dev_env_deactivate_tampered":
       check not s.contains("set -gx")
       check not s.contains("$env:")
       check not s.contains("hide-env")
+      check not s.contains("op: ")
 
   when isIoMonitorSupported:
     test "e2e_deactivation_needs_no_tool_interface_or_provisioning":

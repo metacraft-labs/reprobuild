@@ -1,6 +1,15 @@
 ## The adversarial audit's test bed (milestone A11, MS-1 row 5): a running
 ## add-on host in a VM the bed creates, held open for an auditing agent.
 ##
+## The waived service's first deployment is an operator's apply (spec §10.1,
+## *An agent apply never weakens the floor*, the accepted trade-off; threat
+## model C102): an agent apply refuses a new unit with the whole-floor
+## waiver, so publishing it straight to the agent left the bed short of its
+## audited state.
+## That apply is a locally modified generation, so the off-host check raises
+## DET-AO-9 ``unpublished-generation`` for it: expected, and named in the
+## README.
+##
 ## The bed (A11 second audit session) also: runs a service under the full
 ## hardening floor (``repro-a11-audit-floored.service``, no waiver, from the
 ## store); publishes and re-signs further sequences on request
@@ -11,8 +20,9 @@
 ##
 ## Not a pass/fail gate of its own. It stands up the host the audit attacks
 ## -- bootstrapped with the deploy agent (its fetch and apply units), the
-## gate's own Evidence sink, a generation applied from a signed manifest
-## with one service unit (the fixture floor waiver) -- checks that the
+## gate's own Evidence sink, a service under the fixture floor waiver that an
+## operator applied first, then a generation applied by the agent from a
+## signed manifest with that service and the floored one -- checks that the
 ## detectors are live (so the audit attacks a working host, not a broken
 ## one), and with ``REPRO_ADDON_AUDIT_HOLD=1`` holds until the auditor
 ## creates ``<run dir>/audit/continue``. Meanwhile the auditor runs commands
@@ -58,9 +68,25 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
   # hardening floor (no waiver), running from the store -- the add-on's own
   # binary's seam-build sleep, inside the closure the floor confines
   # execution to.
+  #
+  # The waived one is deployed first by an operator: an agent apply refuses
+  # a new unit with the whole-floor waiver (spec §10.1, *An agent apply
+  # never weakens the floor*; C102), and the spec's accepted trade-off is
+  # exactly this host -- one operator apply for a waived service's first
+  # deployment, the agent's for every later generation of it. The audit
+  # attacks that residual, so the bed keeps the waived service rather than
+  # dropping it.
+  let waived = unitProfile(Service, "/bin/sleep infinity")
+  let op = g.applyProfile(repro, "a11-audit-operator", waived)
+  step("the operator deploys the waived service", op.exitCode == 0,
+       op.stdout & op.stderr)
+  if op.exitCode != 0: return
+  # The operator's switch re-arms the fetch timer (its step 7); stop it
+  # and take a new baseline, so the tick below observes its own cycle.
+  g.recordTimerBaseline()
   let reproExe = g.exec("ls -d /repro/store/prefixes/repro-addon/*/bin/repro | head -1").stdout.strip()
   let bytes = producer.publish(PublishSpec(sequence: 1,
-    profileText: unitProfile(Service, "/bin/sleep infinity") &
+    profileText: waived &
       unitProfile(FlooredService, reproExe & " system addon test-sleep 864000",
                   floorWaiver = false) &
       canonicalFile("/etc/repro/a11-audit", "audited\n")))
@@ -96,8 +122,11 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
         "re-sign it), \"plainV2\": true (no attestation block)}\n" &
       "Reboot the guest: create " & dir / "requests/<n>.reboot" &
         "; the request channel survives (the bed, not the guest, serves it)\n" &
-      "Services: " & Service & " (fixture floor waiver) and " & FlooredService &
-        " (the full hardening floor, running from the store)\n" &
+      "Services: " & Service & " (fixture floor waiver; an operator's apply " &
+        "deployed it first, the agent applied sequence 1 over it) and " &
+        FlooredService & " (the full hardening floor, running from the store)\n" &
+      "Expected alert: DET-AO-9 unpublished-generation for the operator's " &
+        "generation before sequence 1 (a locally modified generation)\n" &
       "Evidence sink store (read locally): " & sink.storeDir & "\n" &
       "Read it: " & sinkBinary() & " read --dir=" & sink.storeDir & "\n" &
       "Off-host check: " & sinkBinary() & " addon-check --dir=" &

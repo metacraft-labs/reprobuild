@@ -1,6 +1,7 @@
 import ./repro_daemon_core/client
 import ./repro_daemon_core/daemon_lock_probe
 import ./repro_daemon_core/daemon_log
+import ./repro_daemon_core/detached_working_directory
 import ./repro_daemon_core/protocol
 import ./repro_daemon_core/runtime
 import ./repro_daemon_core/stats_store
@@ -9,6 +10,7 @@ import ./repro_daemon_core/lease_registry
 export client
 export daemon_lock_probe
 export daemon_log
+export detached_working_directory
 export protocol
 export runtime
 export stats_store

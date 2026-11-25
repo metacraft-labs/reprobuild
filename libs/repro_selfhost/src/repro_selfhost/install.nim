@@ -171,6 +171,20 @@ proc installSelfImage*(storeRoot, version, platform, sourceDir: string):
       "(`just build` / `scripts/build_apps.sh` produce both) before " &
       "installing this tree")
 
+  # THE THIRD IMAGE, for the same reason: the engine runs the build graph's
+  # own helper commands with the graph helper image beside it and refuses to
+  # run them itself when it is missing (`repro_core/cli_images`,
+  # ``ReprobuildHelperName``), so a prefix without it fails its first build.
+  let sourceHelper = sourceDir / "bin" / reprobuildHelperExeName()
+  if not fileExists(sourceHelper):
+    raise newException(ValueError,
+      "repro self install: the source tree at " & sourceDir &
+      " has bin/" & reprobuildEngineExeName() & " but no bin/" &
+      reprobuildHelperExeName() & ", the graph helper image the engine " &
+      "runs the build graph's helper commands with. Build it " &
+      "(`just build` / `scripts/build_apps.sh` produce all three) before " &
+      "installing this tree")
+
   realizePinnedTree(reprobuildPin(), storeRoot, version, platform, sourceDir)
 
 proc installPinnedImage*(pkg: PinnedPackage;

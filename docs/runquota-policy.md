@@ -173,17 +173,26 @@ Concretely:
    for admission; bypassing it would race against the leases the daemon
    has already granted to other clients and break shared-pool fairness.
 
-6. When the entire build can make no further progress *only* because
-   every remaining action's lease is being denied, reprobuild surfaces
-   that as a build-engine deadlock — distinct from a per-action failure
-   — so operators can recognise "the daemon's machine capacity is too
+6. When a lease is still denied at the deadline, reprobuild surfaces
+   that as a static-capacity deadlock — distinct from a failed command —
+   so operators can recognise "the daemon's machine capacity is too
    small for this build" as a configuration problem rather than a code
-   problem.
+   problem. The deadlock fails the action it stopped without starting it:
+   its `reason` is `runquota static-capacity deadlock`
+   (`RunQuotaStaticCapacityDeadlockReason`) and its stderr is the deadlock
+   diagnostic, which names the budget and the remedies. Its dependents are
+   blocked, independent actions go on, and the build ends failed. It is
+   reported like any other failed build: the failed action is printed, the
+   failure report is written, and `--write-report` writes the full report.
+   The engine does not raise it out of `runBuild`: a raise would replace
+   the build's result, and with it every report the CLI writes from that
+   result.
 
 The implementation MUST NOT exit with an ordinary `ReproRunQuotaError` on a
-denial. Once the bounded denial deadline expires it raises the distinct
-`ReproRunQuotaDeadlockError`; protocol-level failures continue to use
-`ReproRunQuotaError`.
+denial. Once the bounded denial deadline expires the client library raises
+the distinct `ReproRunQuotaDeadlockError`; protocol-level failures continue
+to use `ReproRunQuotaError`. The build engine catches the deadlock and turns
+it into the failed action described in point 6.
 
 ## Examples
 
@@ -219,7 +228,8 @@ Each step is attempted even when an earlier one fails. The raised error
 keeps the initiating failure's text and kind (a deadlock stays a
 `ReproRunQuotaDeadlockError`), then says what was rolled back, and names
 the lease ids and child pids of anything it could not resolve. The
-scheduler marks the staged actions failed with that text, and the
+scheduler marks the staged actions failed with that text (for a deadlock,
+with the deadlock reason of point 6), and the
 session close at the end of the build succeeds instead of being refused
 with `session still owns leases`.
 
@@ -237,8 +247,8 @@ pins both halves against a real `runquotad`.
 
 If the request statically exceeds the daemon's machine budget (for example a
 build that asks for 32 GiB on a 16 GiB host), reprobuild retries with visible
-backoff until the denial deadline expires, then reports a distinct
-`static-capacity deadlock`. The fix is to grow the daemon's configured budget,
+backoff until the denial deadline expires, then fails the action with a
+distinct `static-capacity deadlock` (point 6). The fix is to grow the daemon's configured budget,
 lower the recipe's request, or run the build on a larger host. Reprobuild does
 not autonomously down-scale or bypass the caller's resource declaration.
 

@@ -31,8 +31,11 @@ import std/[algorithm, options, os, sequtils, sets, strutils, tables, times]
 
 import repro_lock
 import repro_solver/version_encoder
+import repro_solver/nimble_versions
+from repro_solver/version_constraints import ESemverParse
 import repro_nimble_index
 import repro_nimble_fetch
+import repro_nimble_generator/capture
 import repro_nimble_generator/source_set
 
 import ./catalog_discovery
@@ -172,6 +175,9 @@ proc prepareNimbleSolve*(projectRoot: string; packages: var seq[PackageDecl];
     NimbleSolveOptions(excludeNewer: excludeNewer, roots: roots,
       acceptedOrigins: accepted, nimDeclared: hasNim))
   result.shardsRead = loadedShardCount(idx)
+  # A retargeted alias is resolved to its recorded target; the new target is
+  # said, not taken (NPC-AREQ3, NPC-AREQ16).
+  result.notes.add aliasCandidateNotes(result.input)
   let decls = lowerToSolver(result.input,
     toolchainNim = (if hasNim: "nim" else: ""), nimVersions = nimVersions)
   for p in packages.mitems:
@@ -208,6 +214,22 @@ proc snapshotMove*(oldVersion, newVersion: string): string =
   elif newVersion.len > 0 and not newVersion.startsWith("#"):
     "snapshot retired"
   else: ""
+
+proc versionMove*(oldVersion, newVersion: string): string =
+  ## What a lock row's version move is, for `repro lock diff`: the
+  ## snapshot moves of ``snapshotMove``; between two tag versions,
+  ## `upgrade` or `downgrade` by Nimble's order over every component
+  ## (NPC-AREQ6: `0.6.0.3.1 -> 0.7.0.8.0` is an upgrade); "" otherwise.
+  result = snapshotMove(oldVersion, newVersion)
+  if result.len > 0:
+    return
+  try:
+    let c = cmpNimble(parseNimbleVersion(oldVersion),
+      parseNimbleVersion(newVersion))
+    if c < 0: result = "upgrade"
+    elif c > 0: result = "downgrade"
+  except ESemverParse:
+    discard
 
 proc applyNimbleRows*(setup: NimbleSolveSetup; document: string):
     tuple[document: string; refusals: seq[string]; moves: seq[string]] =
@@ -338,16 +360,13 @@ proc recordSrcDir*(rec: VersionRecord; p: NimblePlatform;
   ## there, in record order (the last one wins, as in the `.nimble` file).
   ## "" = the package root. Raises ``NimbleLockError`` for an assignment
   ## whose condition depends on the Nim version when ``nim`` is none.
-  result = rec.layout.srcDir
-  for c in rec.layout.conditional:
-    if c.field == rfSrcDir and c.values.len > 0:
-      case decideOn(c.condition, p, nim)
-      of tTrue: result = c.values[^1]
-      of tFalse: discard
-      of tUnknown:
-        raise newException(NimbleLockError, "the record's srcDir depends " &
-          "on the Nim version (`" & renderCondition(c.condition) & "`), " &
-          "and the lock records no Nim: declare `uses: nim` and re-lock")
+  let e = effectiveLayout(rec, p, nim)
+  let undecided = e.undecidedText({rfSrcDir})
+  if undecided.len > 0:
+    raise newException(NimbleLockError, "the record's srcDir depends " &
+      "on the Nim version (`" & undecided & "`), " &
+      "and the lock records no Nim: declare `uses: nim` and re-lock")
+  e.layout.srcDir
 
 proc nimbleBuildOrder*(packages: seq[LockedNimblePackage]):
     seq[LockedNimblePackage] =
@@ -512,6 +531,8 @@ proc prepareLockedNimbleSources*(projectRoot, lockPath: string;
       else:
         cfg = defaultFetchConfig(stateDir, mirrors)
     if cfg.storeRoot.len == 0: cfg.storeRoot = store
+    if options.fetchConfig.isNone and cfg.captureLog.len == 0:
+      cfg.captureLog = projectCaptureLog(projectRoot)
     result.mirrors = cfg.mirrors
     let fetched = fetchLocked(missing, cfg)
     result.fetchEdges = fetched.executed.len
@@ -697,7 +718,7 @@ proc nimbleLockDiff*(oldText, newText, anchor: string; now: int64):
       let x = newRows[n]
       var parts: seq[string]
       if o.version != x.version:
-        let move = snapshotMove(o.version, x.version)
+        let move = versionMove(o.version, x.version)
         parts.add "version " & o.version & " -> " & x.version &
           (if move.len > 0: " (" & move & ")" else: "")
       if o.coordinates.revision != x.coordinates.revision:
@@ -757,7 +778,12 @@ proc nimbleLockDiff*(oldText, newText, anchor: string; now: int64):
         try:
           let idx = openNimbleIndex(gen)
           for e in loadEvents(idx).events:
-            if nameKey(e.package) notin watched: continue
+            # An alias's retarget concerns the packages it named before and
+            # names now, which is what a lock row records.
+            if nameKey(e.package) notin watched and not
+                (e.kind == oeAliasRetargeted and (nameKey(e.before) in watched or
+                  nameKey(e.after) in watched)):
+              continue
             events.add "  " & $e.kind & " nimble:" & e.package &
               (if e.version.len > 0: " " & e.version else: "") &
               (if e.before.len > 0 or e.after.len > 0:

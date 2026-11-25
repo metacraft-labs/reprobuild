@@ -75,7 +75,8 @@ proc makeImage(dir, marker: string): string =
   ## `newScenario`, which is exactly what it did until this line named the
   ## second image.
   createDir(dir / "bin")
-  for name in [selfExecutableName(), reprobuildEngineExeName()]:
+  for name in [selfExecutableName(), reprobuildEngineExeName(),
+                 reprobuildHelperExeName()]:
     writeFile(dir / "bin" / name, "image " & marker & " " & name & "\n")
   writeFile(dir / "VERSION", marker & "\n")
   dir

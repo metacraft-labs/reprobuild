@@ -75,7 +75,7 @@ set -eu
 # also rejected for the same reason — only the two files that are inputs
 # to this build are listed. Anything broader is separate work, and this
 # comment is the record that it was considered and declined.
-BOOTSTRAP_SOURCE_ROOTS="apps libs config.nims flake.nix repro.nim scripts/build_apps.sh scripts/source_paths.sh"
+BOOTSTRAP_SOURCE_ROOTS="apps libs config.nims flake.nix repro.nim repro_recipe_support.nim scripts/build_apps.sh scripts/source_paths.sh"
 
 host_exe_suffix() {
   case "$(uname -s)" in
@@ -225,6 +225,15 @@ decide() {
   # client's link too.
   if [ ! -f "${root}/build/bin/reprobuild${suffix}" ]; then
     printf 'bootstrap missing:%s\n' "build/bin/reprobuild${suffix}"
+    return 0
+  fi
+  # The engine's graph helper image, for the same reason one level down: the
+  # engine runs the build graph's own helper commands (provider compile,
+  # interface extraction, dev-env introspection, ...) with
+  # `build/bin/reprobuild-helper` and refuses to run them itself when it is
+  # missing, so a tree without it fails its first build.
+  if [ ! -f "${root}/build/bin/reprobuild-helper${suffix}" ]; then
+    printf 'bootstrap missing:%s\n' "build/bin/reprobuild-helper${suffix}"
     return 0
   fi
 

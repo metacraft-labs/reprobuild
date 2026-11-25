@@ -46,6 +46,20 @@ permissions:
 # scripts/check_workflows.sh asserts both.
 on:
   workflow_call:
+    inputs:
+      # A PROVING RUN, never a release. Empty (every tag push, and the
+      # default dispatch) builds every row of `platforms` in
+      # .github/release-platforms.json, as before. A list of `<platform>-<arch>`
+      # names (comma- or space-separated) builds only those legs, and may name
+      # a row of `candidates`: a leg that is not part of the release yet and
+      # must first build green through THIS job, on its own runner, before it
+      # is moved into `platforms` ("Prove, then gate"). `plan` refuses a
+      # filter on a tag ref, so a filtered run can never reach the publish
+      # job's asset assertion with a partial set.
+      platforms:
+        type: string
+        required: false
+        default: ""
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Release shape: build everything, THEN publish once, atomically.
@@ -96,6 +110,12 @@ on:
 # from a branch (the normal case: every dispatch run to date was against `dev`)
 # builds and publishes nothing, which is what made the 2026-08-01 dispatch run
 # show green macOS and Linux legs yet add nothing to any release.
+#
+# A branch dispatch may also name legs (the `platforms` input), to prove one
+# without building the rest, including a `candidates` row of
+# .github/release-platforms.json that is not part of the release yet. That is
+# how a new platform goes green through THIS job before it is allowed to gate
+# a release. `plan` refuses the input on a tag.
 # ─────────────────────────────────────────────────────────────────────────────
 
 jobs:
@@ -133,6 +153,10 @@ jobs:
       # `addon_static.arches`, space-separated: what the job builds, and what
       # the expected asset set above already names.
       addon-arches: ${{ steps.plan.outputs.addon-arches }}
+      # `true` unless the run was given a `platforms` filter (a proving run).
+      # Jobs that only make sense for a whole release -- the Nix cache push --
+      # are skipped when it is `false`.
+      full-release: ${{ steps.plan.outputs.full-release }}
     steps:
       - uses: actions/checkout@v4
 
@@ -211,16 +235,53 @@ jobs:
       - name: Derive matrix and expected asset set
         id: plan
         uses: actions/github-script@v7
+        env:
+          PLATFORM_FILTER: ${{ inputs.platforms }}
+          # Whether the production signing credentials of the signed installers
+          # are configured (repository secrets; docs/release-signing.md,
+          # "Installer signing"). Only the presence is read, never a value.
+          PKG_SIGNING_CONFIGURED: ${{ secrets.REPRO_PKG_SIGNING_P12_BASE64 != '' && secrets.REPRO_PKG_SIGNING_P12_PASSWORD != '' && secrets.REPRO_NOTARY_API_KEY_P8 != '' && secrets.REPRO_NOTARY_API_KEY_ID != '' && secrets.REPRO_NOTARY_API_ISSUER_ID != '' }}
+          MSI_SIGNING_CONFIGURED: ${{ secrets.REPRO_AUTHENTICODE_PFX_BASE64 != '' && secrets.REPRO_AUTHENTICODE_PFX_PASSWORD != '' }}
         with:
           script: |
             const fs = require('fs');
 
             const spec = JSON.parse(fs.readFileSync('.github/release-platforms.json', 'utf8'));
-            const platforms = spec.platforms;
-            if (!Array.isArray(platforms) || platforms.length === 0) {
+            const released = spec.platforms;
+            if (!Array.isArray(released) || released.length === 0) {
               core.setFailed('.github/release-platforms.json declares no platforms; a release with no platforms is not a release.');
               return;
             }
+            const legName = p => `${p.platform}-${p.arch}`;
+
+            // The proving-run filter (the `platforms` input). Without one the
+            // matrix is exactly `platforms`, and `candidates` are never built.
+            // With one, the matrix is exactly the named legs, which may be
+            // candidates; it is refused on a tag, where the publish job would
+            // otherwise compare a partial build against a partial asset list
+            // and could publish a release missing a promised platform.
+            const filter = (process.env.PLATFORM_FILTER || '').split(/[\s,]+/).filter(Boolean);
+            let platforms = released;
+            if (filter.length) {
+              if ((context.ref || '').startsWith('refs/tags/')) {
+                core.setFailed(
+                  `a platform filter (${filter.join(', ')}) was given for ${context.ref}. A tag builds and ` +
+                  `publishes every platform in .github/release-platforms.json or nothing; filter only a ` +
+                  `dispatch from a branch, which publishes nothing.`);
+                return;
+              }
+              const known = [...released, ...(spec.candidates || [])];
+              const unknown = filter.filter(n => !known.some(p => legName(p) === n));
+              if (unknown.length) {
+                core.setFailed(
+                  `unknown platform(s) ${unknown.join(', ')}; .github/release-platforms.json declares ` +
+                  `${known.map(legName).join(', ')}`);
+                return;
+              }
+              platforms = known.filter(p => filter.includes(legName(p)));
+              core.info(`proving run: building only ${platforms.map(legName).join(', ')}; nothing is published`);
+            }
+            core.setOutput('full-release', filter.length ? 'false' : 'true');
 
             const nimble = fs.readFileSync('reprobuild.nimble', 'utf8');
             const m = nimble.match(/^\s*version\s*=\s*"([^"]+)"/m);
@@ -254,13 +315,41 @@ jobs:
             // archives above, and are then ordinary members of the asset set.
             const archiveOf = Object.fromEntries(platforms.map(p =>
               [`${p.platform}-${p.arch}`, `reprobuild-${version}-${p.platform}-${p.arch}.${p['archive_ext']}`]));
+            // Validated against the RELEASED platforms on every run, so a
+            // proving run still catches a declaration error; built only when
+            // the platform they come from is in this run's matrix.
+            const isReleased = n => released.some(p => legName(p) === n);
+            // The signed installers (.pkg: Developer ID Installer + notarization;
+            // .msi: Authenticode) may be listed only while their PRODUCTION
+            // credentials are configured: without them the leg signs with a
+            // stand-in certificate, and a stand-in-signed asset is never part of
+            // a release. Refused on every run, so listing one too early fails
+            // the dispatch that would prove it, not the first tag.
+            const SIGNED = {
+              pkg: { configured: process.env.PKG_SIGNING_CONFIGURED === 'true',
+                     secrets: 'REPRO_PKG_SIGNING_P12_BASE64, REPRO_PKG_SIGNING_P12_PASSWORD, ' +
+                              'REPRO_NOTARY_API_KEY_P8, REPRO_NOTARY_API_KEY_ID, REPRO_NOTARY_API_ISSUER_ID' },
+              msi: { configured: process.env.MSI_SIGNING_CONFIGURED === 'true',
+                     secrets: 'REPRO_AUTHENTICODE_PFX_BASE64, REPRO_AUTHENTICODE_PFX_PASSWORD' },
+            };
+            for (const p of spec.packages || []) {
+              const signed = SIGNED[p.ecosystem];
+              if (signed && !signed.configured) {
+                core.setFailed(
+                  `.github/release-platforms.json lists ${p.asset.replaceAll('{version}', version)} (${p.ecosystem}), but its production signing ` +
+                  `credentials are not configured (${signed.secrets}); its leg would sign it with a stand-in ` +
+                  `certificate, and a stand-in-signed asset never joins a release. Configure the secrets, or ` +
+                  `remove the entry.`);
+                return;
+              }
+            }
             const packages = (spec.packages || []).map(p => {
-              if (!archiveOf[p.from]) {
+              if (!isReleased(p.from)) {
                 throw new Error(`package ${p.asset} is built from '${p.from}', which is not a platform in this release`);
               }
               return { ecosystem: p.ecosystem, archive: archiveOf[p.from],
                        asset: p.asset.replaceAll('{version}', version) };
-            });
+            }).filter(p => p.archive);
             assets.push(...packages.map(p => p.asset));
 
             // The static add-on binaries, built by their own job
@@ -269,16 +358,18 @@ jobs:
             // absent).
             const addon = spec.addon_static;
             if (addon) {
-              const host = platforms.find(p => `${p.platform}-${p.arch}` === addon.from);
-              if (!host) {
+              if (!isReleased(addon.from)) {
                 throw new Error(`addon_static is built on '${addon.from}', which is not a platform in this release`);
               }
-              for (const a of addon.arches) {
-                assets.push(addon.asset.replaceAll('{version}', version).replaceAll('{arch}', a));
+              const host = platforms.find(p => legName(p) === addon.from);
+              if (host) {
+                for (const a of addon.arches) {
+                  assets.push(addon.asset.replaceAll('{version}', version).replaceAll('{arch}', a));
+                }
+                core.setOutput('addon-runner', JSON.stringify(addon.runner ?? host.runner));
+                core.setOutput('addon-env-flavor', host['env-flavor']);
+                core.setOutput('addon-arches', addon.arches.join(' '));
               }
-              core.setOutput('addon-runner', JSON.stringify(addon.runner ?? host.runner));
-              core.setOutput('addon-env-flavor', host['env-flavor']);
-              core.setOutput('addon-arches', addon.arches.join(' '));
             }
 
             const dupes = assets.filter((a, i) => assets.indexOf(a) !== i);
@@ -290,7 +381,21 @@ jobs:
             core.info(`release ${version} will consist of exactly ${assets.length} assets:`);
             for (const a of assets) core.info(`  - ${a}`);
 
-            core.setOutput('matrix', JSON.stringify(platforms));
+            // `native-packages`: whether a declared package is built from
+            // this leg's archive. The leg's package steps run only then, so a
+            // Linux leg no package names (linux-aarch64) neither builds nor
+            // claims to have checked one, while a leg that does name one still
+            // fails if none was checked.
+            // `signed-installer`: the signed .pkg/.msi asset listed for this leg,
+            // or ''. The leg's installer steps run on a proving run (no tag) to
+            // prove the leg, and on a tag only for a listed installer; the
+            // .deb/.rpm steps ignore the signed ecosystems.
+            const ofLeg = (p, k) => k.archive === archiveOf[legName(p)];
+            core.setOutput('matrix', JSON.stringify(platforms.map(p => ({
+              ...p,
+              'native-packages': packages.some(k => ofLeg(p, k) && !SIGNED[k.ecosystem]),
+              'signed-installer': (packages.find(k => ofLeg(p, k) && SIGNED[k.ecosystem]) || {}).asset || '',
+            }))));
             core.setOutput('version', version);
             core.setOutput('expected-assets', assets.join('\n'));
             // One `ecosystem archive asset` line per package: the publish job
@@ -567,18 +672,18 @@ jobs:
         # at exactly 120 min -- a killed process with empty stderr, not a real
         # failure. The phases PROGRESS (proven: extract completes in 13 min, the
         # earlier "hang" was that too-tight cap), they are just slow, so give the
-        # whole leg room to finish. The interface-extract still has its own tight
-        # 40-min inner cap (REPRO_INTERFACE_COMPILE_TIMEOUT_SECONDS) to catch a
+        # whole leg room to finish. The interface-extract has its own inner
+        # watchdog (runCommand kills a `nim c` whose output stops for
+        # REPRO_INTERFACE_COMPILE_STALL_SECONDS, default 15 min) to catch a
         # genuine extract wedge fast, so this outer cap need not be tight.
         timeout-minutes: 240
         env:
-          # Cap the interface `nim c` (inside runCommand) above a healthy-but-slow
-          # extract (~11 min observed; 40 min gives wide margin) so genuine
-          # slowness passes while a true multi-hour wedge is still killed fast
-          # with a dumped partial sink. LIST_CMD keeps nim echoing each gcc
-          # sub-command so any future wedge names itself. Both are retained as
-          # durable guards, not just debug scaffolding.
-          REPRO_INTERFACE_COMPILE_TIMEOUT_SECONDS: "2400"
+          # No fixed total on the interface `nim c`: runCommand's default
+          # watchdog kills it when its output stops (a wedge), not when it is
+          # merely slow, and dumps the partial sink. LIST_CMD keeps nim echoing
+          # each gcc sub-command, so the watchdog sees steady progress and the
+          # LAST line of a dump names the sub-command that wedged. Retained as
+          # a durable guard, not just debug scaffolding.
           REPRO_INTERFACE_LIST_CMD: "1"
           # Cap the `.#release` engine's action parallelism on this leg.
           #
@@ -973,16 +1078,26 @@ jobs:
       # Checksum at the point of production. The publish job RE-computes this
       # from the downloaded artifact and compares, which is what makes the
       # artifact round-trip itself verified rather than assumed.
+      #
+      # The line is GNU sha256sum's TEXT form, `<digest>  <name>`, on every
+      # leg. The Windows leg's MSYS2 sha256sum defaults to binary mode and
+      # wrote `<digest> *<name>`, so the concatenated SHA256SUMS mixed the two
+      # forms. The digest is read from stdin in binary mode (byte-exact, no
+      # name escaping) and the line assembled here, as
+      # scripts/release-signing/lib-signing.sh does for the signed manifest.
       - name: Compute checksum
         shell: bash
         run: |
           set -euo pipefail
           asset="${{ env.ASSET_NAME }}"
           if command -v sha256sum >/dev/null 2>&1; then
-            sha256sum "${asset}" > "${asset}.sha256"
+            digest="$(sha256sum -b < "${asset}")"
           else
-            shasum -a 256 "${asset}" > "${asset}.sha256"
+            digest="$(shasum -a 256 -b < "${asset}")"
           fi
+          digest="${digest%% *}"
+          [[ "${digest}" =~ ^[0-9a-f]{64}$ ]] || { echo "::error::no sha256 digest for ${asset}: ${digest}"; exit 1; }
+          printf '%s  %s\n' "${digest}" "${asset}" > "${asset}.sha256"
           cat "${asset}.sha256"
 
       # The musl-static add-on binaries are NOT built here: the
@@ -996,9 +1111,11 @@ jobs:
       # Each gets a `.sha256`, so the publish job's asset assertion, the
       # SHA256SUMS manifest, signing and the draft verification treat them as
       # ordinary release members. .github/release-platforms.json's `packages`
-      # list declares them; a leg builds only those made from ITS archive.
+      # list declares them; a leg builds only those made from ITS archive, and
+      # a leg none is made from (`matrix.native-packages`, set by `plan`) skips
+      # this step and the install check below.
       - name: Build native packages from this leg's archive
-        if: matrix.os-name == 'linux'
+        if: matrix.native-packages
         shell: bash
         env:
           PACKAGES: ${{ needs.plan.outputs.packages }}
@@ -1030,7 +1147,7 @@ jobs:
       # archive gate is re-run against what the .deb installs, and each
       # package's file set is compared with the archive's, entry for entry.
       - name: Verify the native packages install the archive intact
-        if: matrix.os-name == 'linux'
+        if: matrix.native-packages
         shell: bash
         timeout-minutes: 60
         env:
@@ -1091,6 +1208,99 @@ jobs:
           done <<< "${PACKAGES}"
           [ "${checked}" -gt 0 ] || { echo "::error::no native package was checked for ${ASSET_NAME}"; exit 1; }
 
+      # ── The signed installers: the macOS .pkg and the Windows MSI ─────────
+      #
+      # Built from this leg's archive, signed, verified (and the .pkg
+      # notarized) by scripts/release/build_signed_installer.sh, which takes
+      # its mode from the environment alone: PRODUCTION when the leg carries
+      # the production signing secrets below, STAND-IN (certificates generated
+      # for this run, a stand-in notary) when it does not. The two modes run
+      # the same scripts; swapping in the production certificates is setting
+      # the secrets, nothing else (docs/release-signing.md, "Installer
+      # signing").
+      #
+      # "Prove, then gate": until an installer is listed in
+      # .github/release-platforms.json (`matrix.signed-installer`), these steps
+      # run only on a proving run (a dispatch from a branch, which publishes
+      # nothing), so an unproved step can never hold back a release. `plan`
+      # refuses to list one while its production secrets are missing, the
+      # signer refuses a stand-in certificate on a tag
+      # (REPRO_RELEASE_PUBLISHING=1), and `publish-release` refuses any
+      # stand-in-signed asset (scripts/release/refuse_stand_in_signed_assets.sh).
+      - name: Build, sign and notarize the macOS installer package
+        if: matrix.platform == 'darwin' && (!startsWith(github.ref, 'refs/tags/') || matrix.signed-installer != '')
+        shell: bash
+        timeout-minutes: 90
+        env:
+          VERSION: ${{ needs.plan.outputs.version }}
+          REPRO_RELEASE_PUBLISHING: ${{ startsWith(github.ref, 'refs/tags/') && '1' || '0' }}
+          REPRO_PKG_SIGNING_P12_BASE64: ${{ secrets.REPRO_PKG_SIGNING_P12_BASE64 }}
+          REPRO_PKG_SIGNING_P12_PASSWORD: ${{ secrets.REPRO_PKG_SIGNING_P12_PASSWORD }}
+          REPRO_NOTARY_API_KEY_P8: ${{ secrets.REPRO_NOTARY_API_KEY_P8 }}
+          REPRO_NOTARY_API_KEY_ID: ${{ secrets.REPRO_NOTARY_API_KEY_ID }}
+          REPRO_NOTARY_API_ISSUER_ID: ${{ secrets.REPRO_NOTARY_API_ISSUER_ID }}
+        run: |
+          set -euo pipefail
+          # openssl and python3 from nixpkgs (macOS's own openssl is LibreSSL);
+          # pkgbuild, productsign, pkgutil, security, xcrun and spctl are the
+          # system's.
+          dev-exec nix shell nixpkgs#openssl nixpkgs#python3 -c sh scripts/release/build_signed_installer.sh \
+            --ecosystem pkg --version "${VERSION}" --archive "${ASSET_NAME}" --out installer-out \
+            --platform "${{ matrix.platform }}" --asset-arch "${{ matrix.arch }}" < /dev/null
+
+      - name: Provision WiX v3 and signtool (Windows installer)
+        if: matrix.os-name == 'windows' && (!startsWith(github.ref, 'refs/tags/') || matrix.signed-installer != '')
+        shell: pwsh
+        run: |
+          . ./windows/toolchain-utils.ps1
+          . ./windows/ensure-installer-tools.ps1
+          $toolchain = Read-KeyValueFile -Path windows/toolchain-versions.env
+          $root = if ($env:WINDOWS_DIY_INSTALL_ROOT) { $env:WINDOWS_DIY_INSTALL_ROOT } else { $env:RUNNER_TEMP }
+          $tools = Ensure-InstallerTools -Root $root -Toolchain $toolchain
+          Add-Content -Path $env:GITHUB_ENV -Value "REPRO_WIX3_BIN=$($tools.Wix3Bin)"
+          Add-Content -Path $env:GITHUB_ENV -Value "REPRO_SIGNTOOL=$($tools.SignTool)"
+
+      - name: Build and sign the Windows installer (MSI)
+        if: matrix.os-name == 'windows' && (!startsWith(github.ref, 'refs/tags/') || matrix.signed-installer != '')
+        shell: bash
+        timeout-minutes: 60
+        env:
+          VERSION: ${{ needs.plan.outputs.version }}
+          REPRO_RELEASE_PUBLISHING: ${{ startsWith(github.ref, 'refs/tags/') && '1' || '0' }}
+          REPRO_AUTHENTICODE_PFX_BASE64: ${{ secrets.REPRO_AUTHENTICODE_PFX_BASE64 }}
+          REPRO_AUTHENTICODE_PFX_PASSWORD: ${{ secrets.REPRO_AUTHENTICODE_PFX_PASSWORD }}
+        run: |
+          set -euo pipefail
+          sh scripts/release/build_signed_installer.sh \
+            --ecosystem msi --version "${VERSION}" --archive "${ASSET_NAME}" --out installer-out \
+            --platform "${{ matrix.platform }}" --asset-arch "${{ matrix.arch }}" < /dev/null
+
+      # A proving run keeps what it built as a workflow artifact of its own,
+      # which `publish-release` never downloads (it takes `release-*`): the
+      # package, its checksum, the signing report and, in stand-in mode, the
+      # marker and the stand-in's PUBLIC root. No key is ever in it.
+      - name: Keep the installer of a proving run
+        if: >-
+          !startsWith(github.ref, 'refs/tags/') &&
+          (matrix.platform == 'darwin' || matrix.os-name == 'windows')
+        uses: actions/upload-artifact@v4
+        with:
+          name: proving-installer-${{ matrix.platform }}-${{ matrix.arch }}
+          path: installer-out/
+          if-no-files-found: error
+          retention-days: 7
+
+      # A listed installer joins this leg's release artifact like the .deb.
+      - name: Stage the listed installer for the release
+        if: startsWith(github.ref, 'refs/tags/') && matrix.signed-installer != ''
+        shell: bash
+        env:
+          INSTALLER: ${{ matrix.signed-installer }}
+        run: |
+          set -euo pipefail
+          [ -f "installer-out/${INSTALLER}" ] || { echo "::error::no ${INSTALLER} was built"; exit 1; }
+          mv "installer-out/${INSTALLER}" "installer-out/${INSTALLER}.sha256" .
+
       # Publish NOTHING to the release from here. The artifact is the only
       # output of a build leg; a leg that uploads directly to the release is
       # exactly the bug this workflow was restructured to remove.
@@ -1106,6 +1316,10 @@ jobs:
             reprobuild_*.deb.sha256
             reprobuild-*.rpm
             reprobuild-*.rpm.sha256
+            reprobuild-*.pkg
+            reprobuild-*.pkg.sha256
+            reprobuild-*.msi
+            reprobuild-*.msi.sha256
           if-no-files-found: error
           retention-days: 7
 
@@ -1253,6 +1467,9 @@ jobs:
     # `plan`, which gates every leg, waits for general capacity. Nothing a
     # leg builds is needed here.
     needs: plan
+    # Not on a proving run (a `platforms` filter): it proves one leg, and the
+    # cache push of the x86_64 package is no part of that.
+    if: needs.plan.outputs.full-release == 'true'
     # `[self-hosted, linux, x64]`, like `plan`: the `eph-linux-x64-release`
     # scale set has a single runner and the Linux leg holds it for hours.
     runs-on: [self-hosted, linux, x64]
@@ -1472,6 +1689,12 @@ jobs:
           done
 
           echo "All $(grep -c . <<< "${EXPECTED}") expected archives present and verified."
+
+      # A stand-in-signed .pkg or MSI is never published, whatever let it get
+      # this far (the leg and `plan` refuse it first; see the build job).
+      - name: Refuse stand-in-signed assets
+        shell: bash
+        run: sh scripts/release/refuse_stand_in_signed_assets.sh staging
 
       # One combined manifest is what `setup-reprobuild` verifies downloads
       # against. Before this, releases published no checksums at all, so the

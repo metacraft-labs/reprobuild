@@ -394,9 +394,12 @@ proc gccArchive*(opts: ArchiveOptions): BuildActionDef =
 proc gccStrip*(opts: StripOptions): BuildActionDef =
   ## The canonical ``strip`` package's typed call and provisioning identity,
   ## as ``gccArchive`` does for ``ar``: the aggregate binutils selector
-  ## declares no ``strip`` and may resolve to ld. An empty ``target`` strips
-  ## in place (no ``-o``, no declared output). The edge runs after the edge
-  ## that produces its input.
+  ## declares no ``strip`` and may resolve to ld. ``target`` must name a
+  ## path other than the input: an in-place strip would rewrite the
+  ## producing edge's declared output, so it raises ``ValueError``
+  ## (``separateStripOutput``). The edge runs after the edge that produces
+  ## its input.
   let input = if opts.input.outputs.len > 0: opts.input.outputs[0] else: ""
-  binutilsModule.strip(output = opts.target, keepSymbols = opts.keepSymbols,
-    input = input, after = [opts.input])
+  binutilsModule.strip(
+    output = binutilsModule.separateStripOutput(input, opts.target),
+    keepSymbols = opts.keepSymbols, input = input, after = [opts.input])

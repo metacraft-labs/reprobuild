@@ -1,6 +1,8 @@
 from repro_core/process_streams import drainStream
 import std/[algorithm, json, options, os, osproc, sequtils, sets, streams,
             strtabs, strutils, tables, tempfiles, times]
+when defined(windows):
+  import std/monotimes
 
 when defined(windows):
   type
@@ -53,6 +55,7 @@ when defined(windows):
   const
     WinStartfUseStdHandles = 0x00000100'u32
     WinCreateAlways = 2'u32
+    WinOpenExisting = 3'u32
     WinFileShareRead = 1'u32
     WinFileShareWrite = 2'u32
     WinWaitInfinite = 0xFFFFFFFF'u32
@@ -77,6 +80,9 @@ when defined(windows):
 
   proc winGetExitCodeProcess(hProcess: ProviderLockHandle; lpExitCode: ptr ProviderLockDword): int32
     {.stdcall, dynlib: "kernel32", importc: "GetExitCodeProcess".}
+
+  proc winGetFileSizeEx(hFile: ProviderLockHandle; lpFileSize: ptr int64): int32
+    {.stdcall, dynlib: "kernel32", importc: "GetFileSizeEx".}
 else:
   import std/posix
 
@@ -84,6 +90,8 @@ else:
 import cbor
 import repro_core
 import repro_core/file_lock
+from repro_core/durable_replace import replaceFileDurably,
+  syncDirectoryDurably, syncExistingFileDurably
 import repro_core/workspace_siblings
 import repro_core/variant_assignments
 when defined(posix):
@@ -96,6 +104,10 @@ import repro_core/process_env
 import repro_core/git_separated
 export file_lock.ReproFileLock
 import repro_interface_artifacts/compiler_args_transport
+when defined(windows):
+  # Only the Windows wait in `runCommand` has a bounded wait to decide; the
+  # POSIX arm waits on the child directly.
+  import repro_interface_artifacts/compile_watchdog
 import repro_interface_artifacts/closure_manifest
 export closure_manifest
 import repro_interface_artifacts/gem_closure_manifest
@@ -370,7 +382,7 @@ type
     location*: SourceLocation
     sourceGitlinks*: seq[GitlinkSourceRequirement]
       ## Cross-Repo-Source-Consumption §4.2a.2a: the gitlinks the exported
-      ## source requires. Carried from v38 on, after ``location``; a v<38
+      ## source requires. Carried from v39 on, after ``location``; a v<39
       ## payload decodes it empty, and a nonempty value is never written at
       ## a version that cannot carry it (``writeLibrary`` refuses), so a
       ## reader that cannot honour the requirement refuses the envelope by
@@ -896,6 +908,17 @@ type
       ## flattened tool-use surface. Cross-repository executable consumers use
       ## this closure to launch the produced binary with its declared tools.
     provisioningContributions*: seq[InterfaceProvisioningContribution]
+    pinnedSiblings*: seq[string]
+      ## The workspace repositories the recipe's ``pinned:`` block names:
+      ## siblings the lock must pin (a CI job clones them at the locked
+      ## revision) that the recipe does NOT use as a dependency. They are
+      ## repository names, never ``uses:`` selectors, so no consumer builds
+      ## against them and lock generation records each as a plain ``deps``
+      ## entry without reading its recipe or its dependencies
+      ## (Unified-Locking-And-Hooks.md §14.2 item 4). Encoded in the v38
+      ## codec AFTER ``provisioningContributions``; v<38 readers' artifacts
+      ## decode it empty. In the fingerprint only when non-empty, so no
+      ## interface that declares none changes its fingerprint.
     publicSignatureDependencies*: seq[string]
     location*: SourceLocation
     standardBuildEligible*: bool
@@ -914,6 +937,12 @@ type
   ProviderCompileExecutionResult* = object
     exitCode*: int
     output*: string
+    killedByCaller*: bool
+      ## `runCommand` itself killed the child's process tree (the Windows
+      ## compile watchdog: a stalled sink or the overall ceiling). Its
+      ## `exitCode` then reads as an ordinary failure, but the child did not
+      ## end on its own: whatever it was writing may be half written
+      ## (`runNimcacheCompilerCommandHeld`).
 
   ProviderCompileEdge* = object
     actionSpec*: ActionSpec
@@ -1310,18 +1339,30 @@ proc `==`*(a, b: InterfaceToolUse): bool {.noSideEffect.} =
 
 const
   EnvelopeMagic = [byte(ord('R')), byte(ord('B')), byte(ord('S')), byte(ord('Z'))]
-  EnvelopeVersion = 38'u16
-    ## v38 (current): ``InterfaceLibrary`` retains ``sourceGitlinks``
+  EnvelopeVersion = 39'u16
+    ## v39 (current): ``InterfaceLibrary`` retains ``sourceGitlinks``
     ##                (Cross-Repo-Source-Consumption §4.2a.2a), a ``u32``
     ##                count plus one string per required gitlink path,
-    ##                appended after the row's ``location``. v37 and older
+    ##                appended after the row's ``location``. v38 and older
     ##                payloads decode it empty. The requirement is mandatory
-    ##                source semantics, so the version is the refusal: a v37
-    ##                reader rejects every v38 envelope, and a nonempty
-    ##                declaration is never encoded at v<38 (``writeLibrary``
+    ##                source semantics, so the version is the refusal: a v38
+    ##                reader rejects every v39 envelope, and a nonempty
+    ##                declaration is never encoded at v<39 (``writeLibrary``
     ##                raises) where it would be dropped. The fingerprint
     ##                projection writes the block only when it is non-empty,
     ##                so no fingerprint of a library declaring none moves.
+    ## v38: ``ProjectInterface`` retains ``pinnedSiblings`` (the
+    ##                recipe's ``pinned:`` block, Unified-Locking-And-Hooks.md
+    ##                §14.2 item 4), a string list after
+    ##                ``provisioningContributions``. v37 and older payloads
+    ##                decode it empty, which is what every recipe declared.
+    ##                The fingerprint projection writes it, under its own
+    ##                tag, only when non-empty, so no fingerprint or key
+    ##                hashed from an interface that pins nothing moves. An
+    ##                engine that reads up to v37 refuses a v38 envelope
+    ##                with the "engine older than the envelope" refusal
+    ##                (``unsupportedInterfaceEnvelopeMessage``), as it does
+    ##                for every newer envelope.
     ## v37: ``TarballArchiveDetail`` retains
     ##                ``elfRuntimePackage`` (the package whose realized
     ##                prefix carries the loader and C library an archive
@@ -1625,6 +1666,8 @@ const
   ImportedContributionMetadataTag =
     "reprobuild.imported-contribution-metadata.v1"
     ## Domain tag of ``importedProvisioningMetadataDigest``.
+  PinnedSiblingsTag = "reprobuild.pinned-siblings.v1"
+    ## Opens the pinned-siblings section of a v38 fingerprint payload.
   ToolUseRealizationsTag = "reprobuild.tool-use-realizations.v1"
     ## Domain tag of ``toolUseRealizationDigest``.
   InterfaceExtractionCacheRecordMagic =
@@ -2038,7 +2081,7 @@ proc readExecutable(bytes: openArray[byte]; pos: var int): InterfaceExecutable =
   for i in 0 ..< count:
     result.commands[i] = readCommand(bytes, pos)
 
-const FirstEnvelopeVersionWithSourceGitlinks = 38'u16
+const FirstEnvelopeVersionWithSourceGitlinks = 39'u16
   ## The first envelope version whose library rows carry ``sourceGitlinks``.
 
 proc writeLibrary(outp: var seq[byte]; lib: InterfaceLibrary;
@@ -2050,7 +2093,7 @@ proc writeLibrary(outp: var seq[byte]; lib: InterfaceLibrary;
   if version >= 11'u16:
     outp.writeString(lib.exportedPath)
   outp.writeLocation(lib.location, forFingerprint)
-  # v38 (§4.2a.2a): ``sourceGitlinks`` at the row's tail. A version that
+  # v39 (§4.2a.2a): ``sourceGitlinks`` at the row's tail. A version that
   # cannot carry a nonempty requirement refuses instead of dropping it: the
   # empty default is for a NEW reader decoding an old payload, never for an
   # old payload standing in for a new mandatory requirement.
@@ -2077,7 +2120,7 @@ proc readLibrary(bytes: openArray[byte]; pos: var int;
   if version >= 11'u16:
     result.exportedPath = readString(bytes, pos)
   result.location = readLocation(bytes, pos)
-  # v38 (§4.2a.2a). v<38 rows have none: decode the empty default.
+  # v39 (§4.2a.2a). v<39 rows have none: decode the empty default.
   if version >= FirstEnvelopeVersionWithSourceGitlinks:
     let count = readElementCount(bytes, pos, 4)
     result.sourceGitlinks = newSeq[GitlinkSourceRequirement](count)
@@ -2904,6 +2947,20 @@ proc encodeInterfacePayload*(value: ProjectInterface;
       for contribution in value.provisioningContributions:
         result.writeProvisioningContribution(contribution, version,
           forFingerprint)
+  if version >= 38'u16:
+    # The ``pinned:`` block. The wire form always carries the list (a count
+    # of zero for a recipe that pins nothing); the fingerprint form carries
+    # it only when there is one, under a tag, so an interface that pins
+    # nothing hashes to the fingerprint v37 computed for it. Sorted in the
+    # fingerprint: the order a recipe lists its pins in is not observable.
+    if forFingerprint:
+      if value.pinnedSiblings.len > 0:
+        var sorted = value.pinnedSiblings
+        sorted.sort(cmp)
+        result.writeString(PinnedSiblingsTag)
+        result.writeStringSeq(sorted)
+    else:
+      result.writeStringSeq(value.pinnedSiblings)
 
 proc importedProvisioningMetadataDigest*(value: ProjectInterface): string =
   ## The realization metadata of the IMPORTED contribution records that
@@ -3037,6 +3094,10 @@ proc decodeInterfacePayload*(bytes: openArray[byte];
     for i in 0 ..< contributionCount:
       result.provisioningContributions[i] =
         readProvisioningContribution(bytes, pos, version)
+  # v38 added pinnedSiblings after the contributions; v<38 payloads have no
+  # such block, which is a recipe that pins nothing.
+  if version >= 38'u16:
+    result.pinnedSiblings = readStringSeq(bytes, pos)
   if pos != bytes.len:
     raiseEnvelopeError(eeMalformed, "trailing interface payload bytes")
 
@@ -3648,6 +3709,7 @@ proc toProjectInterface*(pkg: PackageDef;
   result.packageName = pkg.packageName
   result.defaultToolProvisioning = pkg.defaultToolProvisioning
   result.publicSignatureDependencies = pkg.publicSignatureDependencies
+  result.pinnedSiblings = pkg.pinnedSiblings
   result.location = SourceLocation(file: pkg.sourceFile, line: pkg.sourceLine)
   # NLF-M8 — `PackageDef.toolUses` is no longer the concatenation of the
   # three dependency lists (`allToolUses` is), so the union is taken HERE.
@@ -4138,6 +4200,10 @@ proc mergeProjectInterfaces(matches: openArray[PackageDef];
         continue
       seenSigDeps.add(dep)
       result.publicSignatureDependencies.add(dep)
+    # ``pinned:`` — unioned across the file's packages, in source order.
+    for sibling in projection.pinnedSiblings:
+      if sibling notin result.pinnedSiblings:
+        result.pinnedSiblings.add(sibling)
     # ``defaultToolProvisioning`` resolution: the first non-empty wins.
     # An explicit value on a later package overrides a default-empty
     # earlier one, matching the "first explicit declaration in source
@@ -4915,7 +4981,8 @@ proc commandFailure(command: openArray[string];
 
 proc runCommand*(command: openArray[string];
     cwd = ""; raiseOnFailure = true;
-    withoutEnv: openArray[string] = []): ProviderCompileExecutionResult =
+    withoutEnv: openArray[string] = [];
+    withEnv: openArray[(string, string)] = []): ProviderCompileExecutionResult =
   ## Run ``command`` and capture its merged output.
   ##
   ## ``withoutEnv`` names variables the CHILD must not inherit. They are left
@@ -4924,6 +4991,10 @@ proc runCommand*(command: openArray[string];
   ## withdrawn from the process for one child would also be missing from
   ## every other child spawned meanwhile (and `setenv` racing `getenv` is
   ## undefined behaviour in C).
+  ##
+  ## ``withEnv`` sets variables in the CHILD's environment only, by the same
+  ## rule: a value one compile needs must not reach another compile, nor the
+  ## environment this process later hands a user's command.
   if command.len == 0:
     raise newException(OSError, "runCommand requires a non-empty argv")
   when defined(windows):
@@ -4986,12 +5057,18 @@ proc runCommand*(command: openArray[string];
     var envW = newWideCString("")
     var pEnv: pointer = nil
     var creationFlags = 0'u32
-    if withoutEnv.len > 0:
+    if withoutEnv.len > 0 or withEnv.len > 0:
       var blockText = ""
       for key, value in envPairs():
         if key.len == 0 or key in withoutEnv:
           continue
+        var overridden = false
+        for (name, _) in withEnv:
+          if cmpIgnoreCase(name, key) == 0: overridden = true
+        if overridden: continue
         blockText.add(key & "=" & value & '\0')
+      for (name, value) in withEnv:
+        blockText.add(name & "=" & value & '\0')
       if blockText.len == 0:
         blockText.add('\0')
       envW = newWideCString(blockText)
@@ -4999,10 +5076,20 @@ proc runCommand*(command: openArray[string];
       creationFlags = 0x00000400'u32
     let created = winCreateProcessW(nil, pCmd, nil, nil, 1,
       ProviderLockDword(creationFlags), pEnv, pCwd, addr si, addr pi)
+    # Progress is read through a SECOND handle to the sink: read-only and
+    # NOT inheritable. The inheritable write handle is closed at once, as
+    # before; kept open for the whole wait, every child that a concurrent
+    # `runCommand` on another thread spawns meanwhile would inherit it too,
+    # hold this sink open, and make its removal below fail.
+    let probeHandle = providerLockCreateFileW(sinkW, ProviderLockGenericRead,
+      WinFileShareRead or WinFileShareWrite, nil, WinOpenExisting,
+      ProviderLockFileAttributeNormal, nil)
     discard providerLockCloseHandle(sinkHandle)
 
     if created == 0:
       let err = providerLockGetLastError()
+      if probeHandle != ProviderLockInvalidHandle and probeHandle != nil:
+        discard providerLockCloseHandle(probeHandle)
       try:
         removeFile(extendedPath(sinkPath))
       except CatchableError:
@@ -5011,35 +5098,60 @@ proc runCommand*(command: openArray[string];
 
     # Bounded wait. A wedged `nim c` -- whose gcc children can deadlock on
     # Windows and hold the runner for HOURS (observed on the 0.1.4 release:
-    # a 4h+ hang on the full-closure interface extract) -- must fail fast with
-    # whatever it wrote to the sink, never hang.
-    # REPRO_INTERFACE_COMPILE_TIMEOUT_SECONDS overrides the default cap; a
-    # value <= 0 restores the unbounded wait. On timeout the WHOLE process
-    # tree (nim.exe -> gcc.exe) is killed with `taskkill /T`, so no orphaned
-    # compiler keeps the slot busy, and the partial sink is still read -- so
-    # with `--listCmd` the LAST command in it is the sub-command that wedged.
-    var timeoutSecs = 1800
-    block:
-      let raw = getEnv("REPRO_INTERFACE_COMPILE_TIMEOUT_SECONDS").strip()
-      if raw.len > 0:
-        try:
-          timeoutSecs = parseInt(raw)
-        except ValueError:
-          timeoutSecs = 1800
-    var timedOut = false
-    if timeoutSecs <= 0:
+    # a 4h+ hang on the full-closure interface extract) -- must fail with
+    # whatever it wrote to the sink, never hang. Wedged is decided by LACK OF
+    # PROGRESS, not total time: `compile_watchdog` has why a fixed total
+    # killed slow-but-working compiles, the two limits, their defaults and
+    # their environment overrides (both `<= 0` restores the unbounded wait).
+    #
+    # Progress is the sink's length read through `probeHandle`.
+    # `GetFileSizeEx` on an open handle reports the file's current length; a
+    # size read through the path can come from the directory entry, which
+    # NTFS does not update while a writer holds the file open. Without a
+    # probe there is no progress signal, so the stall limit is dropped rather
+    # than left to kill a working compile, and only the ceiling remains.
+    # https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-getfilesizeex
+    #
+    # On a verdict the WHOLE process tree (nim.exe -> gcc.exe) is killed with
+    # `taskkill /T`, so no orphaned compiler keeps the slot busy, and the
+    # partial sink is still read -- so with `--listCmd` the LAST command in
+    # it is the sub-command that wedged.
+    proc sinkSize(): int64 =
+      var size: int64 = 0
+      if probeHandle == ProviderLockInvalidHandle or probeHandle == nil or
+          winGetFileSizeEx(probeHandle, addr size) == 0:
+        -1'i64
+      else:
+        size
+    proc monoSeconds(): float =
+      float(getMonoTime().ticks) / 1e9
+    var policy = compileWatchdogPolicy(getEnv(CompileCeilingEnv),
+      getEnv(CompileStallEnv))
+    if probeHandle == ProviderLockInvalidHandle or probeHandle == nil:
+      policy.stallSeconds = 0
+    var killMessage = ""
+    if policy.isUnbounded:
       discard winWaitForSingleObject(pi.hProcess, WinWaitInfinite)
     else:
-      # WAIT_TIMEOUT is 0x102; WAIT_OBJECT_0 (0) means the process exited.
-      let waitResult = winWaitForSingleObject(pi.hProcess,
-        ProviderLockDword(min(timeoutSecs, high(int32) div 1000) * 1000))
-      if waitResult == ProviderLockDword(0x102):
-        timedOut = true
-        # No shell redirection: execCmd does not route through a shell that
-        # interprets `>`, so a `> nul` reaches taskkill as a literal argument
-        # and the kill silently no-ops. Its status lines go to the log.
-        discard execCmd("taskkill /F /T /PID " & $pi.dwProcessId)
-        discard winWaitForSingleObject(pi.hProcess, WinWaitInfinite)
+      var watchdog = startCompileWatchdog(policy, monoSeconds(), sinkSize())
+      while true:
+        # WAIT_TIMEOUT is 0x102; WAIT_OBJECT_0 (0) means the process exited.
+        let waitResult = winWaitForSingleObject(pi.hProcess,
+          ProviderLockDword(CompileWatchdogPollMilliseconds))
+        if waitResult != ProviderLockDword(0x102):
+          break
+        let now = monoSeconds()
+        let verdict = watchdog.observe(now, sinkSize())
+        if verdict != cwvKeepWaiting:
+          killMessage = watchdog.verdictMessage(verdict, now)
+          # No shell redirection: execCmd does not route through a shell that
+          # interprets `>`, so a `> nul` reaches taskkill as a literal argument
+          # and the kill silently no-ops. Its status lines go to the log.
+          discard execCmd("taskkill /F /T /PID " & $pi.dwProcessId)
+          discard winWaitForSingleObject(pi.hProcess, WinWaitInfinite)
+          break
+    if probeHandle != ProviderLockInvalidHandle and probeHandle != nil:
+      discard providerLockCloseHandle(probeHandle)
     var rawExitCode: ProviderLockDword = 0
     discard winGetExitCodeProcess(pi.hProcess, addr rawExitCode)
     discard providerLockCloseHandle(pi.hThread)
@@ -5056,15 +5168,13 @@ proc runCommand*(command: openArray[string];
         removeFile(extendedPath(sinkPath))
       except CatchableError:
         discard
-    if timedOut:
+    if killMessage.len > 0:
       exitCode = 124
-      output = "runCommand: TIMED OUT after " & $timeoutSecs &
-        "s and killed the nim/gcc process tree. Partial sink output follows; " &
-        "with --listCmd the LAST command shown is the one that wedged.\n" &
-        output
+      output = killMessage & "\n" & output
     result = ProviderCompileExecutionResult(
       exitCode: exitCode,
-      output: output)
+      output: output,
+      killedByCaller: killMessage.len > 0)
   else:
     var process: Process
     withSpawnWorkingDir:
@@ -5077,11 +5187,13 @@ proc runCommand*(command: openArray[string];
       let savedDir = if cwd.len > 0: getCurrentDir() else: ""
       # nil inherits this process's environment, as before.
       var childEnv: StringTableRef = nil
-      if withoutEnv.len > 0:
+      if withoutEnv.len > 0 or withEnv.len > 0:
         childEnv = newEnvTable()
         for key, value in envPairs():
           if key notin withoutEnv:
             childEnv[key] = value
+        for (name, value) in withEnv:
+          childEnv[name] = value
       try:
         process = startProcess(command[0],
           args = command[1 .. ^1],
@@ -5563,8 +5675,9 @@ proc providerCompileLaunchEnv*(homeDir: string; modulePath = ""): seq[string] =
   # and a pinned tree for the packages `config.nims` resolves sibling-first
   # (`resolveSiblingFirstPackagePath`): the compile must take the caller's
   # choice, exactly as `just lint` does in the caller's shell.
-  if SiblingPolicyEnvVar notin seenRoots:
-    seenRoots.add(SiblingPolicyEnvVar)
+  for name in [SiblingPolicyEnvVar, SiblingPinnedPackagesEnvVar]:
+    if name notin seenRoots:
+      seenRoots.add(name)
   for name in seenRoots:
     if existsEnv(name):
       result.add(name & "=" & getEnv(name))
@@ -5807,13 +5920,15 @@ proc sdkIsSourceCheckout(sdkRoot: string): bool =
 proc sdkPinnedSiblingRevision(sdkRoot, name: string): string =
   ## The revision the SDK at ``sdkRoot`` pins for the sibling directory
   ## ``name``, read exactly as `config.nims`'s `pinnedSiblingRevision` reads
-  ## it (`pinnedSiblingRevisionIn`).
+  ## it (`pinnedSiblingRevisionIn`): its `repro.lock`, then the direct inputs
+  ## of its `flake.lock`, then `.github/sibling-repos`.
   proc textOf(path: string): string =
     try:
       if fileExists(extendedPath(path)): readFile(extendedPath(path)) else: ""
     except CatchableError: ""
   if sdkRoot.len == 0: return ""
   pinnedSiblingRevisionIn(textOf(sdkRoot / "repro.lock"),
+    flakeLockDirectPins(textOf(sdkRoot / "flake.lock")),
     textOf(sdkRoot / ".github" / "sibling-repos"), name)
 
 proc packageCheckoutOf(packageRoot: string): string =
@@ -5865,21 +5980,134 @@ proc observeSiblingCheckout*(checkout, pin: string;
   result.atOrAhead = siblingGitQuery(checkout,
     ["merge-base", "--is-ancestor", pin, "HEAD"]).code == 0
 
+proc staleSiblingRefusal(sdkRoot, envName, marker, checkout, pin,
+    why: string): string =
+  ## The refusal of a stale sibling (`sskStaleSibling`), in one wording for
+  ## every package: the package and its variable, the sibling and the pin
+  ## (``why`` carries the sibling's HEAD, `chooseSiblingSource`), and the
+  ## three ways out.
+  let siblingName = checkout.extractFilename()
+  "no acceptable source for " & envName & " (" & marker & "): " &
+    sdkRoot & " pins '" & siblingName & "' at " & pin & ", but " & why &
+    ", and $" & envName & " names no tree of the pin; compiling against " &
+    "it would not compile what " & sdkRoot & " builds. Check the sibling " &
+    "out at the pin (`git -C " & quoteShell(checkout) & " checkout " & pin &
+    "`), or set " & envName & " to a tree of that revision (the " &
+    "development shell exports it), or set " & SiblingPolicyEnvVar &
+    "=sibling to compile against the checkout as it is"
+
+type EngineSourceIdentity* = object
+  ## The reprobuild source tree THIS engine was built from, when the engine
+  ## can name it, and the package roots it was built with. For an SDK tree
+  ## that is not a checkout (a store copy of the sources, an installed
+  ## layout), the one fact that makes a stale workspace sibling recoverable:
+  ## when the SDK IS this tree, the roots it was built with ARE the trees its
+  ## pins name -- the package build takes both from the same flake inputs.
+  roots*: seq[string]
+    ## the tree, as each arm names it (`runningEngineSourceIdentity`)
+  builtRoots*: seq[(string, string)]
+    ## `(envName, root)`: the package roots it was built with
+
+proc runningEngineSourceIdentity*(): EngineSourceIdentity =
+  ## This process's `EngineSourceIdentity`, from the two places an engine is
+  ## told where its own sources are:
+  ##
+  ##   * `$REPROBUILD_SOURCE_ROOT` while it still holds the value the
+  ##     package's wrapper (or this engine's start-up) SEEDED -- recorded in
+  ##     `SeededSourceEnvironmentVar`, so a value the caller set is not taken
+  ##     for the engine's own tree -- with the roots compiled into the image
+  ##     (`BuiltSourcePackageRoots`);
+  ##   * the installed layout beside the running image
+  ##     (`installedLayoutSourceRoots`), whose `share/repro/src` trees are the
+  ##     ones the release was assembled with; an installed-prefix image
+  ##     compiles in no roots of its own.
+  ##
+  ## A tree named NEITHER way is foreign: nothing shows the roots compiled
+  ## into this engine to be the revisions it pins.
+  if ReprobuildSourceRootEnvVar in seededSourcePackageEnvironmentNames():
+    let seeded = getEnv(ReprobuildSourceRootEnvVar)
+    if seeded.len > 0:
+      result.roots.add(seeded)
+      for entry in BuiltSourcePackageRoots:
+        if entry[1].len > 0:
+          result.builtRoots.add(entry)
+  for prefix in runningImagePrefixCandidates():
+    let layout = installedLayoutSourceRoots(prefix)
+    if layout.len > 0:
+      for entry in layout:
+        if entry[0] == ReprobuildSourceRootEnvVar: result.roots.add(entry[1])
+        else: result.builtRoots.add(entry)
+      break
+
+proc builtRootOf(identity: EngineSourceIdentity; envName: string): string =
+  for entry in identity.builtRoots:
+    if entry[0] == envName:
+      return entry[1]
+
+proc isEngineSourceTree(identity: EngineSourceIdentity;
+    sdkRoot: string): bool =
+  if sdkRoot.len == 0: return false
+  let wanted = os.normalizedPath(absolutePath(sdkRoot))
+  for root in identity.roots:
+    if root.len > 0 and
+        cmpPaths(os.normalizedPath(absolutePath(root)), wanted) == 0:
+      return true
+  false
+
+proc staleSiblingRoot(identity: EngineSourceIdentity; sdkRoot, envName,
+    marker, checkout, pin, why: string; notices: var seq[string]): string =
+  ## What a compile reads for a package whose chosen root is a workspace
+  ## sibling stale against the pin ``sdkRoot`` records (`sskStaleSibling`).
+  ##
+  ##   * ``sdkRoot`` is a source checkout: refused
+  ##     (`SiblingSourceUnavailableError`, `staleSiblingRefusal`). Its pins
+  ##     describe a tree being worked on, and only the developer can say
+  ##     which revision of the sibling it needs.
+  ##   * ``sdkRoot`` is THIS engine's own source tree (`isEngineSourceTree`)
+  ##     and the root it was built with for the package holds ``marker``:
+  ##     that root, and a notice in ``notices``. The engine was built against
+  ##     exactly the trees its pins name, so the pinned tree is at hand.
+  ##     Measured 2026-11-21: a plain `repro exec` in the
+  ##     reprobuild checkout compiles the dev env's extraction against the
+  ##     packaged engine's store copy of its sources, and took an io-mon
+  ##     sibling far behind that copy's pin.
+  ##   * otherwise (a foreign snapshot or installed tree, or no built root):
+  ##     refused, as for a checkout.
+  if not sdkIsSourceCheckout(sdkRoot) and
+      identity.isEngineSourceTree(sdkRoot):
+    let built = markedPackageRoot(identity.builtRootOf(envName), marker)
+    if built.len > 0:
+      notices.add("repro: notice: " & envName & ": compiling against " &
+        built & ", the tree this engine was built with for the revision " &
+        pin & " its sources (" & sdkRoot & ") pin, instead of the sibling " &
+        checkout & ": " & why & ". Check the sibling out at or after the " &
+        "pin (`git -C " & quoteShell(checkout) & " checkout " & pin &
+        "`), or set " & SiblingPolicyEnvVar & "=sibling to compile " &
+        "against it as it is")
+      return built
+  raise newException(SiblingSourceUnavailableError,
+    staleSiblingRefusal(sdkRoot, envName, marker, checkout, pin, why))
+
 proc resolveSiblingFirstPackagePath*(sdkRoot, envName: string;
     candidates: openArray[string]; marker: string;
-    builtCandidate = ""): string =
+    builtCandidate: string; identity: EngineSourceIdentity;
+    notices: var seq[string]): string =
   ## One package of `SiblingFirstPackageEnvNames`, resolved to EXACTLY ONE
   ## root: the sibling checkout (the first of ``candidates`` holding
   ## ``marker``) or the tree `$<envName>` names, as `chooseSiblingSource`
   ## decides from the revision ``sdkRoot`` pins for it.
   ##
+  ## A sibling stale against the pin, with no pinned tree named, is
+  ## `staleSiblingRoot`'s: refused, or -- for this engine's own non-checkout
+  ## source tree -- replaced by the root the engine was built with, noted in
+  ## ``notices``.
+  ##
   ## When the SDK is a source checkout and pins the package
-  ## (``sdkIsSourceCheckout``), two states raise
-  ## `SiblingSourceUnavailableError` instead of compiling: the sibling is
-  ## stale and no pinned tree is named; or there is no sibling and no pinned
-  ## tree, so the only candidate left is the tree seeded from, or compiled
-  ## into, this engine (``builtCandidate``), which nothing shows to be the
-  ## revision the checkout pins. Otherwise the remaining order is the one
+  ## (``sdkIsSourceCheckout``), one more state raises
+  ## `SiblingSourceUnavailableError` instead of compiling: there is no
+  ## sibling and no pinned tree, so the only candidate left is the tree
+  ## seeded from, or compiled into, this engine (``builtCandidate``), which
+  ## nothing shows to be the revision the checkout pins. Otherwise the remaining order is the one
   ## ``resolveBootstrapPackagePath`` uses: the caller's `$<envName>`, then
   ## the seeded value, then ``builtCandidate``.
   var sibling = ""
@@ -5897,7 +6125,8 @@ proc resolveSiblingFirstPackagePath*(sdkRoot, envName: string;
   let envPinPresent = explicitPath.len > 0 and sibling.len > 0 and
     cmpPaths(os.normalizedPath(absolutePath(explicitPath)),
       os.normalizedPath(absolutePath(sibling))) != 0
-  let policy = parseSiblingPolicy(getEnv(SiblingPolicyEnvVar))
+  let policy = siblingPolicyFor(envName, getEnv(SiblingPolicyEnvVar),
+    getEnv(SiblingPinnedPackagesEnvVar))
   let obs =
     if policy == spSibling or sibling.len == 0:
       SiblingObservation(siblingPresent: sibling.len > 0,
@@ -5905,25 +6134,14 @@ proc resolveSiblingFirstPackagePath*(sdkRoot, envName: string;
     else:
       observeSiblingCheckout(checkout, pin, true, envPinPresent)
   let choice = chooseSiblingSource(policy, obs)
-  let remedy = "Check the sibling out at the pin (`git -C " &
-    quoteShell(checkout) & " checkout " & pin & "`), or set " & envName &
-    " to a tree of that revision (the development shell exports it), or " &
-    "set " & SiblingPolicyEnvVar & "=sibling to compile against the " &
-    "checkout as it is"
   case choice.kind
   of sskSibling:
     return sibling
   of sskEnvPin:
     return explicitPath
   of sskStaleSibling:
-    if checkoutSdk:
-      raise newException(SiblingSourceUnavailableError,
-        "no acceptable source for " & envName & " (" & marker & "): " &
-        sdkRoot & " pins '" & siblingName & "' at " & pin & ", but " &
-        choice.why & ", and $" & envName & " names no tree of the pin; " &
-        "compiling against it would not compile what " & sdkRoot &
-        " builds. " & remedy)
-    return sibling
+    return staleSiblingRoot(identity, sdkRoot, envName, marker, checkout,
+      pin, choice.why, notices)
   of sskAbsent:
     if explicitPath.len > 0:
       return explicitPath
@@ -5945,6 +6163,72 @@ proc resolveSiblingFirstPackagePath*(sdkRoot, envName: string;
         "pin, or set " & envName & " to a tree of that revision (the " &
         "development shell exports it)")
     return fallback
+
+proc isWorkspaceSiblingCheckout(checkout, sdkRoot: string;
+    workspaceRoots: openArray[string]): bool =
+  ## ``checkout`` is a repository of its own (a `.git` entry) sitting
+  ## DIRECTLY in one of ``workspaceRoots`` -- `../io-mon`, `../runquota` --
+  ## and not inside the SDK tree. A package vendored under the SDK's
+  ## `libs/`, or nested in another sibling (`../codetracer/libs/nim-stew`,
+  ## that repository's own choice), is not one: asking git about it would
+  ## answer for the repository around it.
+  if checkout.len == 0 or not sdkIsSourceCheckout(checkout):
+    return false
+  let normalized = os.normalizedPath(absolutePath(checkout))
+  let sdk = os.normalizedPath(absolutePath(sdkRoot))
+  if normalized == sdk or normalized.startsWith(sdk & DirSep):
+    return false
+  let parent = normalized.parentDir()
+  for root in workspaceRoots:
+    if root.len > 0 and
+        cmpPaths(parent, os.normalizedPath(absolutePath(root))) == 0:
+      return true
+  false
+
+proc pinCheckedSiblingRoot(identity: EngineSourceIdentity; sdkRoot,
+    envName, marker, resolved: string; workspaceRoots: openArray[string];
+    notices: var seq[string]): string =
+  ## The sibling-source policy for a package the recipe compile resolves in
+  ## the PLAIN order (`resolveBootstrapPackagePath`, `resolveRunquotaRoot`:
+  ## the caller's `$<PKG>_SRC` first, then the sibling): it keeps that
+  ## order, and judges the root it CHOSE. When that root is a workspace
+  ## sibling checkout (``isWorkspaceSiblingCheckout``) that ``sdkRoot`` pins
+  ## and the sibling is stale against the pin, `staleSiblingRoot` answers
+  ## (refuse, or this engine's built root with a notice); otherwise
+  ## ``resolved``.
+  ##
+  ## Unified-Locking-And-Hooks.md §13.5, "The sources a recipe compile
+  ## reads": a recipe compile against a checkout that pins a package refuses
+  ## a stale sibling with no pinned tree named. That held only for the five
+  ## `SiblingFirstPackageEnvNames`, and io-mon is not one of them, so the dev
+  ## env's interface extraction compiled an io-mon sibling far behind the
+  ## pin into reprobuild's recipe and failed on an `undeclared routine`
+  ## naming neither checkout (measured 2026-11-21, `repro exec` in a
+  ## reprobuild checkout).
+  ##
+  ## A root the caller's `$<PKG>_SRC` names is the caller's pinned tree and
+  ## is not judged -- unless it IS the sibling, which is the sibling (as
+  ## `envPinPresent` reads it). `REPRO_SIBLING_POLICY=sibling` compiles the
+  ## checkout as it is; `=pin` treats a sibling not AT the pin as stale, as
+  ## it does for a sibling-first package with no pinned tree named.
+  result = resolved
+  if resolved.len == 0:
+    return
+  let checkout = packageCheckoutOf(resolved)
+  if not isWorkspaceSiblingCheckout(checkout, sdkRoot, workspaceRoots):
+    return
+  let policy = parseSiblingPolicy(getEnv(SiblingPolicyEnvVar))
+  if policy == spSibling:
+    return
+  let pin = sdkPinnedSiblingRevision(sdkRoot, checkout.extractFilename())
+  if pin.len == 0:
+    return
+  let choice = chooseSiblingSource(policy,
+    observeSiblingCheckout(checkout, pin, siblingPresent = true,
+      envPinPresent = false))
+  if choice.kind == sskStaleSibling:
+    result = staleSiblingRoot(identity, sdkRoot, envName, marker, checkout,
+      pin, choice.why, notices)
 
 proc resolveCtTestRunnerAdapterPath(anchorRoot: string): string =
   let envRoot = getEnv("REPRO_CT_TEST_RUNNER_SRC")
@@ -5991,12 +6275,92 @@ proc resolveRunquotaRoot(anchorRoot, consumerParent: string): string =
       return candidate
   ""
 
-proc bootstrapSiblingPackagePathFlags*(reprobuildRoot: string;
-                                       consumerParent = ""): seq[string] =
+type SiblingPackagePaths* = object
+  ## `bootstrapSiblingPackagePathFlagsFor`'s answer.
+  flags*: seq[string]
+    ## the `--path:` flags
+  notices*: seq[string]
+    ## one line per package compiled from this engine's built root instead
+    ## of a stale sibling (`staleSiblingRoot`), for the caller to print
+  displaced*: seq[string]
+    ## the workspace sibling CHECKOUTS of packages resolved to a root outside
+    ## them -- the engine's built root standing in for a stale sibling, or a
+    ## tree the caller's `$<PKG>_SRC` (or `REPRO_SIBLING_POLICY=pin`) chose.
+    ## No other `--path` of the compile may point into one
+    ## (`dropDisplacedSiblingPaths`), or a module only the sibling has would
+    ## still resolve from it, and one library would come from two revisions.
+  displacedRoots*: seq[(string, string)]
+    ## `(envName, root)` for each package of ``displaced``: the root the
+    ## resolver chose instead of the sibling. A compile whose main module is
+    ## the recipe evaluates the recipe's `config.nims` itself, so nothing can
+    ## drop what that file adds; told `$<envName>` = this root, the file
+    ## selects the same root (`providerCompileSourceEnvironment`).
+
+proc pathIsWithin(path, dir: string): bool =
+  ## ``path`` is ``dir`` or lies under it, both made absolute and normalized.
+  if path.len == 0 or dir.len == 0: return false
+  let p = os.normalizedPath(absolutePath(path))
+  let d = os.normalizedPath(absolutePath(dir))
+  cmpPaths(p, d) == 0 or p.startsWith(d & DirSep)
+
+proc dropDisplacedSiblingPaths*(command: var seq[string]; moduleArg: string;
+    displaced: openArray[string]) =
+  ## Removes every `--path:` before ``moduleArg`` that names a directory
+  ## inside one of the ``displaced`` sibling checkouts
+  ## (`SiblingPackagePaths.displaced`). The recipe's own configuration
+  ## (`recipeConfigSearchPathFlags`) is the usual source of one: reprobuild's
+  ## `config.nims`, evaluated without the engine's seeded roots, falls back to
+  ## a stale `../io-mon/src` the resolver has replaced.
+  ##
+  ## Dropped, not excluded: a lone `--excludePath:` would stop
+  ## `splitSearchPathReassertion` moving the SDK's reassertion out of the
+  ## argv (it moves only exclude-then-re-add pairs), and the argv would grow
+  ## past Windows' command-line limit again.
+  if displaced.len == 0:
+    return
+  var kept: seq[string]
+  var beforeModule = true
+  for arg in command:
+    if arg == moduleArg: beforeModule = false
+    if beforeModule and arg.startsWith("--path:"):
+      let dir = arg["--path:".len .. ^1]
+      var inside = false
+      for checkout in displaced:
+        if pathIsWithin(dir, checkout):
+          inside = true
+          break
+      if inside: continue
+    kept.add(arg)
+  command = kept
+
+proc bootstrapSiblingPackagePathFlagsFor*(reprobuildRoot: string;
+    consumerParent: string; identity: EngineSourceIdentity;
+    configurationRoots: openArray[string] = []): SiblingPackagePaths =
+  ## `bootstrapSiblingPackagePathFlags`, judged against ``identity`` (which
+  ## tree this engine was built from, `runningEngineSourceIdentity`) and
+  ## returning its notices instead of printing them -- the seam a test uses
+  ## to state which tree is the engine's own and to read the notice.
+  ##
+  ## ``configurationRoots``: further workspace roots, where the compile's
+  ## RECIPE configuration reaches siblings (`../io-mon/src` from the
+  ## directory of a `config.nims`; `recipeConfigurationWorkspaceRoots`).
+  ## They change no resolution -- the resolver does not look there -- but a
+  ## sibling checkout found in one, for a package resolved elsewhere, is
+  ## displaced (`SiblingPackagePaths.displaced`) like any other: the
+  ## provider compile's own resolver, running from a store copy of the
+  ## sources in a scratch directory, never sees the workspace the recipe's
+  ## `config.nims` names.
   ## MR14 — produce the ``--path:`` flags for the source-only sibling
   ## dependencies that ``reprobuild/config.nims`` lines 126-192 register
   ## via ``addPackagePath``. The list MUST stay in sync with config.nims
   ## so the recipe-compile reaches the same path set as reprobuild itself.
+  ##
+  ## Raises `SiblingSourceUnavailableError`, naming EVERY package concerned
+  ## in one message, when a package's only acceptable root is missing: a
+  ## workspace sibling stale against the pin of ``reprobuildRoot``, unless
+  ## that tree is this engine's own and the root it was built with stands in
+  ## (`staleSiblingRoot`, via `resolveSiblingFirstPackagePath` and
+  ## `pinCheckedSiblingRoot`; Unified-Locking-And-Hooks.md §13.5).
   ##
   ## The candidate lists below are written relative to
   ## ``reprobuildRoot`` (the absolute path to reprobuild's repo root)
@@ -6008,6 +6372,8 @@ proc bootstrapSiblingPackagePathFlags*(reprobuildRoot: string;
   ## reprobuild itself also satisfies the recipe-compile.
   if reprobuildRoot.len == 0:
     return
+  var notices: seq[string]
+  var displaced: seq[string]
   let reprobuildParent = reprobuildRoot.parentDir
   # The workspace the CLI was invoked in. ``workDir`` is NOT a reliable
   # consumer anchor here: the cross-repo producer path extracts with
@@ -6149,32 +6515,145 @@ proc bootstrapSiblingPackagePathFlags*(reprobuildRoot: string;
       ".." / "reprobuild-test-adapters" / "src",
     ]), "repro_test_adapters" / "test_runner.nim"),
   ]
+  # The workspace roots a sibling checkout sits in: the same anchors the
+  # candidate lists were resolved at (``anchored``).
+  let workspaceRoots = [reprobuildParent, consumerParent, cwdParent]
+  var displacedRoots: seq[(string, string)]
+  # A copy the closure below can capture (an `openArray` cannot be).
+  let configRoots = @configurationRoots
+  proc noteDisplaced(envName: string; candidates: openArray[string];
+      marker, resolved: string) =
+    # A workspace sibling checkout holding the package, when the root
+    # resolved for it lies elsewhere.
+    if resolved.len == 0:
+      return
+    var everyCandidate = @candidates
+    # The same candidates, anchored at each configuration root: a candidate
+    # spelled `../<name>` was anchored at `reprobuildParent` first.
+    for candidate in candidates:
+      if candidate.startsWith(reprobuildParent & DirSep):
+        let rest = candidate[reprobuildParent.len + 1 .. ^1]
+        for root in configRoots:
+          if root.len > 0: everyCandidate.add(root / rest)
+    for candidate in everyCandidate:
+      let root = markedPackageRoot(candidate, marker)
+      if root.len == 0: continue
+      let checkout = packageCheckoutOf(root)
+      if isWorkspaceSiblingCheckout(checkout, reprobuildRoot,
+            @workspaceRoots & configRoots) and
+          not pathIsWithin(resolved, checkout) and
+          checkout notin displaced:
+        displaced.add(checkout)
+        var named = false
+        for entry in displacedRoots:
+          if entry[0] == envName: named = true
+        if not named:
+          displacedRoots.add((envName, resolved))
+  # Every refusal is collected and raised once, at the end: a workspace whose
+  # siblings went stale together (a long-lived checkout, a pin bump) learns
+  # all of them from one run, not one per run.
+  var refusals: seq[string]
+  proc refuse(message: string) =
+    if message.len > 0 and message notin refusals:
+      refusals.add(message)
   for spec in specs:
     # The packages `config.nims` resolves sibling-first take ITS policy
     # (`resolveSiblingFirstPackagePath`), judged against the pins of the
     # reprobuild tree the recipe compiles against; the rest keep the plain
-    # replay of `addPackagePath`.
-    let resolved =
-      if spec.envName in SiblingFirstPackageEnvNames:
-        resolveSiblingFirstPackagePath(reprobuildRoot, spec.envName,
-          spec.candidates, spec.marker, builtSourcePackageRoot(spec.envName))
-      else:
-        resolveBootstrapPackagePath(spec.envName, spec.candidates,
-          spec.marker, builtSourcePackageRoot(spec.envName))
+    # replay of `addPackagePath`, and the root that replay chose is judged
+    # against the same pins (`pinCheckedSiblingRoot`).
+    var resolved = ""
+    if spec.envName in SiblingFirstPackageEnvNames:
+      try:
+        resolved = resolveSiblingFirstPackagePath(reprobuildRoot,
+          spec.envName, spec.candidates, spec.marker,
+          builtSourcePackageRoot(spec.envName), identity, notices)
+      except SiblingSourceUnavailableError as err:
+        refuse(err.msg)
+        continue
+    else:
+      try:
+        resolved = pinCheckedSiblingRoot(identity, reprobuildRoot,
+          spec.envName, spec.marker,
+          resolveBootstrapPackagePath(spec.envName, spec.candidates,
+            spec.marker, builtSourcePackageRoot(spec.envName)),
+          workspaceRoots, notices)
+      except SiblingSourceUnavailableError as err:
+        refuse(err.msg)
+        continue
+    noteDisplaced(spec.envName, spec.candidates, spec.marker, resolved)
     if resolved.len > 0:
-      result.add("--path:" & resolved)
+      result.flags.add("--path:" & resolved)
+  # The CodeTracer seams are NOT judged against a pin: `config.nims` ranks
+  # the live `../codetracer` checkout above the pinned `codetracer-src` on
+  # purpose (see ``resolveCtIncrementalAdapterPath``), and a workspace's
+  # codetracer is on its own branch far more often than on reprobuild's pin.
   for adapterPath in [resolveCtTestRunnerAdapterPath(reprobuildRoot),
                       resolveCtIncrementalAdapterPath(reprobuildRoot)]:
     if adapterPath.len > 0:
-      result.add("--path:" & adapterPath)
+      result.flags.add("--path:" & adapterPath)
 
-  let runquotaRoot = resolveRunquotaRoot(reprobuildRoot, consumerParent)
+  var runquotaRoot = ""
+  try:
+    runquotaRoot = pinCheckedSiblingRoot(identity, reprobuildRoot,
+      "RUNQUOTA_SRC", "libs" / "runquota_core" / "src" / "runquota_core.nim",
+      resolveRunquotaRoot(reprobuildRoot, consumerParent),
+      [reprobuildParent, consumerParent], notices)
+  except SiblingSourceUnavailableError as err:
+    refuse(err.msg)
+  # runquota's sibling, wherever a workspace root holds one: the recipe's
+  # configuration reaches it as `../runquota` from the recipe's checkout,
+  # which ``resolveRunquotaRoot`` does not look at once the SDK is a store
+  # copy.
+  block:
+    var runquotaCandidates: seq[string]
+    for root in workspaceRoots:
+      if root.len > 0: runquotaCandidates.add(root / "runquota")
+    noteDisplaced("RUNQUOTA_SRC", runquotaCandidates,
+      "libs" / "runquota_core" / "src" / "runquota_core.nim", runquotaRoot)
+  if refusals.len == 1:
+    raise newException(SiblingSourceUnavailableError, refusals[0])
+  if refusals.len > 1:
+    raise newException(SiblingSourceUnavailableError,
+      $refusals.len & " packages have no acceptable source:\n  - " &
+      refusals.join("\n  - "))
   if runquotaRoot.len > 0:
     var runquotaPaths: seq[string] = @[]
     walkLibSrcPathsInto(runquotaRoot / "libs", runquotaPaths)
     runquotaPaths.sort(system.cmp[string])
     for path in runquotaPaths:
-      result.add("--path:" & path)
+      result.flags.add("--path:" & path)
+  result.notices = notices
+  result.displaced = displaced
+  result.displacedRoots = displacedRoots
+
+var printedSiblingNotices {.threadvar.}: HashSet[string]
+  ## The notices `bootstrapSiblingPackagePathFlags` has printed: one engine
+  ## run assembles these flags for several compiles, and says each once.
+
+proc bootstrapSiblingPackagePaths*(reprobuildRoot: string;
+    consumerParent = ""; configurationRoots: openArray[string] = []):
+    SiblingPackagePaths =
+  ## `bootstrapSiblingPackagePathFlagsFor` for this engine
+  ## (`runningEngineSourceIdentity`), with its notices written to stderr,
+  ## each once per thread -- the channel this module's other compile
+  ## warnings use (`hostCCompilerPath`), and the one `repro exec` passes
+  ## through to the operator.
+  result = bootstrapSiblingPackagePathFlagsFor(reprobuildRoot,
+    consumerParent, runningEngineSourceIdentity(), configurationRoots)
+  for notice in result.notices:
+    if not printedSiblingNotices.containsOrIncl(notice):
+      try:
+        stderr.writeLine(notice)
+        flushFile(stderr)
+      except IOError, OSError:
+        discard
+
+proc bootstrapSiblingPackagePathFlags*(reprobuildRoot: string;
+                                       consumerParent = ""): seq[string] =
+  ## `bootstrapSiblingPackagePaths`' flags.
+  bootstrapSiblingPackagePaths(reprobuildRoot, consumerParent).flags
+
 
 proc declaredPackageDeps*(recipePath: string): seq[string] =
   ## The package dependencies the recipe module ``recipePath`` declares with
@@ -7612,7 +8091,19 @@ proc nixLibDirIn*(storeRoot, namePattern: string;
 proc nixLibDir(namePattern: string; dylibNames: openArray[string]): string =
   nixLibDirIn("/nix/store", namePattern, dylibNames)
 
-proc reproPackagePathFlags(workDir: string): seq[string] =
+proc engineIdentityDefines*(): seq[string] =
+  ## The engine's identity, handed to every recipe compile it runs so that a
+  ## diagnostic the DSL raises at macro-expansion time can name the build
+  ## that ran it: the image path (`publicCliImagePath`, the path that
+  ## re-enters this engine) and its source revision. The DSL reads them as
+  ## `reproEngineImage` / `reproEngineRevision` and uses them only in the
+  ## skew refusal (Cross-Repo-Source-Consumption.md §9.2a). They are argv,
+  ## so they key the compile like any other define.
+  @["--define:reproEngineImage=" & publicCliImagePath(),
+    "--define:reproEngineRevision=" & ReprobuildSourceRevision]
+
+proc reproPackagePaths(workDir: string;
+    configurationRoots: openArray[string] = []): SiblingPackagePaths =
   ## Replay the third-party / sibling-repo package ``--path`` switches that
   ## reprobuild's ``config.nims`` adds via ``addPackagePath`` and
   ## ``addSiblingFirstPackagePath``. (reprobuild's OWN ``libs/*/src`` tree is
@@ -7644,14 +8135,19 @@ proc reproPackagePathFlags(workDir: string): seq[string] =
   if workDir.len == 0:
     return
   if workDirIsReprobuildTree(workDir):
-    return bootstrapSiblingPackagePathFlags(workDir, workDir.parentDir)
+    return bootstrapSiblingPackagePaths(workDir, workDir.parentDir,
+      configurationRoots)
   let sdkLibs = reprobuildExternalLibsRoot(workDir)
   if sdkLibs.len > 0:
-    return bootstrapSiblingPackagePathFlags(sdkLibs.parentDir,
-      workDir.parentDir)
+    return bootstrapSiblingPackagePaths(sdkLibs.parentDir,
+      workDir.parentDir, configurationRoots)
   # No SDK found: the candidate lists resolve at ``workDir``, as they always
   # did here, so the environment and the built-in roots still apply.
-  bootstrapSiblingPackagePathFlags(workDir, workDir.parentDir)
+  bootstrapSiblingPackagePaths(workDir, workDir.parentDir, configurationRoots)
+
+proc reproPackagePathFlags(workDir: string): seq[string] =
+  ## `reproPackagePaths`' flags.
+  reproPackagePaths(workDir).flags
 
 type RuntimeLinkTarget* = enum
   rltWindows
@@ -8005,6 +8501,22 @@ proc protectSdkCompilePaths(command: var seq[string]; workDir, moduleArg: string
   doAssert moduleAt >= 0
   remaining.insert(priority, moduleAt)
   command = remaining
+
+proc applyRecipeConfigurationSearchPaths*(command: var seq[string];
+    workDir, moduleArg: string; recipeConfigFlags: openArray[string];
+    packagePaths: SiblingPackagePaths) =
+  ## The last step of an interface extraction's search path: the recipe's
+  ## own configuration's `--path`s (`recipeConfigSearchPathFlags`) go in
+  ## before ``moduleArg``, every `--path` into a sibling checkout the
+  ## resolver displaced is dropped (`dropDisplacedSiblingPaths`), and the
+  ## SDK's selected roots are reasserted (`protectSdkCompilePaths`). After
+  ## it, each package the resolver decided has exactly one root on the
+  ## command: the one in ``packagePaths``.
+  if recipeConfigFlags.len > 0:
+    let runnerAt = command.find(moduleArg)
+    command.insert(recipeConfigFlags, runnerAt)
+  dropDisplacedSiblingPaths(command, moduleArg, packagePaths.displaced)
+  protectSdkCompilePaths(command, workDir, moduleArg, packagePaths.flags)
 
 proc externalHashFlags(workDir = ""): seq[string] =
   # Generated helpers live outside config.nims. Replay its default portable
@@ -8576,14 +9088,204 @@ proc releaseExclusiveFileLock*(lock: var ReproFileLock) =
   ## Release a lock taken by ``acquireExclusiveFileLock``. Idempotent.
   releaseProviderNimcacheLock(lock)
 
+# ---------------------------------------------------------------------
+# A nimcache a compile was interrupted in.
+#
+# The rule is Tool-Owned-Caches.md §"Interrupted Use". It was written after
+# a host crash during an extraction compile left five zero-byte objects in a
+# slot of the extraction's pool. The lock that guards a nimcache
+# (`acquireProviderNimcacheLock`, or a slot of the extraction's pool) keeps a
+# SECOND compile out of it; it does nothing about the first one stopping half
+# way. Nim's nimcache is written in place -- the C compiler opens each object
+# and fills it -- and Nim decides whether to rebuild an object from its C
+# source, not from the object. So an object the compile was writing when it
+# was interrupted (the compiler was killed, the engine running it died, the
+# host went down, or a file system with delayed allocation lost data a
+# finished compile had not flushed) is kept by every later compile whose C
+# source has not changed, and linked: `undefined reference to 'main'`. In
+# the shared extraction pool that failed every extraction on the host
+# through that slot until someone deleted the files by hand.
+#
+# The guard brackets every use with a mark beside the directory:
+#
+#   * on entry, a marked directory -- or one holding a zero-byte object,
+#     which no complete compile writes, left by an engine that predates the
+#     mark -- is discarded before the compiler runs (a cold compile);
+#   * the mark is written and made durable before the compiler starts;
+#   * it is cleared only after a use that ended in order: the compiler
+#     exited on its own, with any status, and what it wrote has been flushed
+#     with the directory entries that name it. A compiler that died of a
+#     signal or a fault, one the engine killed, and a use whose end the
+#     engine did not see (an exception escaped the launch) keep the mark.
+#
+# The mark is a SIBLING of the directory (`<nimcache>.in-use`), not a file
+# inside it: a discard renames the directory aside, and the mark must name
+# the directory's state, not travel with its contents.
+
+const NimcacheInUseMarkerSuffix = ".in-use"
+  ## `nimcacheInUseMarkerPath`.
+
+const NimcacheDiscardedInfix = ".discarded-"
+  ## A discarded nimcache is renamed to `<nimcache>.discarded-<unique>` and
+  ## then removed; a removal that failed leaves that name for the next
+  ## discard of the same directory to sweep.
+
+const NimcacheWriteTimeSlack = initDuration(seconds = 2)
+  ## How far before the mark a file's modification time may read and still
+  ## count as written by this use. File systems with coarse timestamps round
+  ## a write's time down (FAT's is two seconds), so a file written just after
+  ## the mark can carry a time just before it.
+
+proc nimcacheDirectoryName(nimcache: string): string =
+  ## `nimcache` without a trailing separator, so the sibling names below sit
+  ## beside the directory and not inside it.
+  result = nimcache
+  while result.len > 1 and result[^1] in {DirSep, AltSep}:
+    result.setLen(result.len - 1)
+
+proc nimcacheInUseMarkerPath*(nimcache: string): string =
+  ## The mark a compile into `nimcache` holds while it runs: present on entry
+  ## means an earlier use did not end in order, so the directory is
+  ## discarded before it is used (see the block comment above).
+  nimcacheDirectoryName(nimcache) & NimcacheInUseMarkerSuffix
+
+proc zeroByteNimcacheObject(nimcache: string): string =
+  ## The first zero-byte object file in `nimcache`, or "". Nim lays every
+  ## module's C file and object out flat in the nimcache's top level
+  ## (`@m<main>.nim.c.o`, `@psystem.nim.c.o`, ...), so the top level is
+  ## where an interrupted C compile leaves one. `.obj` is the MSVC spelling.
+  for kind, path in walkDir(extendedPath(nimcache)):
+    if kind != pcFile:
+      continue
+    if not (path.endsWith(".o") or path.endsWith(".obj")):
+      continue
+    try:
+      if getFileSize(path) == 0:
+        return path
+    except OSError:
+      # A file that vanished or cannot be read is not evidence either way;
+      # the compiler will meet it on its own terms.
+      discard
+
+proc writeNimcacheNotice(notice: string) =
+  ## Written to stderr, the channel this module's other compile notices use
+  ## (`hostCCompilerPath`).
+  try:
+    stderr.writeLine(notice)
+    flushFile(stderr)
+  except IOError, OSError:
+    discard
+
+proc noteNimcacheDiscard(nimcache, reason: string) =
+  ## A discard turns a warm compile cold, so say why: a slow build right
+  ## after a crash should not be a mystery.
+  writeNimcacheNotice("repro: note: discarding the compiler cache " &
+    nimcache & ": " & reason & "; this compile starts cold.")
+
+proc discardNimcache(nimcache, reason: string) =
+  ## Rename `nimcache` aside and remove it. The rename is what matters and
+  ## must succeed (it raises otherwise): once it has, the compile that
+  ## follows starts from an empty directory whatever the removal does. The
+  ## removal is best effort -- a file another process still holds open on
+  ## Windows can keep it from completing -- and its leftovers, and those of
+  ## earlier discards, are swept by the next discard of this directory. The
+  ## caller holds the directory exclusively, so nothing else is using any
+  ## of them.
+  let dir = nimcacheDirectoryName(nimcache)
+  noteNimcacheDiscard(dir, reason)
+  let now = getTime()
+  let aside = dir & NimcacheDiscardedInfix & $getCurrentProcessId() & "-" &
+    $now.toUnix() & "-" & $now.nanosecond
+  moveDir(extendedPath(dir), extendedPath(aside))
+  let (parent, name) = splitPath(dir)
+  let prefix = name & NimcacheDiscardedInfix
+  for kind, path in walkDir(extendedPath(if parent.len > 0: parent else: ".")):
+    if kind == pcDir and extractFilename(path).startsWith(prefix):
+      try:
+        removeDir(path)
+      except OSError:
+        discard
+
+proc discardInterruptedNimcache(nimcache: string) =
+  ## Rule 4 of §"Interrupted Use": discard, before the compiler runs, a
+  ## directory an earlier use did not finish with, or one holding an object
+  ## no complete write produces. A missing directory is a cold cache, and
+  ## fine as it is.
+  if not dirExists(extendedPath(nimcache)):
+    return
+  if fileExists(extendedPath(nimcacheInUseMarkerPath(nimcache))):
+    discardNimcache(nimcache, "an earlier compile in it did not finish " &
+      "(it was interrupted, or the process running it died), so what it " &
+      "holds may be half written")
+    return
+  let empty = zeroByteNimcacheObject(nimcache)
+  if empty.len > 0:
+    discardNimcache(nimcache, "it holds a zero-byte object file, " &
+      extractFilename(empty) & ", which no complete compile writes")
+
+proc markNimcacheInUse(nimcache: string) =
+  ## Rule 1: the mark exists, durably, before the compiler's first write.
+  ## `replaceFileDurably` syncs the file and then its directory, so a crash
+  ## at any later instant finds it. The directory holding the nimcache is the
+  ## lock's (or the slot's) and exists, but a caller that names a fresh one
+  ## gets it created.
+  let marker = nimcacheInUseMarkerPath(nimcache)
+  createDir(extendedPath(parentDir(marker)))
+  replaceFileDurably(marker, "pid " & $getCurrentProcessId() & "\n")
+
+proc settleNimcacheUse(nimcache: string; useStart: times.Time): bool =
+  ## Rule 2: flush what this use wrote, then clear the mark. Returns false,
+  ## keeping the mark, when anything could not be flushed -- the next use
+  ## then starts cold, which costs time; clearing the mark over data that
+  ## may not be on disk could cost a wrong link.
+  ##
+  ## "What this use wrote" is every regular file whose modification time is
+  ## not older than the mark (less `NimcacheWriteTimeSlack`): a warm compile
+  ## rewrites a handful of files among hundreds, and flushing only those
+  ## keeps the guard from costing what the warm cache saves. The directories
+  ## holding them are synced too, and the nimcache itself always, for the
+  ## entries Nim renamed or removed.
+  let since = useStart - NimcacheWriteTimeSlack
+  var dirs = initHashSet[string]()
+  if dirExists(extendedPath(nimcache)):
+    dirs.incl(extendedPath(nimcache))
+    for path in walkDirRec(extendedPath(nimcache), yieldFilter = {pcFile}):
+      var written = false
+      try:
+        written = getLastModificationTime(path) >= since
+      except OSError:
+        # Removed under us by nothing we know of; it is not ours to vouch for.
+        continue
+      if written:
+        if not syncExistingFileDurably(path):
+          return false
+        dirs.incl(parentDir(path))
+  for dir in dirs:
+    syncDirectoryDurably(dir)
+  let marker = nimcacheInUseMarkerPath(nimcache)
+  try:
+    removeFile(extendedPath(marker))
+  except OSError:
+    return false
+  syncDirectoryDurably(parentDir(marker))
+  true
+
 proc runLogicalCompilerCommand(command, physical: openArray[string];
-    cwd: string): ProviderCompileExecutionResult =
+    cwd: string; priorNote: var string;
+    withEnv: openArray[(string, string)] = [];
+    beforeRetry: proc () {.closure.} = nil):
+    ProviderCompileExecutionResult =
   ## Launch `physical` (the logical `command` itself, or its argument-file
-  ## transport), retrying once on an abnormal compiler termination. Failures
-  ## are reported against the logical `command`.
-  result = runCommand(physical, cwd = cwd, raiseOnFailure = false)
-  var priorNote = ""
-  if compilerCrashIsRetryable(result.exitCode):
+  ## transport), retrying once on an abnormal compiler termination, and
+  ## return the FINAL attempt's result whatever its status: the caller reads
+  ## how the compile ended before it raises (`runNimcacheCompilerCommandHeld`
+  ## clears its in-use mark only after an ordinary exit). `priorNote` is set
+  ## when a retry happened, for the caller's diagnostic, which names the
+  ## logical `command`. `beforeRetry` runs between the attempts.
+  priorNote = ""
+  result = runCommand(physical, cwd = cwd, raiseOnFailure = false,
+    withEnv = withEnv)
+  if compilerCrashIsRetryable(result.exitCode) and not result.killedByCaller:
     # The compiler died instead of answering, so this run produced no
     # verdict about the recipe -- retrying is not papering over a compile
     # error, it is asking the question that never got answered.
@@ -8603,16 +9305,21 @@ proc runLogicalCompilerCommand(command, physical: openArray[string];
     priorNote = "note: a first attempt terminated abnormally (" &
       firstCrash & ") and was retried once; the output below is the " &
       "SECOND attempt's.\n"
-    result = runCommand(physical, cwd = cwd, raiseOnFailure = false)
-  if result.exitCode != 0:
-    raise commandFailure(command, result, priorNote)
+    if beforeRetry != nil:
+      beforeRetry()
+    result = runCommand(physical, cwd = cwd, raiseOnFailure = false,
+      withEnv = withEnv)
 
-proc runNimcacheCompilerCommandHeld(command: openArray[string]; cwd = ""):
+proc runNimcacheCompilerCommandHeld*(command: openArray[string]; cwd = "";
+    withEnv: openArray[(string, string)] = []):
     ProviderCompileExecutionResult =
   ## Execute a compiler command whose nimcache the CALLER already holds
   ## exclusively (`runSharedNimcacheCompilerCommand` takes the directory's
   ## lock itself; the interface extraction holds a slot lock instead, see
-  ## `acquireInterfaceNimcacheSlot`).
+  ## `acquireInterfaceNimcacheSlot`). Raises `OSError` when the compile does
+  ## not succeed. Exported for the test that pins the interrupted-use guard
+  ## below (`t_interface_nimcache_survives_an_interrupted_compile`); the
+  ## caller's exclusive hold is a precondition this proc cannot check.
   ##
   ## `command` is the LOGICAL compiler argv; callers have already formed every
   ## cache identity from it. When launching it directly would exceed the
@@ -8622,8 +9329,16 @@ proc runNimcacheCompilerCommandHeld(command: openArray[string]; cwd = ""):
   ## retry, and removed afterwards (codetracer-pm
   ## `spec/Nim-Compiler-Argument-Files.md`). Diagnostics keep naming the
   ## logical argv.
+  ##
+  ## The nimcache (`--nimcache:`) is guarded against an interrupted use, per
+  ## Tool-Owned-Caches.md §"Interrupted Use" (see the
+  ## block comment above `nimcacheInUseMarkerPath`). This is the one place
+  ## both of the spec's named caches pass through -- the provider compile's
+  ## position-keyed nimcache and every slot of the extraction's pool -- so the
+  ## guard is here and not in either caller.
   if command.len == 0:
     raise newException(OSError, "a compiler command needs a compiler")
+  let nimcache = providerNimcachePath(command)
   var physical = @command
   var argsFile = ""
   if compilerArgvExceedsPlatformLimit(command):
@@ -8633,25 +9348,67 @@ proc runNimcacheCompilerCommandHeld(command: openArray[string]; cwd = ""):
         "its argument file: " & command[0])
     argsFile = stageCompilerArgsFile(cwd, command[1 .. ^1])
     physical = physicalCompilerCommand(command[0], argsFile)
+  var execution: ProviderCompileExecutionResult
+  var priorNote = ""
+  var endedInOrder = false
+  var useStart: times.Time
   try:
-    result = runLogicalCompilerCommand(command, physical, cwd)
+    discardInterruptedNimcache(nimcache)
+    useStart = getTime()
+    markNimcacheInUse(nimcache)
+    # Between a crashed first attempt and its retry the mark stays: that use
+    # did not end in order. The retry deliberately reuses the warm directory
+    # (`runLogicalCompilerCommand`), but not one holding an object no
+    # complete write produces -- that much of rule 4 is cheap to apply here.
+    let checkBeforeRetry = proc () =
+      let empty = zeroByteNimcacheObject(nimcache)
+      if empty.len > 0:
+        discardNimcache(nimcache, "the compile that crashed in it left a " &
+          "zero-byte object file, " & extractFilename(empty))
+    # Any exception from here on leaves `endedInOrder` false and the mark in
+    # place. Some of them mean nothing ran (the compiler could not be
+    # started), but `runCommand` does not say which, and an engine that did
+    # not see the end of the use cannot vouch for it (rule 3). The price of
+    # being wrong this way is one cold compile.
+    execution = runLogicalCompilerCommand(command, physical, cwd, priorNote,
+      withEnv, checkBeforeRetry)
+    endedInOrder = abnormalTerminationName(execution.exitCode).len == 0 and
+      not execution.killedByCaller
   finally:
     removeStagedCompilerArgsFile(argsFile)
+  if endedInOrder:
+    var settled = false
+    try:
+      settled = settleNimcacheUse(nimcache, useStart)
+    except CatchableError:
+      settled = false
+    if not settled:
+      writeNimcacheNotice("repro: warning: what this compile wrote to " &
+        "the compiler cache " & nimcache & " could not be flushed to disk; " &
+        "the cache stays marked in use, so the next compile in it starts " &
+        "cold.")
+  if execution.exitCode != 0:
+    raise commandFailure(command, execution, priorNote)
+  execution
 
-proc runSharedNimcacheCompilerCommand(command: openArray[string]; cwd = ""):
+proc runSharedNimcacheCompilerCommand(command: openArray[string]; cwd = "";
+    withEnv: openArray[(string, string)] = []):
     ProviderCompileExecutionResult =
   ## Execute a compiler command under the lock for its shared Nim cache. The
   ## lock is kernel-owned, so process termination releases it even though the
   ## small lock file remains available for later sessions.
   var lock = acquireProviderNimcacheLock(command)
   try:
-    result = runNimcacheCompilerCommandHeld(command, cwd)
+    result = runNimcacheCompilerCommandHeld(command, cwd, withEnv)
   finally:
     releaseProviderNimcacheLock(lock)
 
-proc runProviderCompilerCommand*(command: openArray[string]; cwd = ""):
+proc runProviderCompilerCommand*(command: openArray[string]; cwd = "";
+    withEnv: openArray[(string, string)] = []):
     ProviderCompileExecutionResult =
-  runSharedNimcacheCompilerCommand(command, cwd)
+  ## ``withEnv``: the compile child's own variables
+  ## (`providerCompileSourceEnvironment`).
+  runSharedNimcacheCompilerCommand(command, cwd, withEnv)
 
 proc runInterfaceCompilerCommand*(command: openArray[string]; cwd = ""):
     ProviderCompileExecutionResult =
@@ -8877,6 +9634,70 @@ proc recipeConfigProjectFiles*(modulePath: string): seq[string] =
     result.add(projectDir / file)
   for ext in [".nimcfg", ".nim.cfg", ".nims"]:
     result.add(projectDir / (name & ext))
+
+proc recipeConfigurationWorkspaceRoots*(modulePath: string): seq[string] =
+  ## The workspace roots a compile whose main module is ``modulePath``
+  ## reaches through the recipe's configuration: the parent of every
+  ## directory, the recipe's own and each ancestor, that holds a
+  ## configuration file Nim reads (`RecipeConfigFileNames`), since such a file
+  ## names its siblings as `../<name>` (reprobuild's `config.nims` does).
+  if modulePath.len == 0:
+    return
+  var dirs = recipeConfigAncestorDirs(modulePath)
+  dirs.add(recipeConfigProjectDir(modulePath))
+  for dir in dirs:
+    for name in RecipeConfigFileNames:
+      if fileExists(extendedPath(dir / name)):
+        let parent = dir.parentDir
+        if parent.len > 0 and parent notin result:
+          result.add(parent)
+        break
+
+proc providerCompileSourceEnvironment*(workDir: string; modulePath = ""):
+    seq[(string, string)] =
+  ## The variables the provider compile's `nim c` child gets so that the
+  ## recipe's own `config.nims` -- which Nim evaluates itself there, the
+  ## recipe being the main module -- selects, for every package the
+  ## resolver displaced a sibling for, the root the resolver chose:
+  ## `$<PKG>_SRC` = that root (`SiblingPackagePaths.displacedRoots`).
+  ## reprobuild's `config.nims` takes `$IO_MON_SRC`, `$STACKABLE_HOOKS_SRC`,
+  ## `$REPRO_TEST_ADAPTERS_SRC`, `$RUNQUOTA_SRC` (a checkout root, as
+  ## `resolveRunquotaRoot` answers) and the other plain-order packages
+  ## first, and a sibling-first package's variable over a stale sibling
+  ## (`chooseSiblingSource`, `sskEnvPin`), so its paths and the command's
+  ## name one root per package. No `--excludePath` and no second
+  ## evaluation of the file.
+  ##
+  ## The siblings are looked for where the RECIPE's configuration looks
+  ## (``modulePath``, `recipeConfigurationWorkspaceRoots`): this compile
+  ## resolves its own `--path`s against the SDK tree (in the dev env, the
+  ## engine's store copy of the sources) from a scratch directory, and so
+  ## never meets the workspace the recipe's `config.nims` reaches as
+  ## `../io-mon`.
+  ##
+  ## A sibling-first package is listed in `$REPRO_SIBLING_PINNED` as well
+  ## (`SiblingPinnedPackagesEnvVar`): the file takes `$<PKG>_SRC` over a
+  ## sibling only when it can see the sibling is stale, and in this compile it
+  ## cannot -- its `PATH` (`providerCompileLaunchEnv`) has no `git`, which
+  ## reads as "cannot tell" and keeps the sibling (measured 2026-11-23:
+  ## `nim dump` under the provider compile's recorded environment named
+  ## `<ws>/nim-shm-gset/src` and `<ws>/nim-shm-queue/src`).
+  ##
+  ## For the child only (`runProviderCompilerCommand`'s ``withEnv``): never
+  ## this process's environment, which the dev env later hands the user's
+  ## command, and set by value, so the seeded-root bookkeeping
+  ## (`SeededSourceEnvironmentVar`) does not mistake it for a seed.
+  let paths = reproPackagePaths(workDir,
+    recipeConfigurationWorkspaceRoots(modulePath))
+  result = paths.displacedRoots
+  var pinned: seq[string]
+  for (envName, _) in paths.displacedRoots:
+    if envName in SiblingFirstPackageEnvNames:
+      pinned.add(envName)
+  if pinned.len > 0:
+    let caller = getEnv(SiblingPinnedPackagesEnvVar).strip()
+    result.add((SiblingPinnedPackagesEnvVar,
+      (if caller.len > 0: caller & "," else: "") & pinned.join(",")))
 
 proc recipeConfigEntryRefusal*(fileOwner, fileMode: int;
                                fileGroupIsOwnPrivate: bool;
@@ -9669,7 +10490,9 @@ proc extractInterfaceFromModuleBody(modulePath, artifactPath,
   let runnerBin = tempRoot / "extract_runner"
   let hostFlags = hostCCompilerFlags()
   let libFlags = recipeLibPathFlags(workDir, absoluteModulePath)
-  let packageFlags = reproPackagePathFlags(workDir)
+  let packagePaths = reproPackagePaths(workDir,
+    recipeConfigurationWorkspaceRoots(absoluteModulePath))
+  let packageFlags = packagePaths.flags
   # The engine's own binary and the consumer's root are handed to the recipe's
   # macro expansion. A macro that needs to resolve a declared dependency calls
   # back through `staticExec` (see `internal resolve-package`) rather than
@@ -9702,7 +10525,7 @@ proc extractInterfaceFromModuleBody(modulePath, artifactPath,
     # the consumer, and every dependency resolved against the wrong
     # workspace.
     consumerRootDefine,
-  ] & (if getEnv("REPRO_DSLDEPS_DEBUG").len > 0:
+  ] & engineIdentityDefines() & (if getEnv("REPRO_DSLDEPS_DEBUG").len > 0:
          @["--define:reproDslDepsDebug"] else: @[])
   # The `--nimcache:` argument is filled in once the command is complete: its
   # key folds in every compile option (defines, producer paths), so two
@@ -9762,10 +10585,8 @@ proc extractInterfaceFromModuleBody(modulePath, artifactPath,
   # roots are reasserted afterwards; recipe-only imports retain these paths.
   let recipeConfigFlags = recipeConfigSearchPathFlags(absoluteModulePath,
     cwd = tempRoot)
-  if recipeConfigFlags.len > 0:
-    let runnerAt = command.find(runnerPlaceholder)
-    command.insert(recipeConfigFlags, runnerAt)
-  protectSdkCompilePaths(command, workDir, runnerPlaceholder, packageFlags)
+  applyRecipeConfigurationSearchPaths(command, workDir, runnerPlaceholder,
+    recipeConfigFlags, packagePaths)
   # WHAT IS LAUNCHED. `command` stays the compile's identity: the nimcache
   # key below is computed from it. What runs is `launch.argv`, which leaves
   # the SDK roots' reassertion pairs to a NimScript beside the runner
@@ -9913,6 +10734,14 @@ proc extractInterfaceFromModuleBody(modulePath, artifactPath,
       if launch.script.len > 0:
         err.msg.add("\n(the compile's SDK search-path reassertion is in " &
           searchPathScript & ")")
+      # The pool is shared by every extraction on the host with this
+      # configuration, so a failure that comes from its contents rather than
+      # from the recipe -- objects a crashed compile left half written, which
+      # failed every later link through that slot -- must be traceable to the
+      # directory, not only to the recipe.
+      if not perBinary:
+        err.msg.add("\n(the compile used the shared nimcache " & nimcache &
+          ")")
       raise
   finally:
     if not perBinary:
@@ -10865,6 +11694,7 @@ proc providerCompileCommand*(modulePath, outputBinaryPath: string;
     # vregs ICEs and unbounded nested compiler bursts. Hosts with a validated
     # toolchain can opt into bounded concurrency through the environment.
     "--define:reproProviderMode",
+  ] & engineIdentityDefines() & @[
     # A recipe-relative compile names the module by its file name and runs
     # in its directory; its search path is then that directory, `.`.
     "--path:" & (if parentDir(modulePath).len > 0: parentDir(modulePath)
@@ -11473,7 +12303,8 @@ proc compileProviderBinary*(modulePath, outputBinaryPath: string;
   # Keep the immutable library lookup root (`workDir`) out of the write path.
   # Nim emits relative linker response files in CWD even though `--nimcache`
   # and `--out` are absolute.
-  let execution = runProviderCompilerCommand(plan.compilerCommand, compilerCwd)
+  let execution = runProviderCompilerCommand(plan.compilerCommand, compilerCwd,
+    providerCompileSourceEnvironment(plan.workDir, absolutePath(modulePath)))
   if not fileExists(extendedPath(plan.outputBinaryPath)):
     raise newException(IOError,
       "provider compilation did not write binary: " & plan.outputBinaryPath &

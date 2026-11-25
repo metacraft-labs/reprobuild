@@ -121,6 +121,17 @@ payload="$stage/$topdir"
 nbin="$(find "$payload/bin" -type f 2>/dev/null | wc -l | tr -d ' ')"
 [ "$nbin" -gt 0 ] || die "$topdir/bin contains no files; refusing to build an empty package"
 log "payload: $nbin file(s) in bin/"
+# An engine without its graph helper image is a broken release, not a smaller
+# one: the engine runs the build graph's own helper commands with
+# bin/reprobuild-helper and refuses to run them itself when it is missing (an
+# engine process inside an action loads OpenSSL, which reads entropy at
+# start-up on Windows). Refuse it here rather than ship it.
+for _engine in reprobuild reprobuild.exe; do
+  [ -e "$payload/bin/$_engine" ] || continue
+  case "$_engine" in *.exe) _helper=reprobuild-helper.exe ;; *) _helper=reprobuild-helper ;; esac
+  [ -f "$payload/bin/$_helper" ] \
+    || die "$topdir/bin has $_engine but no $_helper (the graph helper image the engine runs beside itself); refusing to package it"
+done
 
 # ---------------------------------------------------------------------
 # The installed filesystem tree, shared by every ecosystem
@@ -171,9 +182,10 @@ stage_tree() {
   for _c in "$payload/bin"/*; do
     _n="$(basename "$_c")"
     # Public commands only: not the dot-prefixed `.X.real` binaries the
-    # launchers exec, not data files that live beside them, and not
-    # runquota's commands (above).
-    case "$_n" in .*|*.json|runquotad|runquota) continue ;; esac
+    # launchers exec, not data files that live beside them, not runquota's
+    # commands (above), and not the engine's graph helper image, which only
+    # the engine runs (from beside itself, never through PATH).
+    case "$_n" in .*|*.json|runquotad|runquota|reprobuild-helper) continue ;; esac
     [ -f "$_c" ] && [ -x "$_c" ] || continue
     # shellcheck disable=SC2059 # the format is assembled from fixed text
     printf "#!/bin/sh\n${_runquotad_line}exec /$_pfx/lib/reprobuild/bin/%s \"\$@\"\n" "$_n" > "$_t/$_pfx/bin/$_n"
@@ -212,9 +224,13 @@ stage_tree() {
 # The macOS .pkg installs under /usr/local instead (macOS's /usr is read-only):
 # the same three files at /usr/local/share/bash-completion/completions/repro,
 # /usr/local/share/zsh/site-functions/_repro and
-# /usr/local/share/fish/vendor_completions.d/repro.fish. The first two
-# directories are on the default search path of bash-completion and of macOS's
-# own zsh; see the comment at build_pkg for what was measured.
+# /usr/local/share/fish/vendor_completions.d/repro.fish, plus the Bash script a
+# second time at /usr/local/etc/bash_completion.d/repro. The share directories
+# are on the default search path of bash-completion and of macOS's own zsh;
+# etc/bash_completion.d is the directory a bash-completion installed under
+# /usr/local (Homebrew on Intel Macs) reads at start-up, which also covers one
+# whose XDG_DATA_DIRS leaves out /usr/local/share. See the comment at build_pkg
+# for what was measured.
 #
 # A missing source file is a hard failure, not a package without that shell:
 # a package that installs but leaves one shell without completion passes every
@@ -229,10 +245,14 @@ stage_completions() {
     pkg)     _share='usr/local/share'; _zsh_dir='usr/local/share/zsh/site-functions' ;;
     *) die "stage_tree: unknown package format '$_fmt'" ;;
   esac
+  _extra=''
+  [ "$_fmt" = pkg ] && _extra='repro.bash:usr/local/etc/bash_completion.d/repro'
+  # $_extra is empty or one word without blanks: unquoted on purpose.
+  # shellcheck disable=SC2086
   for _pair in \
     "repro.bash:$_share/bash-completion/completions/repro" \
     "_repro:$_zsh_dir/_repro" \
-    "repro.fish:$_share/fish/vendor_completions.d/repro.fish" ; do
+    "repro.fish:$_share/fish/vendor_completions.d/repro.fish" $_extra ; do
     _from="$_src/${_pair%%:*}"
     _to="$_t/${_pair#*:}"
     [ -s "$_from" ] || die "$topdir/share/repro/completions/${_pair%%:*} is missing or empty; the release leg stages it with scripts/release/stage_release_completions.sh"
@@ -460,6 +480,10 @@ PKGINFO
 # built with pkgbuild, which exists on macOS only, so this ecosystem is never
 # part of `all`. The package is unsigned and not notarized.
 #
+# REPRO_PKG_STAGE_ONLY=1 stages the payload root and stops before pkgbuild,
+# leaving it at <out>/reprobuild-<version>-<platform>-<arch>.pkgroot, so the
+# payload (what pkgbuild would put in the package) can be read on any host.
+#
 # Why /usr/local: macOS's /usr is read-only, and /usr/local is where its
 # installers put third-party programs and what its shells already look at:
 # measured on macOS 26 (Apple silicon), /bin/zsh's default fpath starts with
@@ -469,11 +493,19 @@ PKGINFO
 # /usr/local/share/fish/vendor_completions.d only when its own prefix is
 # /usr/local (Homebrew on Intel) or XDG_DATA_DIRS names /usr/local/share.
 build_pkg() {
-  command -v pkgbuild >/dev/null 2>&1 || die 'pkgbuild not found (the macOS .pkg can be built on macOS only)'
+  [ "${REPRO_PKG_STAGE_ONLY:-0}" = 1 ] || command -v pkgbuild >/dev/null 2>&1 \
+    || die 'pkgbuild not found (the macOS .pkg can be built on macOS only)'
   _root="$stage/pkgroot"
   rm -rf "$_root"
   mkdir -p "$_root"
   stage_tree "$_root" pkg
+  if [ "${REPRO_PKG_STAGE_ONLY:-0}" = 1 ]; then
+    _staged="$out/reprobuild-${version}-${platform}-${asset_arch}.pkgroot"
+    rm -rf "$_staged"
+    cp -a "$_root" "$_staged"
+    log "REPRO_PKG_STAGE_ONLY=1: staged the payload at $_staged; not building the package"
+    return 0
+  fi
   # Extended attributes on the staged files (quarantine marks from wherever
   # the archive was unpacked) would travel in the payload as `._name`
   # AppleDouble records. Clear what can be cleared; macOS refuses to clear its
@@ -499,6 +531,7 @@ build_pkg() {
     || die "the package $_pkg cannot be read back (pkgutil --payload-files failed)"
   for _want in ./usr/local/bin/repro \
       ./usr/local/share/bash-completion/completions/repro \
+      ./usr/local/etc/bash_completion.d/repro \
       ./usr/local/share/zsh/site-functions/_repro \
       ./usr/local/share/fish/vendor_completions.d/repro.fish ; do
     grep -qx -- "$_want" "$stage/pkg-listing.txt" \
@@ -528,7 +561,17 @@ build_pkg() {
 # after the files are in place, and runs `repro hooks uninstall
 # --shell-autocomplete --system` before they are removed, so an uninstall
 # leaves no block behind. Both run as LocalSystem (the package is
-# per-machine), and their failure does not fail
+# per-machine), through WiX's quiet-exec custom action (WixQuietExec64 in
+# WixUtilExtension's WixCA binary,
+# https://wixtoolset.org/docs/v3/customactions/qtexec/), which starts
+# repro.exe with no console window and logs its output to the installation
+# log; a plain executable custom action would flash a console during an
+# interactive installation. Quiet exec takes its command line from the
+# action's CustomActionData, the property named after the action, which an
+# immediate type-51 action (SetReproCompletionEnsure, SetReproCompletionRemove)
+# sets from "[BINDIR]repro.exe": a directory property, which keeps its value
+# while the package is being removed, where a [#file] reference would be
+# empty. Their failure does not fail
 # the installation: completion is a convenience on top of a working install,
 # as with the install scripts. The ensure action writes the block in each
 # PowerShell's profile whose $PSHOME is writable (as LocalSystem, Program
@@ -548,11 +591,13 @@ build_pkg() {
 # (libs/repro_dsl_stdlib/src/repro_dsl_stdlib/packaging/reprobuild_dist.nim),
 # so either MSI upgrades the other instead of installing beside it.
 #
-# Toolsets: msitools' wixl (https://wiki.gnome.org/msitools; Linux, macOS),
-# or WiX v3's candle and light on Windows
+# Toolset: WiX v3's candle and light, with WixUtilExtension, on Windows
 # (https://wixtoolset.org/docs/v3/; REPRO_WIX3_BIN names the directory that
-# holds them). REPRO_MSI_TOOLSET=wixl|wix3 chooses one; otherwise wixl when it
-# is on PATH, else WiX v3. REPRO_MSI_SOURCE_ONLY=1 writes the .wxs and stops.
+# holds them). msitools' wixl (https://wiki.gnome.org/msitools) cannot build
+# this package: the quiet-exec actions live in WixUtilExtension's WixCA DLL,
+# which wixl has no way to link, so REPRO_MSI_TOOLSET=wixl is refused rather
+# than allowed to build a package whose actions cannot run.
+# REPRO_MSI_SOURCE_ONLY=1 writes the .wxs and stops, on any host.
 # The package is read back (msiinfo, or the Windows Installer database API
 # where there is no msiinfo) and refused unless it installs repro.exe, the
 # completion script at its path and both custom actions.
@@ -632,11 +677,17 @@ write_msi_wxs() {
       print "      <ComponentRef Id=\"cmp_path_entry\" />"
       print "    </Feature>"
       # PowerShell completion for every user: the all-users profile block,
-      # written and removed by the installed repro (see build_msi).
-      print "    <CustomAction Id=\"ReproCompletionEnsure\" FileKey=\"fil_repro_exe\" ExeCommand=\"hooks ensure --shell-autocomplete --system\" Execute=\"deferred\" Impersonate=\"no\" Return=\"ignore\" />"
-      print "    <CustomAction Id=\"ReproCompletionRemove\" FileKey=\"fil_repro_exe\" ExeCommand=\"hooks uninstall --shell-autocomplete --system\" Execute=\"deferred\" Impersonate=\"no\" Return=\"ignore\" />"
+      # written and removed by the installed repro (see build_msi), each
+      # through the WiX quiet exec, whose command line an immediate action sets.
+      exe = "&quot;[BINDIR]repro.exe&quot;"
+      print "    <CustomAction Id=\"SetReproCompletionEnsure\" Property=\"ReproCompletionEnsure\" Value=\"" exe " hooks ensure --shell-autocomplete --system\" Execute=\"immediate\" />"
+      print "    <CustomAction Id=\"ReproCompletionEnsure\" BinaryKey=\"WixCA\" DllEntry=\"WixQuietExec64\" Execute=\"deferred\" Impersonate=\"no\" Return=\"ignore\" />"
+      print "    <CustomAction Id=\"SetReproCompletionRemove\" Property=\"ReproCompletionRemove\" Value=\"" exe " hooks uninstall --shell-autocomplete --system\" Execute=\"immediate\" />"
+      print "    <CustomAction Id=\"ReproCompletionRemove\" BinaryKey=\"WixCA\" DllEntry=\"WixQuietExec64\" Execute=\"deferred\" Impersonate=\"no\" Return=\"ignore\" />"
       print "    <InstallExecuteSequence>"
+      print "      <Custom Action=\"SetReproCompletionRemove\" Before=\"ReproCompletionRemove\">REMOVE~=\"ALL\"</Custom>"
       print "      <Custom Action=\"ReproCompletionRemove\" Before=\"RemoveFiles\">REMOVE~=\"ALL\"</Custom>"
+      print "      <Custom Action=\"SetReproCompletionEnsure\" Before=\"ReproCompletionEnsure\">NOT (REMOVE~=\"ALL\")</Custom>"
       print "      <Custom Action=\"ReproCompletionEnsure\" Before=\"InstallFinalize\">NOT (REMOVE~=\"ALL\")</Custom>"
       print "    </InstallExecuteSequence>"
       print "  </Product>"
@@ -644,26 +695,126 @@ write_msi_wxs() {
     }'
 }
 
+# powershell_encoded_command <script>: <script> as PowerShell's
+# -EncodedCommand wants it, the base64 of its UTF-16LE bytes
+# (https://learn.microsoft.com/powershell/module/microsoft.powershell.core/about/about_powershell_exe,
+# -EncodedCommand).
+#
+# WHY -EncodedCommand rather than `-Command '<script>'` or `-File`. The
+# base64 alphabet holds no character that the MSYS runtime's argument
+# quoting or the callee's command-line splitter treats specially, so the
+# script reaches powershell.exe byte for byte whatever it contains; and
+# unlike `-File` it is not subject to the host's execution policy, which a
+# group policy can set beyond the reach of `-ExecutionPolicy Bypass`
+# (https://learn.microsoft.com/powershell/module/microsoft.powershell.core/about/about_execution_policies).
+# It does not make a broken script work: the script text must parse as
+# PowerShell on its own (see MSI_TABLE_PS).
+powershell_encoded_command() {
+  command -v iconv >/dev/null 2>&1 || die 'iconv is not available; cannot encode a PowerShell command'
+  command -v base64 >/dev/null 2>&1 || die 'base64 is not available; cannot encode a PowerShell command'
+  printf '%s' "$1" | iconv -f UTF-8 -t UTF-16LE | base64 | tr -d '\r\n'
+}
+
+# The table reader handed to powershell.exe. Kept as data, never spliced into
+# a command line, and written as a quoted here-document so the shell changes
+# nothing in it.
+#
+# PowerShell quoting, which this text must respect
+# (https://learn.microsoft.com/powershell/module/microsoft.powershell.core/about/about_quoting_rules):
+# inside a DOUBLE-quoted string a backtick is the escape character, so
+# "`" is an escaped quote and never closes the string; inside a
+# SINGLE-quoted string a backtick is an ordinary character. The SQL query
+# quotes the table name in backticks (Windows Installer SQL,
+# https://learn.microsoft.com/windows/win32/msi/sql-syntax), so its pieces
+# are single-quoted. The earlier "SELECT * FROM `" + ... + "`" did not
+# parse at all ("Unexpected token '`"'"), every table read back empty, and a
+# correct MSI was refused as not installing bin/repro.exe.
+#
+# A failure inside the script is written to stderr as plain text and exits
+# 1, so msi_table can refuse it rather than read an empty table.
+MSI_TABLE_PS="$(cat <<'MSI_TABLE_PS_EOF'
+$ErrorActionPreference = 'Stop'
+# A column whose type is a binary stream cannot be read as a string: the
+# Binary table's Data column (where WixUtilExtension puts the WixCA DLL) made
+# Record.StringData throw "StringData,Field". So each column's type is read
+# from View.ColumnInfo(msiColumnInfoTypes = 1)
+# (https://learn.microsoft.com/windows/win32/msi/view-columninfo), whose
+# letter 'v' (or 'V', nullable) marks a binary stream
+# (https://learn.microsoft.com/windows/win32/msi/column-definition-format),
+# and a stream cell is written as its length in bytes, Record.DataSize
+# (https://learn.microsoft.com/windows/win32/msi/record-datasize); every
+# other cell is Record.StringData
+# (https://learn.microsoft.com/windows/win32/msi/record-stringdata).
+function Get-ComProperty($Object, [string]$Name, [object[]]$Arguments) {
+  return $Object.GetType().InvokeMember($Name, 'GetProperty', $null, $Object, $Arguments)
+}
+function Test-MsiStreamColumn([string]$Type) {
+  return $Type -cmatch '^[vV]'
+}
+function Get-MsiCell($Record, [int]$Field, [string]$Type) {
+  if (Test-MsiStreamColumn $Type) {
+    return [string](Get-ComProperty $Record 'DataSize' @($Field))
+  }
+  return [string](Get-ComProperty $Record 'StringData' @($Field))
+}
+# main: everything below runs against the Windows Installer COM object.
+try {
+  $i = New-Object -ComObject WindowsInstaller.Installer
+  $db = $i.GetType().InvokeMember('OpenDatabase', 'InvokeMethod', $null, $i, @($env:REPRO_MSI_DB, 0))
+  $q = 'SELECT * FROM `' + $env:REPRO_MSI_TABLE + '`'
+  $v = $db.GetType().InvokeMember('OpenView', 'InvokeMethod', $null, $db, @($q))
+  $v.GetType().InvokeMember('Execute', 'InvokeMethod', $null, $v, $null) | Out-Null
+  $cols = Get-ComProperty $v 'ColumnInfo' @(1)
+  $n = $cols.GetType().InvokeMember('FieldCount', 'GetProperty', $null, $cols, $null)
+  $types = @(foreach ($k in 1..$n) { Get-ComProperty $cols 'StringData' @($k) })
+  while ($r = $v.GetType().InvokeMember('Fetch', 'InvokeMethod', $null, $v, $null)) {
+    $f = foreach ($k in 1..$n) { Get-MsiCell $r $k $types[$k - 1] }
+    [Console]::Out.WriteLine(($f -join [char]9))
+  }
+} catch {
+  [Console]::Error.WriteLine('reading MSI table ' + $env:REPRO_MSI_TABLE + ' failed: ' + $_.Exception.Message)
+  exit 1
+}
+MSI_TABLE_PS_EOF
+)"
+
 # msi_table <msi> <table>: the table's rows, tab-separated, no header.
+# Refuses (dies) when the reader fails, so an unreadable table is never
+# mistaken for an empty one.
 msi_table() {
   if command -v msiinfo >/dev/null 2>&1; then
-    msiinfo export "$1" "$2" | tr -d '\r' | tail -n +4
+    # From the stage: exporting a table with a binary column (Binary)
+    # writes each stream to <table>/<cell> under the working directory, and
+    # the cell names that file. The export's second line holds the column
+    # types; a stream column ('v'/'V') is reported as the stream's length in
+    # bytes, as the Windows reader below reports it, so both readers yield
+    # the same rows.
+    ( cd "$stage" && msiinfo export "$1" "$2" ) | tr -d '\r' > "$stage/msi-export.raw"
+    awk -F '\t' -v OFS='\t' -v dir="$stage/$2" '
+      NR == 2 { for (k = 1; k <= NF; k++) stream[k] = ($k ~ /^[vV]/); next }
+      NR <= 3 { next }
+      {
+        for (k = 1; k <= NF; k++) if (stream[k]) {
+          f = dir "/" $k; sz = ""
+          if ((getline _l < f) >= 0) { close(f); cmd = "wc -c < \"" f "\""; cmd | getline sz; close(cmd) }
+          gsub(/[^0-9]/, "", sz); $k = (sz == "" ? 0 : sz)
+        }
+        print
+      }' "$stage/msi-export.raw"
   elif command -v powershell.exe >/dev/null 2>&1; then
     _m="$1"
     command -v cygpath >/dev/null 2>&1 && _m="$(cygpath -w "$1")"
     # The Windows Installer database API (WindowsInstaller.Installer):
     # https://learn.microsoft.com/windows/win32/msi/installer-opendatabase
-    REPRO_MSI_DB="$_m" REPRO_MSI_TABLE="$2" powershell.exe -NoProfile -NonInteractive -Command '
-      $i = New-Object -ComObject WindowsInstaller.Installer
-      $db = $i.GetType().InvokeMember("OpenDatabase", "InvokeMethod", $null, $i, @($env:REPRO_MSI_DB, 0))
-      $v = $db.GetType().InvokeMember("OpenView", "InvokeMethod", $null, $db, @("SELECT * FROM `" + $env:REPRO_MSI_TABLE + "`"))
-      $v.GetType().InvokeMember("Execute", "InvokeMethod", $null, $v, $null) | Out-Null
-      $cols = $v.GetType().InvokeMember("ColumnInfo", "GetProperty", $null, $v, @(0))
-      $n = $cols.GetType().InvokeMember("FieldCount", "GetProperty", $null, $cols, $null)
-      while ($r = $v.GetType().InvokeMember("Fetch", "InvokeMethod", $null, $v, $null)) {
-        $f = foreach ($k in 1..$n) { $r.GetType().InvokeMember("StringData", "GetProperty", $null, $r, @($k)) }
-        [Console]::Out.WriteLine(($f -join "`t"))
-      }' | tr -d '\r'
+    # The database and table travel in the environment, the script as
+    # -EncodedCommand: no value is quoted into a command line.
+    _enc="$(powershell_encoded_command "$MSI_TABLE_PS")" || exit 1
+    _rc=0
+    REPRO_MSI_DB="$_m" REPRO_MSI_TABLE="$2" powershell.exe -NoProfile -NonInteractive \
+      -EncodedCommand "$_enc" > "$stage/msi-table.raw" || _rc=$?
+    [ "$_rc" -eq 0 ] ||
+      die "cannot read the $2 table of $1 back: powershell.exe exited $_rc (its stderr is above)"
+    tr -d '\r' < "$stage/msi-table.raw"
   else
     die 'cannot read the MSI back: neither msiinfo (msitools) nor the Windows Installer API (powershell.exe) is available'
   fi
@@ -704,38 +855,34 @@ build_msi() {
     log 'REPRO_MSI_SOURCE_ONLY=1: not building the package'
     return 0
   fi
-  _toolset="${REPRO_MSI_TOOLSET:-}"
+  _toolset="${REPRO_MSI_TOOLSET:-wix3}"
   _wix="${REPRO_WIX3_BIN:-}"
-  if [ -z "$_toolset" ]; then
-    if command -v wixl >/dev/null 2>&1; then _toolset=wixl
-    elif [ -n "$_wix" ] || command -v candle.exe >/dev/null 2>&1; then _toolset=wix3
-    else die 'no MSI toolset: put msitools (wixl) on PATH, or name WiX v3 with REPRO_WIX3_BIN'
-    fi
-  fi
   case "$_toolset" in
     wixl)
-      command -v wixl >/dev/null 2>&1 || die 'wixl (msitools) is not on PATH'
-      ( cd "$stage" && wixl -a x64 -D "SourceDir=$stage" -o "$_msi" "$_wxs" ) \
-        > "$stage/wixl.log" 2>&1 || { tail -n 40 "$stage/wixl.log" >&2; die 'wixl failed'; }
+      die 'wixl (msitools) cannot build the MSI: its custom actions are WiX quiet exec (WixUtilExtension), which only WiX v3 links; build it on Windows with REPRO_WIX3_BIN, or set REPRO_MSI_SOURCE_ONLY=1 for the .wxs alone'
       ;;
     wix3)
+      [ -n "$_wix" ] || command -v candle.exe >/dev/null 2>&1 \
+        || die 'no MSI toolset: name the WiX v3 directory (candle.exe, light.exe) with REPRO_WIX3_BIN; wixl cannot build this package (its custom actions are WiX quiet exec)'
       _candle=candle.exe; _light=light.exe
       if [ -n "$_wix" ]; then _candle="$_wix/candle.exe"; _light="$_wix/light.exe"; fi
       # WiX is a Windows program: hand it Windows paths (Git for Windows'
       # bash has cygpath).
       _w() { if command -v cygpath >/dev/null 2>&1; then cygpath -w "$1"; else printf '%s\n' "$1"; fi; }
-      "$_candle" -nologo -arch x64 "-dSourceDir=$(_w "$stage")" -out "$(_w "$stage/reprobuild.wixobj")" "$(_w "$_wxs")" \
+      # WixUtilExtension supplies the WixCA binary the quiet-exec actions run.
+      "$_candle" -nologo -arch x64 -ext WixUtilExtension "-dSourceDir=$(_w "$stage")" -out "$(_w "$stage/reprobuild.wixobj")" "$(_w "$_wxs")" \
         > "$stage/candle.log" 2>&1 || { tail -n 40 "$stage/candle.log" >&2; die 'candle failed'; }
       # -sval: ICE validation consults the build host's Windows Installer
       # service; it is a check to run on the package, not part of making it.
-      "$_light" -nologo -sval -out "$(_w "$_msi")" "$(_w "$stage/reprobuild.wixobj")" \
+      "$_light" -nologo -sval -ext WixUtilExtension -out "$(_w "$_msi")" "$(_w "$stage/reprobuild.wixobj")" \
         > "$stage/light.log" 2>&1 || { tail -n 40 "$stage/light.log" >&2; die 'light failed'; }
       ;;
-    *) die "unknown REPRO_MSI_TOOLSET '$_toolset' (wixl or wix3)" ;;
+    *) die "unknown REPRO_MSI_TOOLSET '$_toolset' (wix3)" ;;
   esac
   [ -s "$_msi" ] || die "built an empty $_msi"
   # READ IT BACK: the package must install the command, the completion
-  # script at its documented path, and the two custom actions.
+  # script at its documented path, the two quiet-exec custom actions and the
+  # two actions that set their command lines.
   msi_file_paths "$_msi" > "$stage/msi-files.txt" \
     || die "the package $_msi cannot be read back"
   for _want in ProgramFiles64Folder/Reprobuild/bin/repro.exe \
@@ -744,11 +891,23 @@ build_msi() {
       || die "the package $_msi does not install $_want"
   done
   msi_table "$_msi" CustomAction > "$stage/msi-ca.tsv"
-  for _want in 'ReproCompletionEnsure.*hooks ensure --shell-autocomplete --system' \
-      'ReproCompletionRemove.*hooks uninstall --shell-autocomplete --system' ; do
-    grep -q -- "$_want" "$stage/msi-ca.tsv" \
+  # Each row: action, type, source, target. The quiet-exec actions run
+  # WixQuietExec64 from the WixCA binary; the type-51 setters give each its
+  # command line (the property named after it).
+  _tab="$(printf '\t')"
+  for _want in \
+      "ReproCompletionEnsure${_tab}[0-9]*${_tab}WixCA${_tab}WixQuietExec64" \
+      "ReproCompletionRemove${_tab}[0-9]*${_tab}WixCA${_tab}WixQuietExec64" \
+      "SetReproCompletionEnsure${_tab}51${_tab}ReproCompletionEnsure${_tab}\"\[BINDIR\]repro.exe\" hooks ensure --shell-autocomplete --system" \
+      "SetReproCompletionRemove${_tab}51${_tab}ReproCompletionRemove${_tab}\"\[BINDIR\]repro.exe\" hooks uninstall --shell-autocomplete --system" ; do
+    grep -q -- "^$_want" "$stage/msi-ca.tsv" \
       || die "the package $_msi has no custom action matching '$_want'"
   done
+  # Each row: name, the stream's length in bytes (msi_table reads a stream
+  # column as its length). The WixCA DLL must be there and not empty.
+  msi_table "$_msi" Binary > "$stage/msi-binary.tsv"
+  awk -F '\t' '$1 == "WixCA" && $2 ~ /^[0-9]+$/ && $2 > 0 { ok = 1 } END { exit !ok }' "$stage/msi-binary.tsv" \
+    || die "the package $_msi carries no non-empty WixCA binary for its quiet-exec actions"
   log "built $_msi"
 }
 

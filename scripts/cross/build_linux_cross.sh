@@ -58,7 +58,8 @@
 # OUTPUT. `<out>/prefix/` is an installed layout (Distribution-And-Packaging
 # §5, the one `repro_core/source_root` resolves from the running image):
 #
-#   bin/reprobuild, bin/repro, bin/<providers>   the engine and its siblings
+#   bin/reprobuild, bin/reprobuild-helper, bin/repro, bin/<providers>
+#                                                the engine and its siblings
 #   bin/reprobuild-sandbox-launcher
 #   bin/nim -> ../nim/bin/nim                     the fork compiler, cross-built
 #   lib/librepro_monitor_shim.so                  io-mon's interpose shim
@@ -413,7 +414,20 @@ pinned_sources=(
 )
 flake_lock_json="$(nix flake metadata --json "${repo_root}" 2>/dev/null)"
 locked_rev_of() {
-  # The revision flake.lock pins for input $1.
+  # The revision flake.lock pins for input $1. CodeTracer and its trace-format
+  # source are not locked by name: the flake reads them from the CodeTracer pin
+  # (nix/codetracer-pin.nix), so their revision is the one the package was
+  # given, read back from its `sources`.
+  local arg=""
+  case "$1" in
+    codetracer-src) arg=codetracerSrc ;;
+    ct-trace-format-src) arg=ctTraceFormatSrc ;;
+  esac
+  if [ -n "${arg}" ]; then
+    nix eval --raw "${repo_root}#packages.${host_system}.default.sources.${arg}.rev" 2>/dev/null ||
+      printf 'unlocked'
+    return
+  fi
   printf '%s' "${flake_lock_json}" |
     jq -r --arg n "$1" '.locks.nodes[$n].locked.rev // "unlocked"'
 }
@@ -542,9 +556,11 @@ fi
 #    apps/entrypoints.txt.
 # ---------------------------------------------------------------------------
 # The default set is what an installed host runs: the engine, the thin client
-# on PATH, and the two provider images the engine resolves as its siblings
-# (`siblingStandardProviderPath` / `siblingTryCompileProviderPath`).
-entrypoints="${entrypoints:-reprobuild repro repro-standard-provider repro-cmake-trycompile-provider}"
+# on PATH, the graph helper image the engine runs its own build-graph helpers
+# with (`graphHelperImagePath`; a missing one is refused, never replaced by
+# the engine), and the two provider images the engine resolves as its
+# siblings (`siblingStandardProviderPath` / `siblingTryCompileProviderPath`).
+entrypoints="${entrypoints:-reprobuild reprobuild-helper repro repro-standard-provider repro-cmake-trycompile-provider}"
 echo "build_linux_cross: [2/5] entry points: ${entrypoints}"
 for wanted in ${entrypoints}; do
   row="$(awk -v n="${wanted}" '$1 == n { print; exit }' apps/entrypoints.txt)"

@@ -1504,6 +1504,14 @@ type
     environmentPrefixProvisioning*: seq[EnvironmentPrefixProvisioningDef]
       ## See ``EnvironmentPrefixProvisioningDef``.
     usesImportPaths*: seq[string]
+    pinnedSiblings*: seq[string]
+      ## The workspace repositories the ``pinned:`` block names: lock-pinned
+      ## siblings this package only needs CLONED at their locked revision
+      ## (a CI job, a test harness), not built against. Each is a bare
+      ## repository name, validated by ``pinnedSiblingNameProblem``. Unlike a
+      ## ``uses:`` selector it never reaches ``toolUses``, so nothing imports
+      ## the sibling's recipe and lock generation never folds it
+      ## (Unified-Locking-And-Hooks.md §14.2 item 4).
     publicSignatureDependencies*: seq[string]
     hasDevEnv*: bool
     devEnvBodyHash*: string
@@ -2668,3 +2676,33 @@ proc gitlinkPortableCaseKey*(path: string): string =
   result = newString(path.len)
   for i, ch in path:
     result[i] = if ch in {'A' .. 'Z'}: chr(ord(ch) + 32) else: ch
+
+func pinnedSiblingNameProblem*(name: string): string =
+  ## Why ``name`` cannot be an entry of a package's ``pinned:`` block, or ""
+  ## when it can. An entry is a workspace REPOSITORY NAME, the name its
+  ## ``deps`` entry in ``repro.lock`` carries and ``setup-dev-env`` /
+  ## ``clone-siblings`` look a sibling up by (Unified-Locking-And-Hooks.md
+  ## §14.2 item 4, §14.5). It is not a ``uses:`` selector, so a version
+  ## constraint, a package-set qualifier or a path has no meaning here and is
+  ## refused rather than read as part of a name that matches no repository.
+  ##
+  ## A ``func`` over a plain string so the macro refuses at the author's own
+  ## line (``macros_a.parsePackageDef``) and a unit test can drive the same
+  ## rule without compiling a recipe.
+  if name.len == 0:
+    return "the sibling name is empty"
+  if name != name.strip():
+    return "the sibling name '" & name & "' has leading or trailing space"
+  for c in name:
+    if c in {' ', '\t', '\n', '\r'}:
+      return "'" & name & "' contains whitespace; an entry is one " &
+        "repository name, with no version constraint"
+    if c in {'<', '>', '=', '!', '~', '^', ',', ';', ':', '@'}:
+      return "'" & name & "' contains '" & $c & "'; an entry is a bare " &
+        "repository name, not a `uses:` constraint (the lock pins a " &
+        "revision, not a range)"
+    if c in {'/', '\\'}:
+      return "'" & name & "' contains a path separator; an entry is the " &
+        "repository's name, not where it is checked out"
+  if name in [".", ".."]:
+    return "'" & name & "' is not a repository name"

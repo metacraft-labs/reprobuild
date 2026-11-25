@@ -168,7 +168,13 @@ called **before** anything downloaded is unpacked or executed. It:
 
 1. requires `gpg`/`gpgv` and `sha256sum` — their absence is a rejection;
 2. imports the keyring into a fresh `GNUPGHOME` and asserts at least one
-   public key landed;
+   public key landed, judged by gpg's `IMPORT_OK` status line. It never
+   starts `gpg-agent` (`--no-autostart`): it handles only public keys, and
+   where there is no per-user runtime directory (Git for Windows' gpg, an
+   account without a login session) the agent would put its sockets in
+   `GNUPGHOME`, whose path under a deep `TMPDIR` is longer than a Unix
+   socket name may be, so the agent would fail to start and fail the
+   import with it;
 3. refuses test-marked keys and test-marked bundles unless
    `--allow-test-key`;
 4. verifies `SHA256SUMS.asc` over `SHA256SUMS`, asserting on gpg's
@@ -177,7 +183,12 @@ called **before** anything downloaded is unpacked or executed. It:
 5. for each artifact: requires a manifest line (a missing line is a
    rejection, or an attacker just deletes the line), requires exactly
    one such line, compares the digest, and verifies the artifact's own
-   detached `.asc`;
+   detached `.asc`. A manifest line is GNU `sha256sum`'s: the digest, a
+   space, a mode character and the name. Both modes `sha256sum -c`
+   accepts are accepted, text (`<digest>  <name>`) and binary
+   (`<digest> *<name>`, what MSYS2's `sha256sum` writes by default); the
+   name must match exactly, and any other line shape matches nothing.
+   `repro-sign-release.sh` always writes the text form;
 6. refuses to report success having checked zero artifacts.
 
 Per-artifact detached signatures are not redundant with the manifest
@@ -185,6 +196,104 @@ signature. A consumer that fetches one asset — which is what the
 installer does — can verify it without the manifest; the manifest
 signature is what binds the SET, so that *removing* an artifact is also
 detectable.
+
+## Installer signing: the macOS `.pkg` and the Windows MSI
+
+The release's macOS leg builds `reprobuild-<version>-darwin-aarch64.pkg`,
+signs it with a **Developer ID Installer** certificate and notarizes it; the
+Windows leg builds `reprobuild-<version>-windows-x86_64.msi` and signs it
+with **Authenticode**. These are X.509 signatures checked by the operating
+system, a separate trust domain from the OpenPGP signatures above, and they
+follow the same rule: the certificate it is handed decides how it is treated,
+and nothing about the code changes between testing and production.
+
+### Stand-in and production: one code path, chosen by configuration
+
+`scripts/release/build_signed_installer.sh` (the leg's driver) is in
+**production** mode when the leg's environment carries the production
+credentials, and in **stand-in** mode otherwise:
+
+| Secret (repository secret) | What it holds |
+|---|---|
+| `REPRO_PKG_SIGNING_P12_BASE64` | the Developer ID Installer certificate and its private key, exported from Keychain Access as a `.p12`, base64-encoded |
+| `REPRO_PKG_SIGNING_P12_PASSWORD` | the `.p12`'s password |
+| `REPRO_NOTARY_API_KEY_P8` | an App Store Connect API key's private key, the `.p8` file's text |
+| `REPRO_NOTARY_API_KEY_ID` | that key's ID |
+| `REPRO_NOTARY_API_ISSUER_ID` | the issuer ID shown with it |
+| `REPRO_AUTHENTICODE_PFX_BASE64` | the Authenticode code-signing certificate and key, a `.pfx`, base64-encoded |
+| `REPRO_AUTHENTICODE_PFX_PASSWORD` | the `.pfx`'s password |
+
+Setting the first secret of a set selects production for that installer; a
+partial set is refused, naming what is missing, rather than falling back to
+the stand-in. Swapping in the production certificates is setting these
+secrets: no file in this repository changes.
+
+Notarization authenticates with an **App Store Connect API key** rather than
+an Apple ID with an app-specific password: a team key is not tied to a
+person's account or its two-factor sign-in, can be revoked on its own, and is
+what Apple describes for automated workflows
+([Customizing the notarization workflow](https://developer.apple.com/documentation/security/customizing-the-notarization-workflow);
+`xcrun notarytool submit --key <p8> --key-id <id> --issuer <issuer>`).
+
+In stand-in mode `scripts/release-signing/make-test-installer-certs.sh`
+generates, in the run's scratch directory, a test root with an intermediate
+and a leaf shaped like Apple's Developer ID chain (Apple's object identifiers:
+Developer ID Installer extended key usage `1.2.840.113635.100.4.13`, leaf
+extension `1.2.840.113635.100.6.1.14`, Developer ID CA `1.2.840.113635.100.6.2.6`;
+see [Apple PKI](https://www.apple.com/certificateauthority/)) and a
+self-signed Authenticode certificate (code-signing usage). Every subject
+carries `O=REPROBUILD UNTRUSTED TEST CERTIFICATE`, the X.509 counterpart of
+the OpenPGP test-key marker, and notarization runs against
+`scripts/release-signing/stand-in-notary.sh`, which answers as `notarytool`
+and `stapler` do. Nothing generated leaves the scratch directory except the
+stand-in's public root, kept beside the package so it can be checked later.
+
+### The signer and its classes
+
+`scripts/release-signing/repro-sign-installer.sh` signs and then verifies,
+and classifies the signer certificate as the OpenPGP signer classifies keys:
+
+| class | how | signed with | verified against |
+|---|---|---|---|
+| `test` | the subject carries the marker | only with `REPRO_SIGNING_ALLOW_TEST_KEY=1`, never with `REPRO_RELEASE_PUBLISHING=1`; a `<asset>.SIGNED-WITH-A-TEST-CERTIFICATE` marker is written beside it | the stand-in root it was given |
+| `platform` | any other certificate | always | the platform's trust: `pkgutil --check-signature` must report "signed by a developer certificate issued by Apple for distribution" and `spctl --assess --type install` must accept the notarized package; `Get-AuthenticodeSignature` must report `Valid`. Off those platforms, a root the operator names (`REPRO_PKG_TRUST_ROOT`, `REPRO_AUTHENTICODE_TRUST_BUNDLE`) |
+
+There is no committed allowlist of installer certificates, unlike
+`trusted-release-keys.txt`: the trust decision for these signatures is the
+platform's, which is also what every user's machine applies, and an allowlist
+would make the production swap a code change. A certificate no platform
+trusts signs and is then refused.
+
+Tools: the `.pkg` is signed with `productsign` on macOS, using a keychain
+created for the run in its scratch directory (never the login keychain, never
+added to the search list), or with
+[apple-codesign](https://gregoryszorc.com/docs/apple-codesign/main/)
+(`rcodesign`) elsewhere, which writes the same XAR signatures on any OS. The
+MSI is signed with `signtool` on Windows (from the pinned
+`Microsoft.Windows.SDK.BuildTools` package, `windows/ensure-installer-tools.ps1`)
+or [osslsigncode](https://github.com/mtrojnar/osslsigncode) elsewhere.
+`scripts/release-signing/verify-xar-signature.py` verifies a `.pkg` against
+a given root without macOS; `scripts/release-signing/verify-authenticode.ps1`
+checks an MSI on Windows without touching a certificate store: for a
+stand-in it asserts an intact signature from an untrusted root (status
+`UnknownError` or `NotTrusted`), the stand-in's thumbprint, and a chain that
+ends at the stand-in; `Valid` only in production.
+
+### A stand-in-signed installer is never published
+
+Three refusals, each tested with a control:
+
+1. The release plan refuses a `.pkg` or `.msi` entry in
+   `.github/release-platforms.json` while its production secrets are not
+   configured, so neither can join the release's asset set signed by a
+   stand-in. Until then the installer steps run only on proving runs (a
+   dispatch from a branch, which publishes nothing) and keep their output as
+   a separate workflow artifact.
+2. The signer refuses a test certificate on a publishing run
+   (`REPRO_RELEASE_PUBLISHING=1`, set by the workflow on a tag).
+3. The publish job refuses any staged marker file and any `.pkg` or `.msi`
+   whose signature carries the marker
+   (`scripts/release/refuse_stand_in_signed_assets.sh`).
 
 ## Where the external boundary falls
 

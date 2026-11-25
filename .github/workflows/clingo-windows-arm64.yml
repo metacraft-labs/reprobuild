@@ -1,24 +1,85 @@
 # Producer of the windows-aarch64 clingo.dll (reprobuild-pm
 # spec/Distribution-And-Packaging.md §7.1, W3; approved by Zahary Karadjov,
 # 2026-11-16). Builds clingo from its tag tarball with the leg's llvm-mingw,
-# qualifies it natively and, from the producer branch, publishes it as a
-# release asset that windows/toolchain-versions.env pins by sha256
+# qualifies it natively and, on a producer tag, publishes it as a release
+# asset that windows/toolchain-versions.env pins by sha256
 # (CLINGO_WIN_ARM64_URL / CLINGO_WIN_ARM64_SHA256).
 #
-# It runs on a push to a producer branch, not on agents/dev: an asset is
-# produced once per pin change, and every later build consumes the pin.
+# ─────────────────────────────────────────────────────────────────────────────
+# HOW TO CUT IT
+#
+# An asset is produced once per pin change, and every later build consumes the
+# pin, so the producer runs only when someone asks for it: pushing a producer
+# tag is the request. Tag a commit that is already on `agents` and carries
+# this file:
+#
+#   git tag -a producer/clingo-windows-arm64/v5.8.0-1 <sha> \
+#     -m "clingo 5.8.0 for windows-arm64, producer build 1"
+#   git push origin producer/clingo-windows-arm64/v5.8.0-1
+#
+# The tag is `producer/clingo-windows-arm64/v<CLINGO_VERSION>-<n>`:
+# <CLINGO_VERSION> must equal CLINGO_VERSION in the tagged commit's
+# windows/toolchain-versions.env, and <n> (1, 2, ...) counts producer builds of
+# that version. A rebuild of the same version takes the next <n>; an existing
+# tag is never moved or reused.
+#
+# The pattern cannot collide with the reprobuild release: release.yml
+# subscribes to `v*`, and a filter `*` never matches `/`
+# (https://docs.github.com/actions/writing-workflows/workflow-syntax-for-github-actions#filter-pattern-cheat-sheet),
+# so `v*` matches no `producer/...` tag and this file's pattern matches no
+# `vX.Y.Z` tag. tests/unit/test_clingo_windows_arm64_producer.py holds both.
+#
+# WHAT IT PUBLISHES
+#
+# A prerelease (never "Latest", so releases/latest keeps naming reprobuild)
+# for the pushed tag, carrying
+#   clingo-<CLINGO_VERSION>-windows-arm64-<first 12 hex of the commit>.zip
+#   SHA256SUMS
+# built from the tagged commit. The ZIP name is the one ensure-clingo.ps1
+# accepts for CLINGO_WIN_ARM64_URL.
+#
+# HOW THE PIN IS THEN UPDATED
+#
+# A separate, later commit records the asset in windows/toolchain-versions.env:
+#   CLINGO_WIN_ARM64_URL=https://github.com/metacraft-labs/reprobuild/releases/download/<tag>/<zip>
+#   CLINGO_WIN_ARM64_SHA256=<the zip's line in SHA256SUMS>
+# This workflow never edits the tree.
+#
+# WHY NO GITHUB APP
+#
+# A tag pushed with the workflow's GITHUB_TOKEN starts no workflow, and that
+# token may not create a tag here. Both matter only when CI itself must create
+# the tag. Here a person or a session pushes the tag with its own credentials,
+# so the tag push starts this run, and the only write this run makes is a
+# release for that existing tag: `gh release create --verify-tag` refuses when
+# the tag is not already on the remote, so it can never create one.
+#
+# THE GUARDS. `admit` runs before the scarce ARM64 build and refuses a tag
+# whose name or version is wrong, whose commit is not on `agents` (so an
+# arbitrary tag cannot publish toolchain binaries), or whose release already
+# exists. `publish` repeats the last two, refuses an asset name another
+# producer release already carries, and checks the tag still names the built
+# commit before and after uploading.
+#
+# workflow_dispatch is a build-only dry run from any branch: it builds and
+# qualifies, uploads the run artifact, and never publishes (`publish` runs only
+# on a tag push).
+# ─────────────────────────────────────────────────────────────────────────────
 name: clingo windows-arm64 producer
 
 on:
   push:
-    branches:
-      - producer/clingo-windows-arm64
-      - producer/clingo-windows-arm64-probe
-    paths:
-      - .github/workflows/clingo-windows-arm64.yml
-      - windows/build-clingo-windows-arm64.ps1
-      - windows/toolchain-utils.ps1
-      - windows/toolchain-versions.env
+    tags:
+      - "producer/clingo-windows-arm64/v*"
+  workflow_dispatch:
+    inputs:
+      runner:
+        description: "fleet: the self-hosted Windows-ARM class; hosted-probe: GitHub's windows-11-arm (dry run only)"
+        type: choice
+        options:
+          - fleet
+          - hosted-probe
+        default: fleet
 
 permissions:
   contents: read
@@ -34,19 +95,66 @@ env:
   # Producer-only build tool; not part of any installed closure.
   CMAKE_VERSION: 4.1.2
   CMAKE_SHA256: 396bb14c77d12615dfbd666ef6ecd67d3442eb449c321aad25d738216fd9962d
+  # The branch a producer tag's commit must be on.
+  PRODUCER_SOURCE_BRANCH: agents
+  PRODUCER_TAG_PREFIX: producer/clingo-windows-arm64
 
 jobs:
+  admit:
+    name: Admit the producer tag
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/producer/clingo-windows-arm64/v')
+    runs-on: [self-hosted, linux, x64]
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          sparse-checkout: |
+            scripts/release
+            windows
+      - name: Refuse a tag that does not name this clingo version
+        shell: bash
+        env:
+          TAG: ${{ github.ref_name }}
+        run: bash scripts/release/assert_producer_tag.sh "${PRODUCER_TAG_PREFIX}" "${TAG}" "$(sed -n 's/^CLINGO_VERSION=//p' windows/toolchain-versions.env)"
+      - name: Refuse a commit that is not on the producer source branch
+        shell: bash
+        run: bash scripts/release/assert_commit_on_branch.sh "https://github.com/${GITHUB_REPOSITORY}.git" "${PRODUCER_SOURCE_BRANCH}" "${GITHUB_SHA}"
+      - name: Refuse if the tag no longer names this commit
+        shell: bash
+        env:
+          TAG: ${{ github.ref_name }}
+        run: bash scripts/release/assert_tag_names_commit.sh origin "${TAG}" "${GITHUB_SHA}"
+      - name: Refuse if a release for this tag already exists
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            echo "::error::A release for ${TAG} already exists; a producer tag publishes once. Cut the next producer build number instead."
+            exit 1
+          fi
+
   build:
     name: Build and qualify clingo (Windows ARM64)
-    # The producer branch builds on the fleet's Windows-ARM class. The probe
-    # branch exists only while that class is down (2026-11-16, m3 GARM
-    # stopped) and uses GitHub's hosted windows-11-arm image -- a documented
-    # exception per metacraft-dev-guidelines ci-workflow-standards.md: named
-    # leg "clingo windows-arm64 producer (probe)", owner the windows-aarch64
-    # leg (reprobuild-pm Distribution-And-Packaging.md §7.1), follow-up:
-    # delete the probe branch once eph-win-arm64 builds the producer branch.
-    # Nothing the probe builds is published.
-    runs-on: ${{ github.ref_name == 'producer/clingo-windows-arm64' && fromJSON('["self-hosted","windows","arm64"]') || 'windows-11-arm' }}
+    needs: admit
+    # A tag push builds only once `admit` passed; a dispatch has no `admit`
+    # (it is skipped) and builds unconditionally, publishing nothing.
+    if: >-
+      !cancelled() &&
+      (needs.admit.result == 'success' ||
+       (github.event_name == 'workflow_dispatch' && needs.admit.result == 'skipped'))
+    # A producer tag builds on the fleet's Windows-ARM class. A dispatch may
+    # instead take GitHub's hosted windows-11-arm image while that class is
+    # down (2026-11-16, m3 GARM stopped) -- a documented exception per
+    # metacraft-dev-guidelines ci-workflow-standards.md: named leg "clingo
+    # windows-arm64 producer (probe)", owner the windows-aarch64 leg
+    # (reprobuild-pm Distribution-And-Packaging.md §7.1), follow-up: drop the
+    # `hosted-probe` option once eph-win-arm64 builds producer tags. Nothing
+    # the probe builds is published.
+    runs-on: ${{ (github.event_name == 'push' || inputs.runner == 'fleet') && fromJSON('["self-hosted","windows","arm64"]') || 'windows-11-arm' }}
     timeout-minutes: 60
     defaults:
       run:
@@ -77,27 +185,93 @@ jobs:
           retention-days: 14
 
   publish:
-    name: Publish (producer branch only)
-    needs: build
-    if: github.ref_name == 'producer/clingo-windows-arm64'
+    name: Publish (producer tag only)
+    needs: [admit, build]
+    # Only a tag push. A dispatch -- from a branch or from a tag -- never
+    # reaches this job, and it is the only job holding `contents: write`.
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/producer/clingo-windows-arm64/v')
     runs-on: [self-hosted, linux, x64]
+    timeout-minutes: 15
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          sparse-checkout: scripts/release
       - uses: actions/download-artifact@v4
         with:
           name: clingo-windows-arm64
           path: out
-      - name: Create the release
+      - name: Verify the built asset
+        id: asset
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          zips=(out/clingo-*-windows-arm64-*.zip)
+          if [ "${#zips[@]}" -ne 1 ]; then
+            echo "::error::expected exactly one clingo windows-arm64 ZIP, found ${#zips[@]}"
+            exit 1
+          fi
+          (cd out && sha256sum -c SHA256SUMS)
+          echo "zip=${zips[0]}" >> "${GITHUB_OUTPUT}"
+          echo "name=$(basename "${zips[0]}")" >> "${GITHUB_OUTPUT}"
+      - name: Refuse if the tag no longer names this build (before upload)
+        shell: bash
+        env:
+          TAG: ${{ github.ref_name }}
+        run: bash scripts/release/assert_tag_names_commit.sh origin "${TAG}" "${GITHUB_SHA}"
+      - name: Refuse to overwrite an existing release or asset
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          ASSET: ${{ steps.asset.outputs.name }}
         run: |
           set -euo pipefail
-          zip=$(ls out/clingo-*-windows-arm64-*.zip)
-          (cd out && sha256sum -c SHA256SUMS)
-          tag="$(basename "$zip" .zip)"
-          gh release create "$tag" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
-            --title "$tag" --prerelease \
-            --notes "clingo built from its v-tag tarball for Windows ARM64 with llvm-mingw (-static) by producer revision ${GITHUB_SHA}, run ${GITHUB_RUN_ID}, and qualified natively. Pinned by reprobuild windows/toolchain-versions.env; not a reprobuild release." \
-            "$zip" out/SHA256SUMS
+          if gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            echo "::error::A release for ${TAG} already exists; refusing to add or replace its assets."
+            exit 1
+          fi
+          # The ZIP is named by clingo version and commit, not by producer
+          # build number, so a second tag on the same commit would publish a
+          # second, possibly different, file under the same name. A pin names
+          # its URL and sha256, but a reader comparing file names would not
+          # see the difference; refuse it. Drafts are listed too.
+          holders="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
+            --jq ".[] | select(.tag_name | startswith(\"${PRODUCER_TAG_PREFIX}/\")) | select(any(.assets[]; .name == \"${ASSET}\")) | .tag_name")"
+          if [ -n "${holders}" ]; then
+            echo "::error::${ASSET} is already published by: ${holders}. Refusing to publish a second file under that name."
+            exit 1
+          fi
+      - name: Create the release for the pushed tag
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          ZIP: ${{ steps.asset.outputs.zip }}
+        run: |
+          set -euo pipefail
+          # --verify-tag: refuse unless the tag already exists on the remote,
+          # so this step can only describe the pushed tag, never create one.
+          gh release create "${TAG}" --repo "${GITHUB_REPOSITORY}" --verify-tag \
+            --title "${TAG}" --prerelease --latest=false \
+            --notes "clingo built from its v-tag tarball for Windows ARM64 with llvm-mingw (-static) from ${GITHUB_SHA} (tag ${TAG}), run ${GITHUB_RUN_ID}, and qualified natively. Pinned by reprobuild windows/toolchain-versions.env; not a reprobuild release." \
+            "${ZIP}" out/SHA256SUMS
+      - name: Refuse if the tag no longer names this build (after publishing)
+        id: tag_after_publish
+        shell: bash
+        env:
+          TAG: ${{ github.ref_name }}
+        run: bash scripts/release/assert_tag_names_commit.sh origin "${TAG}" "${GITHUB_SHA}"
+      - name: Hide the release again, its tag moved while it was publishing
+        if: failure() && steps.tag_after_publish.outcome == 'failure'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          gh release edit "${TAG}" --repo "${GITHUB_REPOSITORY}" --draft=true
+          echo "::error::Release ${TAG} was returned to draft: its tag no longer names ${GITHUB_SHA}, the commit its assets were built from."

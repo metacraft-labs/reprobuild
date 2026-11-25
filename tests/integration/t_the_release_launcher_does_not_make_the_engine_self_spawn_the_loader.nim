@@ -59,7 +59,16 @@
 ## launcher's `REPRO_PUBLIC_CLI_PATH`, must fail with the rtld signature.
 ## That proves the fabricated tree really makes `getAppFilename()` the loader
 ## -- without it, a tree in which the engine still saw its own image would
-## pass the main case without exercising anything.
+## pass the main case without exercising anything. Since the build graph's
+## helper commands run from the engine's graph helper image, which the engine
+## looks for BESIDE the image it names as itself, the control's failure is now
+## the refusal to find `lib/reprobuild-helper` beside the loader (the same
+## wrong image, named) before any `<loader> <verb>` spawn; either signature
+## proves the point.
+##
+## The tree carries the graph helper image the way the archive does: its real
+## image at `bin/.reprobuild-helper.real` behind a launcher written by the
+## same script, which exports the same `REPRO_PUBLIC_CLI_PATH`.
 ##
 ## Linux only: the loader launcher is a Linux artifact (macOS archives use
 ## LC_RPATH, Windows ships the PE images directly).
@@ -80,6 +89,9 @@ const
     ## The `dslDeps:` dependency, resolved as a sibling of the consumer.
   ExportedSymbol = "launcherExporterGreeting"
   RtldSignature = "error while loading shared libraries"
+  MisplacedHelperSignature = "the graph helper image "
+    ## The start of the engine's refusal when no graph helper image sits
+    ## beside the image it names as itself (`requireGraphHelperImage`).
 
 proc elfInterpreter(path: string): string =
   ## PT_INTERP of the ELF64 little-endian image at `path` (the loader the
@@ -157,6 +169,16 @@ proc buildLauncherTree(prefix: string): LauncherTree =
   let r = uncontrolledExecCmdEx(quoteShellCommand(
     [bash, writer, result.launcher, extractFilename(interp), "yes"]))
   doAssert r.exitCode == 0, "launcher writer failed:\n" & r.output
+  # The engine's graph helper image, laid out like the engine: the engine
+  # runs the interface extraction and the provider compile with it.
+  let helper = requireHostBinary(reproBinaryPath(stem = "reprobuild-helper"))
+  let helperReal = prefix / "bin" / ".reprobuild-helper.real"
+  copyFile(helper, helperReal)
+  inclFilePermissions(helperReal, {fpUserExec, fpUserRead})
+  let rh = uncontrolledExecCmdEx(quoteShellCommand(
+    [bash, writer, prefix / "bin" / "reprobuild-helper",
+     extractFilename(interp), "yes"]))
+  doAssert rh.exitCode == 0, "launcher writer failed:\n" & rh.output
 
 proc writeProjects(root, token: string): string =
   ## The exporter and the consumer, siblings under `root` (`dslDeps:`
@@ -231,7 +253,9 @@ suite "the release launcher does not make the engine self-spawn the loader":
         consumer, root / "action-cache")
       checkpoint(r.output)
       check r.code != 0
-      check r.output.contains(RtldSignature)
+      check r.output.contains(RtldSignature) or
+        r.output.contains(MisplacedHelperSignature &
+          (tree.prefix / "lib" / "reprobuild-helper"))
 
   test "repro build through the launcher extracts the interface and resolves dslDeps":
     when not defined(linux):

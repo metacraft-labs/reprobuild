@@ -34,6 +34,10 @@ const
   SourceSetFileName* = "nimble-sources.toml"
   SourceSetIdentityDomain = "reprobuild.nimble-source-set.identity.v1"
   MaxCooldownDays* = 3650
+  DefaultHistoryCheckDays* = 7
+    ## `history_check_days` when the source set does not say: the full
+    ## history check runs weekly (NPC-AREQ4)
+  MaxHistoryCheckDays* = 3650
 
 type
   UnlistedPolicy* = enum
@@ -110,6 +114,10 @@ type
     probe*: ProbePolicy
     cooldownDays*: int
     trackHead*: seq[string] ## sorted, unique
+    historyCheckDays*: int
+      ## the full history check runs when the last one is at least this many
+      ## days old by the generation time; 0 runs it at every generation
+      ## (NPC-AREQ4)
 
   SourceSet* = object
     registries*: seq[RegistrySource] ## sorted by (remote, commit)
@@ -387,7 +395,8 @@ proc parseSourceSet*(text, path: string): SourceSet =
   var overrides: seq[OverrideRecord]
   var mirrors: seq[MirrorDecl]
   var natives: seq[NativeOverride]
-  var policy = SourcePolicy(unlisted: upRefuse, probe: ppOff)
+  var policy = SourcePolicy(unlisted: upRefuse, probe: ppOff,
+    historyCheckDays: DefaultHistoryCheckDays)
 
   for (sec, at, raw) in tables:
     case sec
@@ -537,8 +546,8 @@ proc parseSourceSet*(text, path: string): SourceSet =
         fail(at, "[[native]] " & n.package.escape() & " supplies nothing")
       natives.add n
     of sPolicy:
-      let e = keysOf(raw, ["unlisted", "probe", "cooldown_days", "track_head"],
-        "[policy]")
+      let e = keysOf(raw, ["unlisted", "probe", "cooldown_days", "track_head",
+        "history_check_days"], "[policy]")
       for (k, v, kat) in e:
         case k
         of "unlisted":
@@ -556,6 +565,13 @@ proc parseSourceSet*(text, path: string): SourceSet =
             fail(kat, "`cooldown_days` " & $v.i & " exceeds " &
               $MaxCooldownDays)
           else: policy.cooldownDays = v.i
+        of "history_check_days":
+          if v.kind != vkInt:
+            fail(kat, "`history_check_days` must be a non-negative integer")
+          elif v.i > MaxHistoryCheckDays:
+            fail(kat, "`history_check_days` " & $v.i & " exceeds " &
+              $MaxHistoryCheckDays)
+          else: policy.historyCheckDays = v.i
         of "track_head":
           if v.kind != vkArray:
             fail(kat, "`track_head` must be an array of package names")
@@ -672,7 +688,13 @@ proc canonicalText*(s: SourceSet): string =
   for h in s.policy.trackHead: heads.add h.escape()
   lines.add "policy unlisted=" & $s.policy.unlisted & " probe=" &
     $s.policy.probe & " cooldown_days=" & $s.policy.cooldownDays &
-    " track_head=[" & heads.join(",") & "]"
+    " track_head=[" & heads.join(",") & "]" &
+    # The cadence of the full history check decides which generations
+    # record its events, so it is part of what the index says. A source set
+    # at the default keeps its identity byte for byte.
+    (if s.policy.historyCheckDays != DefaultHistoryCheckDays:
+       " history_check_days=" & $s.policy.historyCheckDays
+     else: "")
   lines.join("\n") & "\n"
 
 proc sourceSetIdentity*(s: SourceSet): IndexObjectId =

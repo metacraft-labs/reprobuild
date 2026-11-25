@@ -2519,6 +2519,10 @@ proc parsePackageDef(name: NimNode; body: NimNode;
         error("runtimeLibrary os must be one of " &
           "any|windows|linux|macos|darwin; got '" & osText & "'", stmt)
       result.runtimeLibraries.add(lib)
+    elif calleeName(stmt).normalize == "pinned":
+      # Collected below, once ``resolvedUses`` is routed: whether an entry
+      # repeats a ``uses:`` selector is decided against the evaluated list.
+      discard
     elif calleeName(stmt).normalize == "usesimportpath":
       if stmt.len != 2:
         error("usesImportPath expects exactly one string literal", stmt)
@@ -2564,6 +2568,49 @@ proc parsePackageDef(name: NimNode; body: NimNode;
       result.runtimeDeps.add(entry)
     else:
       result.toolUses.add(entry)
+  # ``pinned:`` — lock-pinned siblings that are cloned, not built against
+  # (Unified-Locking-And-Hooks.md §14.2 item 4). Deliberately parsed apart
+  # from the dependency blocks above: an entry is a repository NAME, never a
+  # ``uses:`` selector, so it must not reach ``toolUses`` (which would import
+  # the sibling's recipe into this compile and fold it into lock generation,
+  # the cost this block exists to avoid).
+  for stmt in body:
+    if calleeName(stmt).normalize != "pinned":
+      continue
+    if stmt.kind notin {nnkCall, nnkCommand} or stmt.len < 2:
+      error("pinned expects a block of sibling repository names, e.g. " &
+        "`pinned:` followed by indented string literals", stmt)
+    var entries: seq[NimNode] = @[]
+    for i in 1 ..< stmt.len:
+      if stmt[i].kind == nnkStmtList:
+        for entry in stmt[i]:
+          entries.add(entry)
+      else:
+        entries.add(stmt[i])
+    if entries.len == 0:
+      error("pinned: names no sibling; list at least one repository name " &
+        "or remove the block", stmt)
+    for entry in entries:
+      if not entry.isStrLit:
+        error("pinned: an entry must be a string literal naming a " &
+          "repository (the lock records it by that name, so the macro " &
+          "has to read it at compile time)", entry)
+      let sibling = entry.strVal
+      let problem = pinnedSiblingNameProblem(sibling)
+      if problem.len > 0:
+        error("pinned: " & problem, entry)
+      if sibling in result.pinnedSiblings:
+        error("pinned: '" & sibling & "' is listed twice in package '" &
+          result.packageName & "'", entry)
+      for used in result.toolUses & result.nativeBuildDeps &
+          result.runtimeDeps:
+        if used.packageSelector == sibling:
+          error("pinned: '" & sibling & "' is also a `uses:` dependency of " &
+            "package '" & result.packageName & "'. A `uses:` already pins " &
+            "its sibling in repro.lock, so declare it once: keep the " &
+            "`uses:` if the build reads it, otherwise keep only `pinned:`",
+            entry)
+      result.pinnedSiblings.add(sibling)
   lintArmsAgainstDeclaredPlatforms(body, result)
   # DSL-port M9.R.15p.0.1 — after all user-declared deps are
   # collected, auto-inject the Qt6Gui transitive ``find_dependency``
@@ -2904,6 +2951,11 @@ proc packageLiteral(pkg: PackageDef): string =
     if pathIndex > 0:
       result.add(", ")
     result.add(escForCode(path))
+  result.add("], pinnedSiblings: @[")
+  for pinnedIndex, sibling in pkg.pinnedSiblings:
+    if pinnedIndex > 0:
+      result.add(", ")
+    result.add(escForCode(sibling))
   result.add("], publicSignatureDependencies: @[], sourceFile: " & escForCode(
       pkg.sourceFile) &
     ", sourceLine: " & $pkg.sourceLine &
@@ -4449,6 +4501,39 @@ proc gemBuildToolUses(pkg: PackageDef): seq[PackageUseDef] =
         result.add(PackageUseDef(rawConstraint: selector,
           packageSelector: selector, executableName: selector))
 
+const
+  reproEngineImage* {.strdefine.} = ""
+    ## The engine image running this recipe compile, handed in by the engine
+    ## (`engineIdentityDefines` in `repro_interface_artifacts`); empty for a
+    ## plain `nim c` of a recipe. Only diagnostics read it.
+  reproEngineRevision* {.strdefine.} = ""
+    ## That image's source revision (`ReprobuildSourceRevision`); empty when
+    ## the engine does not know it or did not say.
+
+proc refuseProducerNewerThanThisDsl(selector, consumerSourceFile: string) =
+  ## Cross-Repo-Source-Consumption.md §9.2a: a workspace producer that is a
+  ## reprobuild source tree newer than the DSL compiling this recipe is
+  ## refused HERE, before its include is emitted, so the sibling's recipe is
+  ## never compiled against a DSL that lacks what it calls. Checked against
+  ## this compile's own DSL tree (`DslSourceRoot` / `DslVersion`), so a
+  ## compile whose DSL is that sibling is not refused. The message ends with
+  ## the record line the engine reads back (`parseEngineRecipeSkew`).
+  let location = workspaceProducerLocation(selector, consumerSourceFile)
+  if location.modulePath.len == 0:
+    return
+  let found = detectEngineRecipeSkew(DslSourceRoot, DslVersion,
+    location.modulePath.parentDir)
+  if not found.skewed:
+    return
+  var skew = found.skew
+  skew.engineRevision = reproEngineRevision
+  skew.enginePath = (if reproEngineImage.len > 0: reproEngineImage
+                     else: reproBin)
+  skew.selector = selector
+  skew.consumerRecipe = consumerSourceFile
+  skew.workspaceRoot = location.workspaceRoot
+  error(engineOlderThanSiblingRecipeMessage(skew))
+
 proc usesImportCode(pkg: PackageDef; consumerSourceFile = ""): string =
   # `uses:` AND `nativeBuildDeps:` import a package's typed command surface;
   # `runtimeDeps:` imports its marker alone (Provisioning-Contributions.md
@@ -4592,6 +4677,8 @@ proc usesImportCode(pkg: PackageDef; consumerSourceFile = ""): string =
         if not catalogSeen:
           producerModules.add((catalogAlias, selector, catalogModule & ".nim"))
       continue
+    # Before either branch below reaches the producer's recipe.
+    refuseProducerNewerThanThisDsl(selector, consumerSourceFile)
     if workspaceProducerDeclaresResourceType(selector, consumerSourceFile):
       # RP5a: resource producer — DO NOT import its module (driver closure).
       # Route to the accessor-emission branch; skip the module-import path.

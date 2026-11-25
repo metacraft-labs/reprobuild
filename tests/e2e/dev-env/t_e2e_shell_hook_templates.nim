@@ -151,6 +151,10 @@ suite "e2e_shell_hook_templates":
     check s.contains("hooks.pre_prompt")
     check s.contains("dev-env export nushell")
     check s.contains("dev-env deactivate")
+    # The export is applied, not discarded, and carries the shell's env.
+    check s.contains("__repro_apply")
+    check s.contains("from nuon")
+    check s.contains("--pre-activation-env")
     # Short-circuit (nushell flavour).
     check s.contains("$candidate != ($env.__REPRO_PROJECT_ROOT?")
 

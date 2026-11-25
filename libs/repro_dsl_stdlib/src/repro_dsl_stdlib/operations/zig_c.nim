@@ -48,7 +48,7 @@ proc requireZigDeclared*(caller: string) =
     raise newException(ValueError, "recipe '" & state.packageName & "': " &
       caller & " builds for the zig target '" & peekActiveCrossTarget().triple &
       "' with `zig cc`, but the package does not declare `zig` in " &
-      "`nativeBuildDeps:`. Add `\"zig >=0.13 <0.15\"` there (it is unused by " &
+      "`nativeBuildDeps:`. Add `\"zig >=0.14 <0.15\"` there (it is unused by " &
       "a native build).")
 
 proc targetKeyedPath*(path: string): string =
@@ -126,6 +126,68 @@ proc zigArchive*(opts: ArchiveOptions): BuildActionDef =
     archive = targetKeyedPath(opts.target), objects = objects,
     after = opts.objects)
 
+proc zigSharedLinkCompilerRtArgs*(linkArgs: seq[string]; ct: CrossTarget):
+    tuple[args: seq[string], wrappers: BuildActionDef] =
+  ## What a `-shared` link for `ct` adds so that zig's compiler-rt is local
+  ## in the library, and the edge it must order after (the wrapper edge, or
+  ## the merge edge that writes the link's own script): the same rule the
+  ## `cc` / `c++` wrappers apply (`adapters/cross_zig`,
+  ## `zigCrossCompilerRtMap`), here for the typed `zig cc` edge, which does
+  ## not run through them. Nothing on a row whose libraries export none of
+  ## compiler-rt.
+  ##
+  ## A link that names no version script of its own gets the map the wrapper
+  ## edge writes beside the wrappers. zig hands the linker only the last
+  ## version script of a link, so a link that names its own gets no second
+  ## one: its script must already make compiler-rt local -- the output of
+  ## `emitZigCrossVersionScriptAction`, or a script that carries `local: *;`
+  ## -- and is refused by name otherwise. `--undefined-version` because a
+  ## library need not pull in every listed helper.
+  ##
+  ## Before this, an armv7 library linked by `link(kind = lokShared)`
+  ## exported 385 compiler-rt symbols under zig 0.13.0 (measured 2026-11-17,
+  ## `t_zig_cross_shared_library_exports`), so a consumer bound its own
+  ## helper calls to the library and failed to load against a target
+  ## system's build of that soname, which exports none of them.
+  let t = zigCrossTarget(ct.triple)
+  if zigCrossCompilerRtMap(t).len == 0:
+    return
+  let own = zigCrossOwnVersionScript(linkArgs)
+  let root = activeProviderProjectRoot()
+  if own.len == 0:
+    let state = tryCurrentBuildState()
+    let pkg = if state == nil: "" else: state.packageName
+    result.wrappers = emitZigCrossWrappersAction(root, pkg, ct.triple)
+    result.args.add("-Wl,--version-script=" &
+      zigCrossWrapperDir(root, ct.triple) / ZigCrossCompilerRtMapName)
+  else:
+    # A script the merge edge writes is accepted, and the link orders after
+    # that edge (it must be registered first). Any other script is read now,
+    # when the graph is built, as the wrappers read it when they run: so it
+    # must be a source file, not the output of some other edge.
+    let path = if own.isAbsolute or root.len == 0: own else: root / own
+    for act in registeredBuildActions():
+      if act.commandStatsId == "zig-cross.version-script":
+        for o in act.outputs:
+          let op = if o.isAbsolute or root.len == 0: o else: root / o
+          if normalizedPath(op) == normalizedPath(path):
+            result.wrappers = act
+    if result.wrappers.id.len == 0:
+      if not fileExists(path):
+        raise newException(ValueError, "zig cc (" & ct.triple & "): the " &
+          "version script " & own & " does not exist when the graph is " &
+          "built, and no emitZigCrossVersionScriptAction edge registered " &
+          "before this link writes it; a shared-library link for this " &
+          "target reads its own script then, to check that it makes zig's " &
+          "compiler-rt local")
+      if not zigCrossVersionScriptCovers(readFile(path)):
+        raise newException(ValueError, "zig cc (" & ct.triple & "): the " &
+          "version script " & own & " leaves zig's compiler-rt exported " &
+          "from this shared library; make every unlisted symbol local " &
+          "(local: *;) or merge it with cross_zig's " &
+          "emitZigCrossVersionScriptAction")
+  result.args.add("-Wl,--undefined-version")
+
 proc zigLink*(opts: LinkOptions; ct: CrossTarget): BuildActionDef =
   ## Every object the link names goes on the line (not only the first). A
   ## static library is an archive, so it is `zig ar`, not a `-static` link.
@@ -143,6 +205,13 @@ proc zigLink*(opts: LinkOptions; ct: CrossTarget): BuildActionDef =
     # never ``installPrefix``, a staged-install path no edge writes.
     if dep.linkDir.len > 0 and dep.linkDir notin libDirs:
       libDirs.add(dep.linkDir)
+  var extra = opts.extra
+  # After every library ``-l`` names, not only the objects.
+  var after = opts.objects & linkPrerequisites(opts.deps)
+  if opts.kind == lokShared:
+    let compilerRt = zigSharedLinkCompilerRtArgs(opts.extra, ct)
+    for a in compilerRt.args: extra.add(a)
+    if compilerRt.wrappers.id.len > 0: after.add(compilerRt.wrappers)
   zig_module.zig.cc(
     targetArgs = ct.linkFlags,
     sources = objects,
@@ -151,9 +220,8 @@ proc zigLink*(opts: LinkOptions; ct: CrossTarget): BuildActionDef =
     soname = (if opts.kind == lokShared: opts.soname else: ""),
     libs = libs,
     libDirs = libDirs,
-    extra = opts.extra,
-    # After every library ``-l`` names, not only the objects.
-    after = opts.objects & linkPrerequisites(opts.deps))
+    extra = extra,
+    after = after)
 
 proc nimCpuOf*(triple: string): string =
   ## Nim's `--cpu:` spelling of a triple's CPU

@@ -78,12 +78,18 @@ elif command -v gpg2 >/dev/null 2>&1; then
 else
   rv_fail 'no gpg/gpg2 on PATH and $REPRO_GPG_BIN unset. Refusing to install unverified bytes.'
 fi
-# `sha256sum` where there is one; macOS ships `shasum` instead, which prints
-# the same "digest  name" line.
+# `sha256sum` where there is one; macOS ships `shasum` instead. Both print
+# "<digest> <mode><name>". The file is read from STDIN, in binary mode, so the
+# digest is always the first field: given a path holding a backslash -- every
+# Windows path the PowerShell installer passes as --dir -- GNU sha256sum
+# escapes the line by starting it with a backslash (see the manual cited in
+# step 4), which would put a '\' in front of the digest. `-b` makes the read
+# byte-exact where text and binary differ (MSYS2, Cygwin) and changes nothing
+# elsewhere.
 if command -v sha256sum >/dev/null 2>&1; then
-  rv_sha256() { sha256sum "$1"; }
+  rv_sha256() { sha256sum -b < "$1"; }
 elif command -v shasum >/dev/null 2>&1; then
-  rv_sha256() { shasum -a 256 "$1"; }
+  rv_sha256() { shasum -a 256 -b < "$1"; }
 else
   rv_fail 'no sha256sum or shasum on PATH. Refusing to install unverified bytes.'
 fi
@@ -104,15 +110,36 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-gpg_q() { "$GPG" --batch --no-tty --quiet --keyid-format long "$@"; }
+# No gpg-agent. This script only imports PUBLIC keys and checks
+# signatures, which gpg does without an agent; left to itself gpg would
+# still start one for every --import. The agent binds its sockets in the
+# per-user runtime directory (/run/user/<uid>) when there is one and in
+# GNUPGHOME otherwise -- on Windows (Git for Windows' MSYS2 gpg) and for an
+# account without a login session -- and a socket path longer than
+# sun_path's 107 characters makes the agent exit 2 ("socket name ... is
+# too long"; https://man7.org/linux/man-pages/man7/unix.7.html). gpg then
+# fails the import although the key was imported, and a TMPDIR as deep as
+# %TEMP%\<dir>\tmp is enough. --no-autostart keeps gpg from starting one
+# (https://www.gnupg.org/documentation/manuals/gnupg/GPG-Configuration-Options.html).
+gpg_q() { "$GPG" --batch --no-tty --no-autostart --quiet --keyid-format long "$@"; }
 
 imported=0
 import_one() {
   f="$1"
-  if gpg_q --import "$f" >/dev/null 2>&1; then
+  # Whether a key was imported is read from gpg's IMPORT_OK status line
+  # (doc/DETAILS in the GnuPG sources), not from its exit code: without an
+  # agent gpg may still exit 2 for "can't connect to the gpg-agent" after
+  # importing the key, which says nothing about the key.
+  gpg_q --status-file "$GNUPGHOME/import.status" --import "$f" >"$GNUPGHOME/import.log" 2>&1 || true
+  if grep -q '^\[GNUPG:\] IMPORT_OK ' "$GNUPGHOME/import.status" 2>/dev/null; then
     imported=$((imported + 1))
   else
-    rv_log "warning: could not import key material from $f"
+    # gpg's own reason, and which gpg gave it: without them a refusal here
+    # cannot be told apart from a missing file, an unreadable path form, or a
+    # gpg that cannot use its home directory.
+    rv_log "warning: could not import key material from $f (working directory $(pwd)); $GPG said:"
+    sed 's/^/repro-verify:   /' "$GNUPGHOME/import.log" >&2 || true
+    rv_log "  ($("$GPG" --version 2>&1 | head -n 1); GNUPGHOME=$GNUPGHOME)"
   fi
 }
 
@@ -132,14 +159,14 @@ fi
 [ "$imported" -gt 0 ] \
   || rv_fail "no OpenPGP keys imported from $keyring; there is nothing to verify against"
 
-key_count="$("$GPG" --batch --with-colons --list-keys 2>/dev/null | grep -c '^pub:' || true)"
+key_count="$("$GPG" --batch --no-autostart --with-colons --list-keys 2>/dev/null | grep -c '^pub:' || true)"
 [ "$key_count" -gt 0 ] \
   || rv_fail "keyring $keyring imported but holds zero public keys"
 rv_log "trust anchor: $key_count key(s) from $keyring"
 
 # ── 2. Test keys must be declared. ───────────────────────────────────
 
-if "$GPG" --batch --with-colons --list-keys 2>/dev/null \
+if "$GPG" --batch --no-autostart --with-colons --list-keys 2>/dev/null \
      | awk -F: '$1=="uid" {print $10}' | grep -qF "$RV_TEST_KEY_MARKER"; then
   if [ "$allow_test_key" -ne 1 ]; then
     rv_fail "the keyring contains a key marked '$RV_TEST_KEY_MARKER' and --allow-test-key was not given. A test key never verifies a release."
@@ -160,7 +187,7 @@ fi
 
 status_file="$GNUPGHOME/status.txt"
 set +e
-"$GPG" --batch --no-tty --keyid-format long \
+"$GPG" --batch --no-tty --no-autostart --keyid-format long \
   --status-file "$status_file" \
   --verify "$dir/$RV_SUMS_SIG" "$dir/$RV_SUMS" >"$GNUPGHOME/verify.log" 2>&1
 verify_rc=$?
@@ -180,18 +207,67 @@ signer="$(awk '/^\[GNUPG:\] VALIDSIG /{print $3; exit}' "$status_file")"
 rv_log "$RV_SUMS signature OK, signer $signer"
 
 # ── 4. Which artifacts? ──────────────────────────────────────────────
+#
+# A manifest line is what GNU `sha256sum` writes and `sha256sum -c` reads
+# (https://www.gnu.org/software/coreutils/manual/html_node/md5sum-invocation.html,
+# which sha256sum-invocation refers to): the 64 hex digits of the digest, one
+# space, a mode character, and the file name to the end of the line. The mode
+# character is a space for text mode (`<hex>  <name>`) and `*` for binary
+# mode (`<hex> *<name>`). It describes how the file was read, not the name:
+# MSYS2's and Cygwin's sha256sum write `*` by default, so a manifest made on
+# Windows carries it, and `sha256sum -c` accepts both forms. So does this
+# parser, and nothing looser: the name must equal the artifact exactly (no
+# prefix, suffix or whitespace folding), and a line of any other shape --
+# a short or non-hex digest, a missing mode character, an escaped name
+# (`\` first, which sha256sum writes for a name holding a newline or a
+# backslash) or BSD's `SHA256 (<name>) = <hex>` -- matches nothing.
+#
+# The awk program is POSIX (no interval expressions, which mawk and older
+# busybox builds lack). It prints "<lower-case digest> <name>" for every
+# well-formed line and "MALFORMED <line number>" for any other non-empty one.
+rv_parse_sums() {
+  awk '
+    {
+      line = $0
+      if (line == "") next
+      digest = substr(line, 1, 64)
+      mode = substr(line, 66, 1)
+      name = substr(line, 67)
+      if (length(line) < 67 || length(digest) != 64 ||
+          digest !~ /^[0-9A-Fa-f]+$/ || substr(line, 65, 1) != " " ||
+          (mode != " " && mode != "*") || name == "") {
+        print "MALFORMED " NR
+        next
+      }
+      print tolower(digest) " " name
+    }
+  ' "$1"
+}
+parsed_sums="$GNUPGHOME/sums.parsed"
+rv_parse_sums "$dir/$RV_SUMS" > "$parsed_sums"
 
 if [ -z "$artifacts" ] || [ "$require_all" -eq 1 ]; then
-  artifacts="$(awk '{ $1=""; sub(/^[ \t]+/,""); print }' "$dir/$RV_SUMS")"
+  # Every line is to be checked, so a line that is not a manifest line is a
+  # rejection: it would otherwise be a signed entry nobody looked at.
+  bad="$(awk '$1 == "MALFORMED" { print $2; exit }' "$parsed_sums")"
+  [ -z "$bad" ] \
+    || rv_fail "line $bad of the signed $RV_SUMS is not a sha256sum line (<64 hex digits>, a space, ' ' or '*', a name)"
+  artifacts="$(awk '$1 != "MALFORMED" { sub(/^[^ ]+ /, ""); print }' "$parsed_sums")"
 fi
 
 n_checked=0
 for a in $artifacts; do
   [ -n "$a" ] || continue
 
+  # The artifact is read as "$dir/$a". A name that leaves the download
+  # directory, or names it, is not an artifact of this release.
+  case "$a" in
+    */*|*\\*|.|..) rv_fail "$a is not a plain file name; refusing to look outside $dir" ;;
+  esac
+
   # 4a. the manifest must MENTION it. A missing line is a rejection,
   #     never a skip -- otherwise an attacker deletes the line.
-  line="$(awk -v want="$a" '{ n=$1; $1=""; sub(/^[ \t]+/,""); if ($0==want) print n }' "$dir/$RV_SUMS")"
+  line="$(awk -v want="$a" '$1 != "MALFORMED" { d = $1; sub(/^[^ ]+ /, ""); if ($0 == want) print d }' "$parsed_sums")"
   [ -n "$line" ] \
     || rv_fail "$a has no entry in the signed $RV_SUMS"
   hits="$(printf '%s\n' "$line" | grep -c .)"
@@ -208,7 +284,7 @@ for a in $artifacts; do
   # 4c. and its own detached signature must verify.
   if [ -f "$dir/$a.asc" ]; then
     set +e
-    "$GPG" --batch --no-tty --keyid-format long \
+    "$GPG" --batch --no-tty --no-autostart --keyid-format long \
       --status-file "$GNUPGHOME/status-$n_checked.txt" \
       --verify "$dir/$a.asc" "$dir/$a" >"$GNUPGHOME/verify-$n_checked.log" 2>&1
     rc=$?

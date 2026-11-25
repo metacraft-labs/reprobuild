@@ -99,6 +99,7 @@ else:
 import repro_core
 import repro_core/relocation
 import repro_core/tree_removal
+import repro_core/case_folding
 import repro_core/canonical_work_dir
 import repro_core/source_root
 import repro_core/arg_files
@@ -3324,6 +3325,14 @@ proc keyedOnGoverningLock*(fingerprint: ContentDigest;
   framed.add($lock.len & "\x1f" & lock & "\x1e")
   blake3DomainDigest(framed.textBytes(), hdActionFingerprint)
 
+const RunQuotaStaticCapacityDeadlockReason* =
+  "runquota static-capacity deadlock"
+  ## ``ActionResult.reason`` of an action a RunQuota static-capacity deadlock
+  ## stopped before it was started: its lease could never be admitted by the
+  ## daemon's static budget (docs/runquota-policy.md). The reason is what
+  ## tells it from an action whose command failed; its stderr is the
+  ## deadlock diagnostic, naming the budget and the remedies.
+
 const UnsafePreserveOutputsDomain* = "reprobuild/unsafe-preserve-outputs/v1"
   ## The domain `preserveOutputsWeakFingerprint` frames a step's weak
   ## fingerprint under. Versioned so a change to the mode's semantics can
@@ -4399,39 +4408,85 @@ proc splitLastEntry(path: string): tuple[parent, name: string] =
   (parent: (if slash == 0: "/" else: path[0 ..< slash]),
    name: path[slash + 1 .. ^1])
 
+proc spellingsCanNameOneEntry(a, b: string): bool =
+  ## A cheap necessary condition for `isSameEntryOnDisk(a, b)`, so the
+  ## cross-action checks, which compare every removal with every declared
+  ## output, ask the filesystem only about pairs that can be one entry.
+  ## Both parents are resolved to their physical directories, so two
+  ## spellings reach one entry only by folding case or normalization. ASCII
+  ## has no normalization variants: two ASCII spellings that differ other
+  ## than in letter case are two entries. Windows is left to the full check,
+  ## whose short (8.3) names are aliases of another kind.
+  when defined(windows):
+    true
+  else:
+    for ch in a:
+      if ord(ch) >= 0x80:
+        return true
+    for ch in b:
+      if ord(ch) >= 0x80:
+        return true
+    cmpIgnoreCase(a, b) == 0
+
 proc isSameEntryOnDisk(a, b: string): bool =
-  ## Whether the locations `a` and `b` (both `outputRemovalLocation` answers)
-  ## name ONE directory entry on disk, whatever their spellings.
+  ## Whether the locations `a` and `b` (both `outputRemovalLocation` answers,
+  ## with equally many components) name ONE directory entry on disk, or
+  ## will once they are created, whatever their spellings.
   ##
   ## A removal location's parent is resolved through the filesystem, which
   ## answers in the on-disk spelling, but its last component is kept as the
   ## output spells it. On a filesystem that folds case (macOS's default APFS,
   ## Windows, a Linux `casefold` directory) or normalization, `<d>/WORK` and
   ## `<d>/work` are then one entry with two spellings, and only the
-  ## filesystem can say so. It is asked by identity: the device and file id
-  ## of the entry itself (`lstat`, a final link not followed, because the
-  ## removal takes the link and not its target).
+  ## filesystem can say so. When both exist it is asked by identity: the
+  ## device and file id of the entry itself (`lstat`, a final link not
+  ## followed, because the removal takes the link and not its target).
   ##
   ## A directory has exactly one entry, so equal identities settle it. A
   ## non-directory may have several (hard links): two entries of one parent
   ## that share a file id are the same entry only when the parent does not
   ## list both names, i.e. one of them is merely another spelling of the
   ## other. Removing one hard link leaves the other, so it must not count.
-  ## A location that does not exist names nothing to remove: `false`.
+  ##
+  ## An entry that does not exist yet has no identity, and on a fresh build
+  ## that is every output and every input another action produces. Two such
+  ## locations are one entry when their parents are one directory (asked the
+  ## same way, recursively) and their names are equal as that directory will
+  ## compare them: folded when the directory that will hold them, the
+  ## nearest existing ancestor whose attribute a new directory inherits,
+  ## folds case (`directoryFoldsCase`), exactly otherwise. When only one of
+  ## the two exists they are two entries: the filesystem resolved one name
+  ## and not the other. Build-Engine-And-Scheduler.md §"A declared output is
+  ## an obligation".
   if a == b:
     return true
+  if not spellingsCanNameOneEntry(a, b):
+    return false
   var infoA, infoB: FileInfo
+  var hasA, hasB = true
   try:
     infoA = getFileInfo(a, followSymlink = false)
+  except OSError:
+    hasA = false
+  try:
     infoB = getFileInfo(b, followSymlink = false)
   except OSError:
-    return false
+    hasB = false
+  let (parentA, nameA) = splitLastEntry(a)
+  let (parentB, nameB) = splitLastEntry(b)
+  if not (hasA and hasB):
+    if hasA or hasB or parentA.len == 0 or parentB.len == 0 or
+        not isSameEntryOnDisk(parentA, parentB):
+      return false
+    if nameA == nameB:
+      return true
+    let holder = nearestExistingDirectory(parentA)
+    return holder.len > 0 and directoryFoldsCase(holder) and
+      foldName(nameA) == foldName(nameB)
   if infoA.id != infoB.id:
     return false
   if infoA.kind == pcDir:
     return true
-  let (parentA, nameA) = splitLastEntry(a)
-  let (parentB, nameB) = splitLastEntry(b)
   if parentA.len == 0 or parentB.len == 0 or
       not isSameEntryOnDisk(parentA, parentB):
     return false
@@ -4451,6 +4506,12 @@ proc isSameEntryOnDisk(a, b: string): bool =
     # entry is unknown, and the safe answer for a removal check is "one".
     return true
   not (listedA and listedB)
+
+proc isSameLocation(a, b: string): bool =
+  ## Whether the `outputRemovalLocation` answers `a` and `b` name one entry
+  ## (`isSameEntryOnDisk`), the entries' existence aside.
+  a.len > 0 and b.len > 0 and a.count('/') == b.count('/') and
+    isSameEntryOnDisk(a, b)
 
 proc entryAtDepthOf(path, like: string): string =
   ## The ancestor-or-self of `path` with as many components as `like`, or ""
@@ -4489,6 +4550,74 @@ proc cwdRemovalRoot(action: BuildAction): string =
     absolutePath(if action.cwd.len > 0: action.cwd else: getCurrentDir())))
   when defined(windows):
     result = result.toLowerAscii()
+
+proc collectSpelledEntries(path: string; entries: var HashSet[string]) =
+  ## Terminates on a link cycle: an entry already collected is not walked
+  ## again.
+  let spelling = path.replace('\\', '/')
+  for stop in 1 .. spelling.len:
+    if stop < spelling.len and spelling[stop] != '/':
+      continue
+    if spelling[stop - 1] == '/':
+      # An empty component names no entry.
+      continue
+    when defined(windows):
+      if stop == 2 and spelling[1] == ':':
+        # A Windows drive (`C:`) names no entry. On POSIX a component may
+        # legitimately end in `:`, so this is not tested there.
+        continue
+    let entry = outputRemovalLocation("", spelling[0 ..< stop])
+    if entry.len == 0 or entry in entries:
+      continue
+    entries.incl(entry)
+    if symlinkExists(entry):
+      var target = ""
+      try:
+        target = expandSymlink(entry)
+      except CatchableError:
+        continue
+      if target.len == 0 or target == entry:
+        continue
+      if not target.isAbsolute:
+        # Joined WITHOUT `/`: a target such as `../x` is applied to the
+        # link's own physical directory by `outputRemovalLocation`.
+        let slash = entry.rfind('/')
+        target = (if slash <= 0: "" else: entry[0 ..< slash]) & "/" & target
+      collectSpelledEntries(target, entries)
+
+proc cwdSpellingEntries(cwd: string): HashSet[string] =
+  ## Every directory entry the action's working directory is REACHED through:
+  ## each component of its spelling, a symbolic link as the link itself, and
+  ## the same for every link's target, down to the physical directory. All in
+  ## the namespace `outputRemovalLocation` answers in.
+  ##
+  ## An output is removed as the entry its spelling names, a final link
+  ## included (`removePathNoFollow`), and `materialPath` joins a relative
+  ## output onto the cwd lexically. Under a cwd `<link>/work` the output `..`
+  ## therefore names `<link>` itself. The link does not contain the PHYSICAL
+  ## working directory, so a check against that directory alone accepted it,
+  ## and removing it leaves the action nowhere to start. macOS reaches its
+  ## default `$TMPDIR` through `/var` -> `/private/var`.
+  ##
+  ## Two spellings are walked. The one as written is what the kernel follows
+  ## when the action starts. The lexically normalized one is what
+  ## `materialPath` joins a relative output onto. They differ when a `..`
+  ## follows a link (`<link>/../work`).
+  ##
+  ## `expandSymlink` is a no-op on Windows, so there only the components of
+  ## the spelling are collected; a junction's target chain is not walked.
+  ## Build-Engine-And-Scheduler.md §"A declared output is an obligation".
+  result = initHashSet[string]()
+  let spelled = absolutePath(if cwd.len > 0: cwd else: getCurrentDir())
+  collectSpelledEntries(spelled, result)
+  collectSpelledEntries(os.normalizedPath(spelled), result)
+
+proc removalTakesCwd(removalRoot, cwdRoot: string;
+                     cwdEntries: HashSet[string]): bool =
+  ## Whether removing `removalRoot` removes the working directory: the
+  ## physical directory `cwdRoot` or anything containing it, or an entry the
+  ## directory is reached through (`cwdSpellingEntries`).
+  removalTakesEntry(removalRoot, cwdRoot) or removalRoot in cwdEntries
 
 var
   containmentMemoDepth {.threadvar.}: int
@@ -5000,6 +5129,13 @@ proc validateGraph(g: BuildGraph) =
         "Spec: CLI/internal/fs-file-utilities.md §4, " &
         "Filesystem-Policy-And-Observed-Inputs.md §\"Double Writes\".")
 
+  # One walk per distinct cwd: the actions of a directory share it.
+  var cwdEntriesByCwd = initTable[string, HashSet[string]]()
+  proc cwdEntriesOf(cwd: string): HashSet[string] =
+    if cwd notin cwdEntriesByCwd:
+      cwdEntriesByCwd[cwd] = cwdSpellingEntries(cwd)
+    cwdEntriesByCwd[cwd]
+
   var declaredIndex: seq[tuple[actionId: string; root: string;
     optional: bool; ordinary: bool]] = @[]
   let hasOptionalCandidates = g.actions.anyIt(it.optionalOutputs.len > 0)
@@ -5020,13 +5156,13 @@ proc validateGraph(g: BuildGraph) =
         raiseEngine("optional output path is empty for " & action.id)
       let removalRoot = outputRemovalLocation(action.cwd, raw)
       let cwdRoot = cwdRemovalRoot(action)
-      if removalTakesEntry(removalRoot, cwdRoot):
+      if removalTakesCwd(removalRoot, cwdRoot, cwdEntriesOf(action.cwd)):
         raiseEngine("optional output contains the action's cwd: " & raw &
           " for " & action.id)
       indexRoot(raw, optional = true)
       for required in action.outputs:
-        if outputRemovalLocation(action.cwd, raw) ==
-            outputRemovalLocation(action.cwd, required):
+        if isSameLocation(removalRoot,
+            outputRemovalLocation(action.cwd, required)):
           raiseEngine("optional output is also an obligatory output: " & raw &
             " for " & action.id)
       for input in action.inputs:
@@ -5071,7 +5207,7 @@ proc validateGraph(g: BuildGraph) =
       let root = outputRemovalLocation(action.cwd, raw)
       if root notin owned:
         continue
-      if removalTakesEntry(root, cwdRoot):
+      if removalTakesCwd(root, cwdRoot, cwdEntriesOf(action.cwd)):
         raiseEngine("output removed before run contains the action's cwd: " &
           raw & " for " & action.id)
       for input in action.inputs:
@@ -5090,7 +5226,7 @@ proc validateGraph(g: BuildGraph) =
         for removal in removalRoots:
           if removal.actionId == action.id:
             continue
-          if key == removal.root or key.startsWith(removal.root & "/"):
+          if removalTakesEntry(removal.root, key):
             raiseEngine("'" & raw & "', an output of '" & action.id &
               "', lies in '" & removal.raw & "', which '" & removal.actionId &
               "' removes before it runs: an opaque output directory belongs " &
@@ -5106,7 +5242,16 @@ proc validateGraph(g: BuildGraph) =
       if (declaredIndex[i].ordinary or declaredIndex[j].ordinary) and
           not (declaredIndex[i].optional or declaredIndex[j].optional):
         continue
-      if not writeRootsOverlap(declaredIndex[i].root, declaredIndex[j].root):
+      # An optional candidate is REMOVED before its action runs, so it is
+      # judged by the entry on disk, as the removal checks are
+      # (`removalTakesEntry`): another spelling of one entry, existing or
+      # not yet created, overlaps it too.
+      let rootI = declaredIndex[i].root
+      let rootJ = declaredIndex[j].root
+      if not writeRootsOverlap(rootI, rootJ) and
+          not ((declaredIndex[i].optional or declaredIndex[j].optional) and
+               (removalTakesEntry(rootI, rootJ) or
+                removalTakesEntry(rootJ, rootI))):
         continue
       # Overlap exists — check for a dep chain in either direction.
       # If found, treat as sequential (legitimate configure→compile→
@@ -13498,6 +13643,9 @@ proc transientOwnWrites*(evidence: PathSetEvidence): HashSet[string] =
   ## name every run. What the action observed there was its own doing, so
   ## it is not an input; a written file that still EXISTS is kept, because
   ## an action that read a file and then rewrote it did consume it.
+  ## Callers test a path with `transientOwnPath` (over `transientOwnPaths`),
+  ## which also covers what the action observed BENEATH a temporary
+  ## directory.
   ##
   ## WRITTEN means created or written (`monitorWrites`): a directory or a
   ## symbolic link the action made counts. A path it only REMOVED does not
@@ -13523,6 +13671,79 @@ proc transientOwnWrites*(evidence: PathSetEvidence): HashSet[string] =
       else: key
     if not onDisk(path) and not onDisk(nativeKey):
       result.incl(key)
+
+type TransientOwnPaths* = object
+  ## What `transientOwnPath` decides from: the action's own temporaries and
+  ## the paths it only removed. Built once per action by `transientOwnPaths`.
+  written*: HashSet[string]
+    ## `transientOwnWrites`: written paths that are gone.
+  removedOnly*: HashSet[string]
+    ## Keys (`transientWriteKey`) of paths the action REMOVED and never
+    ## wrote: what was there before it ran, so not its own temporary even
+    ## when it lies beneath one.
+
+proc transientOwnPaths*(evidence: PathSetEvidence): TransientOwnPaths =
+  result.written = transientOwnWrites(evidence)
+  if result.written.len == 0:
+    return
+  var written = initHashSet[string]()
+  for path in evidence.monitorWrites:
+    written.incl(transientWriteKey(path))
+  for path in evidence.monitorRemovals:
+    let key = transientWriteKey(path)
+    if key notin written:
+      result.removedOnly.incl(key)
+
+proc transientOwnPath*(transient: TransientOwnPaths; path: string): bool =
+  ## Whether `path` is one of the action's own temporaries
+  ## (`transientOwnWrites`) or lies beneath one: the one filter the
+  ## determinism-probe key and the input accesses beside a record share.
+  ##
+  ## Beneath, because a temporary is often a DIRECTORY. rustc links
+  ## through `out/rustcXXXXXX/` and passes `-L <tmp>/raw-dylibs` to the
+  ## linker, which probes it for every `-l` library and finds nothing; then
+  ## rustc removes the directory. The action wrote the directory, not the
+  ## sixteen misses beneath it, so an exact lookup kept them, their random
+  ## parent entered the key, and no two runs of a Rust link agreed on it.
+  ##
+  ## This holds for every kind of access beneath it, reads included: a
+  ## linker's failed `open` of a missing library is recorded as a read, and
+  ## the directory is gone, so a read there is keyed `absent` and keeping it
+  ## adds the temporary's random name and no content. The transient keys
+  ## are written paths that are GONE; a written directory that still exists
+  ## is not one, and a directory the action only removed is not one either
+  ## (`transientOwnWrites`).
+  ##
+  ## Two descendants are never covered, because each can be a real input:
+  ##
+  ## * One the action REMOVED and never wrote (`removedOnly`). It was there
+  ##   before the action ran. An action that read `gen/input.txt`, ran
+  ##   `rm -rf gen`, and then made and removed `gen` again consumed that
+  ##   file; dropping it would let a portable record hit whatever the file
+  ##   held. The action's own files beneath a temporary are written, so
+  ##   they are covered exactly.
+  ## * One reached through a parent walk (`tmp/../src/main.c`). The kernel
+  ##   resolved it outside the temporary, so it is not beneath it.
+  ##
+  ## Ancestors are taken by whole components of the key's own spelling, so
+  ## a removed `proj/sr` does not cover `proj/src/main.c`.
+  if transient.written.len == 0:
+    return false
+  var key = transientWriteKey(path)
+  if key in transient.written:
+    return true
+  if key in transient.removedOnly:
+    return false
+  while true:
+    let cut = key.rfind('/')
+    if cut <= 0:
+      # The root itself is never a temporary the action made and removed.
+      return false
+    if key.substr(cut + 1) == "..":
+      return false
+    key.setLen(cut)
+    if key in transient.written:
+      return true
 
 proc undeclaredSurvivingWrites*(action: BuildAction;
                                 evidence: PathSetEvidence): seq[string] =
@@ -21901,7 +22122,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       toHex(action.weakFingerprint.bytes) & "\0"
     var inputs = action.cacheInputPaths(evidence.evidence)
     inputs.sort()
-    let transient = transientOwnWrites(evidence.evidence)
+    let transient = transientOwnPaths(evidence.evidence)
     # A directory CONTAINING the action's working directory: its listing is
     # how this host lays out everything else stored above the project (the
     # drive root, a home directory), which changes with anything on the
@@ -21917,7 +22138,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     let ancestors = graphAncestorsOf(action.id)
     for path in inputs:
       if isLaunchMachinery(path) or
-          (transient.len > 0 and transientWriteKey(path) in transient) or
+          transient.transientOwnPath(path) or
           isOwnOutput(action, path):
         continue
       var pathKey = path.replace('\\', '/')
@@ -22334,11 +22555,16 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     ## hit derives is the record this run produced (P3.4b).
     let containment = beginContainmentMemo()
     defer: endContainmentMemo(containment)
+    # Listings are filtered like reads and probes: a temporary directory the
+    # action made, listed and removed (rustc's `rustcXXXXXX/raw-dylibs`)
+    # names a new random path on every run.
+    let transient = transientOwnPaths(evidence)
     var enumerated = initHashSet[string]()
     for path in action.cacheEnumeratedDirectories(evidence,
         membershipTrackedRoots):
       enumerated.incl(path)
-      if not isHostTempListing(path) and not isOwnOutput(action, path):
+      if not isHostTempListing(path) and not isOwnOutput(action, path) and
+          not transient.transientOwnPath(path):
         result.enumerations.add(path)
     var probed = initHashSet[string]()
     for path in evidence.monitorProbes:
@@ -22354,10 +22580,9 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     # Stored beside the record with the accesses, so a portable record
     # derived from a later local hit is host-bound exactly as this one is.
     result.hostBoundReason = evidence.hostBoundInput
-    let transient = transientOwnWrites(evidence)
     for path in keyed:
       if path in enumerated or isHostTempListing(path) or
-          (transient.len > 0 and transientWriteKey(path) in transient) or
+          transient.transientOwnPath(path) or
           isOwnOutput(action, path):
         continue
       elif path in probed:
@@ -26212,13 +26437,21 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           commands[k] = staged.action.runQuotaCommand(config)
         var offers: seq[ReproRunQuotaOffer]
         var batchFailure = ""
+        var batchDeadlocked = false
         try:
           offers = offerWithRunQuotaBatch(inlineRunQuotaSession, requests, commands)
-        except ReproRunQuotaDeadlockError:
-          # A whole frontier blocked by requests the authority cannot ever
-          # admit is a build-level scheduler deadlock, not an action process
-          # failure. Preserve the typed outcome for the CLI diagnostic.
-          raise
+        except ReproRunQuotaDeadlockError as err:
+          # A request the authority can never admit ends in a static-capacity
+          # deadlock (docs/runquota-policy.md). It fails the actions it
+          # stopped -- with the deadlock's own text and a reason that names
+          # it, so it is not mistaken for a command that failed -- and the
+          # build settles and is reported like any other failed build
+          # (CLI/build.md, "A build that ends in a RunQuota static-capacity
+          # deadlock"). It used to be re-raised here, which unwound the build
+          # in place of its result, so no report could be written from it.
+          # The batch has already rolled back what it owned.
+          batchFailure = err.msg
+          batchDeadlocked = true
         except CatchableError as err:
           batchFailure = err.msg
         finishStat("repro runquota launch", batchStart)
@@ -26237,7 +26470,12 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
               cacheDecision: previousCacheDecision,
               dependencyPolicyKind: staged.action.dependencyPolicy.kind,
               monitorDepfilePath: staged.action.monitorDepfile,
-              stderr: "process launch failed: " & batchFailure,
+              reason:
+                if batchDeadlocked: RunQuotaStaticCapacityDeadlockReason
+                else: "",
+              stderr:
+                if batchDeadlocked: batchFailure
+                else: "process launch failed: " & batchFailure,
               runQuotaBackend: "runquota-inline",
               runQuotaSocket: getEnv("RUNQUOTA_SOCKET", ""))
             statuses[staged.id] = asFailed
@@ -26245,7 +26483,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             poolRunning[staged.pool] =
               if failedUsed > staged.poolUnits: failedUsed - staged.poolUnits
               else: 0'u32
-            runResult.trace(staged.id, "failed", "launch")
+            runResult.trace(staged.id, "failed",
+              if batchDeadlocked: "runquota-deadlock" else: "launch")
             blockClosure(staged.id, staged.id)
             emitProgress(bpkActionCompleted, staged.id)
           completed = terminalCount()
@@ -26337,7 +26576,16 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           # build holds. That build releases it when its action exits.
           sleep(200)
           continue
-        if ready.len > 0 and not launchedAny:
+        if ready.len > 0:
+          # Something settled on this pass without leaving anything running:
+          # a staged batch whose launch failed, or that a RunQuota
+          # static-capacity deadlock stopped. Its pool units are back and the
+          # actions still ready do not depend on it, so scan again rather
+          # than call a graph that is still moving stuck. Bounded: every pass
+          # that sets ``launchedAny`` without a running action has moved at
+          # least one action to a terminal status.
+          if launchedAny:
+            continue
           raiseEngine("ready queue is blocked by pool capacity")
         # The graph can advance no further: nothing is running, ready, or
         # launchable, yet ``completed < total``. Historically this raised
