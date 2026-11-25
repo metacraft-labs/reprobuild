@@ -62,7 +62,11 @@
  *
  * `allowed_mocks: none`. Every thread is a real pthread, every park is a real
  * signal and a real futex, and every publication goes through the production
- * `repro_hcr_lx_apply_direct_patch_at`.
+ * transaction in the order the agent's tier-2 path uses (design §6.2
+ * "Deadlock hazards", §11.2): prepare with every thread running, quiesce,
+ * commit, release, then finish any rollback. Preparing inside the window
+ * would claim the window and map the body with the threads parked, which the
+ * provider no longer does, so a fixture doing it would measure something else.
  */
 
 #ifndef _GNU_SOURCE
@@ -113,9 +117,6 @@ __attribute__((noinline, noipa, used)) int hcr_lx_m4_q_victim_onstack(void) {
 
 extern unsigned long long repro_hcr_lx_probe_sled_address_for_entry(
     unsigned long long entry_address);
-extern unsigned long long repro_hcr_lx_probe_apply_direct_patch_at(
-    unsigned long long entry_address, unsigned long long sled_address,
-    const unsigned char *patch_bytes, size_t patch_len);
 extern int repro_hcr_lx_probe_last_refusal(void);
 extern const char *repro_hcr_lx_probe_refusal_name(int code);
 extern unsigned long long repro_hcr_lx_probe_last_window_address(void);
@@ -151,6 +152,50 @@ extern unsigned long long repro_hcr_lx_probe_quiesce_blocked_mask(int index);
 extern const char *repro_hcr_lx_probe_quiesce_blocked_name(int index);
 extern int repro_hcr_lx_probe_quiesce_enumeration_rounds(void);
 extern unsigned long long repro_hcr_lx_probe_membarrier_issued_count(void);
+extern void repro_hcr_lx_probe_txn_reset(void);
+extern int repro_hcr_lx_probe_txn_add(unsigned long long entry_address,
+                                      unsigned long long sled_address,
+                                      const unsigned char *patch_bytes,
+                                      size_t patch_len);
+extern int repro_hcr_lx_probe_txn_prepare_for_quiescence(void);
+extern int repro_hcr_lx_probe_txn_commit_quiesced(void);
+extern void repro_hcr_lx_probe_txn_finish_cleanup(void);
+extern void repro_hcr_lx_probe_txn_discard_prepared(void);
+extern int repro_hcr_lx_probe_txn_published_count(void);
+
+/* The agent's tier-2 order, in three steps (design §6.2, §11.2; see the probe's
+ * `txn_prepare_for_quiescence`). `prepare_publication` runs with the threads
+ * RUNNING and returns 0 or the refusal; `commit_publication` runs with them
+ * parked and returns how many functions went live; `finish_publication` runs
+ * after the release, and `abandon_publication` replaces both when quiescence
+ * could not be acquired. */
+static int prepare_publication(int count, const unsigned long long *entries,
+                               const unsigned char *const *bodies,
+                               const size_t *lens) {
+  int i;
+  repro_hcr_lx_probe_txn_reset();
+  for (i = 0; i < count; ++i) {
+    int rc = repro_hcr_lx_probe_txn_add(
+        entries[i], repro_hcr_lx_probe_sled_address_for_entry(entries[i]),
+        bodies[i], lens[i]);
+    if (rc != 0) {
+      return rc;
+    }
+  }
+  return repro_hcr_lx_probe_txn_prepare_for_quiescence();
+}
+
+static int commit_publication(void) {
+  return repro_hcr_lx_probe_txn_commit_quiesced() == 0
+             ? repro_hcr_lx_probe_txn_published_count()
+             : 0;
+}
+
+static void finish_publication(void) { repro_hcr_lx_probe_txn_finish_cleanup(); }
+
+static void abandon_publication(void) {
+  repro_hcr_lx_probe_txn_discard_prepared();
+}
 
 #define MAX_THREADS 32
 
@@ -552,9 +597,16 @@ int main(int argc, char **argv) {
   } else if (strcmp(mode, "onstack") == 0) {
     unsigned long long entry =
         (unsigned long long)(uintptr_t)&hcr_lx_m4_q_victim_onstack;
-    unsigned long long sled =
-        repro_hcr_lx_probe_sled_address_for_entry(entry);
+    const unsigned char *bodies[1] = {body_a};
+    size_t lens[1] = {body_a_len};
+    int prepared = prepare_publication(1, &entry, bodies, lens);
+    if (prepared != 0) {
+      last_refusal = repro_hcr_lx_probe_last_refusal();
+    }
     status = repro_hcr_lx_probe_quiesce_begin(250000000ull);
+    if (status != 0 && prepared == 0) {
+      abandon_publication();
+    }
     if (status == 0) {
       rounds_ok += 1;
       slot_count_last = repro_hcr_lx_probe_quiesce_slot_count();
@@ -567,13 +619,17 @@ int main(int argc, char **argv) {
           entry, entry + 128);
       onstack_detector_calls += 1;
       onstack_incomplete_walks = repro_hcr_lx_probe_quiesce_incomplete_walks();
-      if (repro_hcr_lx_probe_apply_direct_patch_at(entry, sled, body_a,
-                                                   body_a_len) != 0) {
-        publications += 1;
-      } else {
-        last_refusal = repro_hcr_lx_probe_last_refusal();
+      if (prepared == 0) {
+        if (commit_publication() > 0) {
+          publications += 1;
+        } else {
+          last_refusal = repro_hcr_lx_probe_last_refusal();
+        }
       }
       repro_hcr_lx_probe_quiesce_release();
+      if (prepared == 0) {
+        finish_publication();
+      }
       resumed_total = repro_hcr_lx_probe_quiesce_resumed_count();
       for (i = 0; i < slot_count_last; ++i) {
         if (repro_hcr_lx_probe_quiesce_slot_pc(i) != 0) {
@@ -595,24 +651,28 @@ int main(int argc, char **argv) {
         (unsigned long long)(uintptr_t)&hcr_lx_m4_q_victim_a;
     unsigned long long entry_b =
         (unsigned long long)(uintptr_t)&hcr_lx_m4_q_victim_b;
+    const unsigned long long entries[2] = {entry_a, entry_b};
+    const unsigned char *bodies[2] = {body_a, body_b};
+    const size_t lens[2] = {body_a_len, body_b_len};
     for (i = 0; i < rounds; ++i) {
+      /* BOTH functions in ONE transaction, committed inside ONE quiescence:
+       * that is the definition of set-wide atomicity, and it is the thing
+       * tier 1 cannot offer (§6.1's closing paragraph — per-function, never
+       * set-wide). The transaction is prepared before the threads are parked
+       * (§6.2 "Deadlock hazards", §11.2). */
+      if (prepare_publication(2, entries, bodies, lens) != 0) {
+        last_refusal = repro_hcr_lx_probe_last_refusal();
+        break;
+      }
       status = repro_hcr_lx_probe_quiesce_begin(250000000ull);
-      if (status != 0) break;
+      if (status != 0) {
+        abandon_publication();
+        break;
+      }
       rounds_ok += 1;
-      /* BOTH publications inside ONE quiescence: that is the definition of
-       * set-wide atomicity, and it is the thing tier 1 cannot offer (§6.1's
-       * closing paragraph — per-function, never set-wide). */
-      if (repro_hcr_lx_probe_apply_direct_patch_at(
-              entry_a, repro_hcr_lx_probe_sled_address_for_entry(entry_a),
-              body_a, body_a_len) != 0) {
-        publications += 1;
-      }
-      if (repro_hcr_lx_probe_apply_direct_patch_at(
-              entry_b, repro_hcr_lx_probe_sled_address_for_entry(entry_b),
-              body_b, body_b_len) != 0) {
-        publications += 1;
-      }
+      publications += commit_publication();
       repro_hcr_lx_probe_quiesce_release();
+      finish_publication();
       usleep(2000);
     }
     window_after = read_window(entry_a);
@@ -626,24 +686,34 @@ int main(int argc, char **argv) {
        * quiescences with the process running in between. A checker that never
        * reports a mixture here is not discriminating and the `setwide` arm
        * above would be vacuous. */
+      const unsigned char *bodies_a[1] = {body_a};
+      const unsigned char *bodies_b[1] = {body_b};
+      if (prepare_publication(1, &entry_a, bodies_a, &body_a_len) != 0) {
+        last_refusal = repro_hcr_lx_probe_last_refusal();
+        break;
+      }
       status = repro_hcr_lx_probe_quiesce_begin(250000000ull);
-      if (status != 0) break;
+      if (status != 0) {
+        abandon_publication();
+        break;
+      }
       rounds_ok += 1;
-      if (repro_hcr_lx_probe_apply_direct_patch_at(
-              entry_a, repro_hcr_lx_probe_sled_address_for_entry(entry_a),
-              body_a, body_a_len) != 0) {
-        publications += 1;
-      }
+      publications += commit_publication();
       repro_hcr_lx_probe_quiesce_release();
+      finish_publication();
       usleep(2000);
-      status = repro_hcr_lx_probe_quiesce_begin(250000000ull);
-      if (status != 0) break;
-      if (repro_hcr_lx_probe_apply_direct_patch_at(
-              entry_b, repro_hcr_lx_probe_sled_address_for_entry(entry_b),
-              body_b, body_b_len) != 0) {
-        publications += 1;
+      if (prepare_publication(1, &entry_b, bodies_b, &body_b_len) != 0) {
+        last_refusal = repro_hcr_lx_probe_last_refusal();
+        break;
       }
+      status = repro_hcr_lx_probe_quiesce_begin(250000000ull);
+      if (status != 0) {
+        abandon_publication();
+        break;
+      }
+      publications += commit_publication();
       repro_hcr_lx_probe_quiesce_release();
+      finish_publication();
       usleep(2000);
       break; /* one split transition is all the control needs */
     }
