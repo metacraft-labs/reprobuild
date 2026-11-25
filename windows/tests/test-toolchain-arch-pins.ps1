@@ -69,6 +69,26 @@ Check "the arm64 clingo asset is a producer build of CLINGO_VERSION" {
     throw "CLINGO_WIN_ARM64_URL '$($pins['CLINGO_WIN_ARM64_URL'])' does not match $pattern"
   }
 }
+Check "the arm64 Nim is pinned" {
+  foreach ($key in @("NIM_WIN_ARM64_URL", "NIM_WIN_ARM64_SHA256")) {
+    if ([string]::IsNullOrWhiteSpace($pins[$key])) { throw "$key missing" }
+  }
+}
+# NIM_VERSION is shared by both legs (the two legs never differ), so the
+# arm64 cold-start prefix must be the metacraft-labs/nim factory's build of
+# exactly that version. ensure-nim.ps1 refuses a mismatched asset
+# name at install time; this catches it before a host ever downloads. The
+# factory's other prefix, the 2.2.10 vccexe build, is the engine's bootstrap
+# Nim (packages/nim.nim) and must never land in these keys.
+Check "the arm64 Nim asset is a factory prefix of NIM_VERSION" {
+  $version = [regex]::Escape($pins["NIM_VERSION"])
+  $pattern = ('^https://github\.com/metacraft-labs/nim/releases/download/' +
+              'producer/nim-windows-arm64-prefixes/build-[1-9][0-9]*/' +
+              'nim-' + $version + '-[0-9a-f]{12}-windows-arm64\.zip$')
+  if ($pins["NIM_WIN_ARM64_URL"] -notmatch $pattern) {
+    throw "NIM_WIN_ARM64_URL '$($pins['NIM_WIN_ARM64_URL'])' does not match $pattern"
+  }
+}
 
 Write-Host "Get-ToolchainArchPin"
 $table = @{

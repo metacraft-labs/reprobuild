@@ -877,6 +877,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "",
     singleReason: "suite-scope statement runs at every start-up: let units = ownUnits()"),
   TestSpec(
+    source: "libs/repro_addon/tests/t_addon_floor_round22.nim",
+    binary: "build/test-bin/t_addon_floor_round22",
+    defines: @[],
+    requiresReproBinary: false,
+    requiresMonitorShim: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_libs_repro_addon_tests_g01",
+    singleReason: ""),
+  TestSpec(
     source: "libs/repro_addon/tests/t_addon_floor_round3.nim",
     binary: "build/test-bin/t_addon_floor_round3",
     defines: @[],
