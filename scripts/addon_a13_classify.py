@@ -339,6 +339,10 @@ EXPECT.update({
     # requirement is not refused.
     "mutessreq": ("e2e_addon_to_reproos_conversion_keeps_state", "red",
                   "engine build essential-restore-requirement-allowed"),
+    # §13 decision 194 (2026-11-25): a retire leaves a generation's restore
+    # requirement behind.
+    "mutretire": ("e2e_addon_to_reproos_conversion_keeps_state", "red",
+                  "engine build retire-leaves-requirements"),
 })
 TARGET.update({
     "mutliveset": "a switch that changes only a service's credential judges it",
@@ -363,6 +367,7 @@ TARGET.update({
     "mutprefixcall": "round 15: a drop-in on a dashed prefix keeping an instance",
     "mutsecretput": "decision 190 (b): with a generator making the probe root",
     "mutessreq": "decision 192: an apply that would make sshd require",
+    "mutretire": "decision 194: after a successful restore, retire removes",
 })
 
 ROUND4_PROBES = ["account", "timer", "pathfloored", "path", "host"]
@@ -509,6 +514,12 @@ def on_target_rec(kind, rec):
         u = rec.get("secretPutJudged", {}).get("b", {})
         return (on_target(kind, steps) and u.get("refused") is False and
                 u.get("restarted") is True)
+    if kind == "mutretire":
+        # Red because a requirement drop-in survived the retire, not for
+        # another reason: the retire itself succeeded.
+        u = rec.get("carriedRetired", {})
+        return (on_target(kind, steps) and u.get("exit") == 0 and
+                u.get("requirementsAfter", "") != "")
     if kind == "mutessreq":
         # Red because the apply passed and wrote onto sshd, not for another
         # reason.
@@ -714,6 +725,7 @@ def on_target_rec(kind, rec):
                 rec.get("lateEssentialTrigger", {}).get("active") == "active" and
                 rec.get("prefixDropInRefused", {}).get("ok") is True and
                 rec.get("essentialRequirementRefused", {}).get("ok") is True and
+                rec.get("carriedRetired", {}).get("ok") is True and
                 rec.get("decisionEssential", {}).get("exit", 0) != 0 and
                 rec.get("decisionEssential", {}).get("refused") is True and
                 rec.get("decisionEssential", {}).get("dropInWritten") is False)

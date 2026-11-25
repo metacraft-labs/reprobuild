@@ -2298,6 +2298,9 @@ command	repro system addon state unit
 command	repro system addon state install-unit
 flag	repro system addon state install-unit	--from
 flag	repro system addon state install-unit	--root
+command	repro system addon state retire
+flag	repro system addon state retire	--from
+flag	repro system addon state retire	--root
 command	repro system addon status
 command	repro system addon retention
 flag	repro system addon retention	--keep-days
@@ -2325,6 +2328,9 @@ command	repro system state unit
 command	repro system state install-unit
 flag	repro system state install-unit	--from
 flag	repro system state install-unit	--root
+command	repro system state retire
+flag	repro system state retire	--from
+flag	repro system state retire	--root
 command	repro system secret
 command	repro system secret put
 flag	repro system secret put	--name

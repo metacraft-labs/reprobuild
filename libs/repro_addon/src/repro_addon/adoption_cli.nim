@@ -13,7 +13,7 @@
 ## difference; 2 a usage error or a refusal decided before anything was
 ## written.
 
-import std/[os, strutils]
+import std/[algorithm, os, posix, strutils, tables]
 
 import repro_core/source_root
 import repro_infra
@@ -23,6 +23,7 @@ import ./collision
 import ./host_exec
 import ./mutations
 import ./state_sets
+import ./static_tree
 
 const
   RestoreUnitName* = CarriedRestoreUnit
@@ -121,13 +122,148 @@ proc installRestoreUnit*(dir, repro: string; root = "/"): seq[string] =
       writeFile(d / RestoreRequiredDropIn, restoreRequiredDropInText())
   units
 
+const RetiredRecordName* = "carried.retired"
+  ## Beside the marker: ``retireCarriedState`` writes it before the commit
+  ## point and completes it after the cleanup (§13 decision 194).
+
+proc retiredRecordPath*(dir: string): string =
+  ## ``carried.retired`` beside the carried directory ``dir``.
+  parentDir(installedMarkerPath(dir)) / RetiredRecordName
+
+proc fsyncDir(d: string) =
+  let fd = posix.open(d.cstring, O_RDONLY or O_CLOEXEC)
+  if fd < 0: raiseOSError(osLastError(), "open " & d)
+  let r = fsync(fd)
+  let err = osLastError()
+  discard posix.close(fd)
+  if r != 0: raiseOSError(err, "fsync " & d)
+
+proc writeDurably(path, text: string) =
+  let tmp = path & ".tmp"
+  writeFile(tmp, text)
+  let fd = posix.open(tmp.cstring, O_RDONLY or O_CLOEXEC)
+  if fd < 0: raiseOSError(osLastError(), "open " & tmp)
+  let r = fsync(fd)
+  let err = osLastError()
+  discard posix.close(fd)
+  if r != 0: raiseOSError(err, "fsync " & tmp)
+  moveFile(tmp, path)
+  fsyncDir(parentDir(path))
+
+proc retireRefusal*(dir, root, stateDir: string): string =
+  ## Why carried state at ``dir`` may not be retired now (§13 decision
+  ## 194), or "": it must be installed (marker and manifest), every
+  ## carried entry restored and identified by the receipt -- a restore has
+  ## succeeded since the conversion -- and no add-on switch nor full apply
+  ## be pending.
+  if not fileExists(installedMarkerPath(dir)):
+    return "carried state is not installed at " & dir &
+      " (no " & installedMarkerPath(dir) & "); nothing to retire"
+  if not fileExists(dir / ManifestFileName):
+    return "carried state was installed at " & dir &
+      " but its manifest is missing; a restore cannot have been confirmed"
+  when not mutated("retire-without-confirmed-restore"):
+    let m = readStateManifest(dir)
+    let receipt = readReceipt(dir)
+    var unconfirmed: seq[string]
+    for e in m.entries:
+      if e.disposition != sdCarry: continue
+      if e.path notin receipt or receipt[e.path].digest != e.digest:
+        unconfirmed.add(e.path)
+    for e in pendingCarriedState(dir, root):
+      if e.path notin unconfirmed: unconfirmed.add(e.path)
+    if unconfirmed.len > 0:
+      return "no confirmed restore of " & unconfirmed.join(", ") &
+        " since the conversion (the receipt beside the manifest does not " &
+        "identify it as restored); run `repro system state restore` and " &
+        "retire after it succeeds"
+  if hasPendingMarker(stateDir):
+    return "an add-on switch is pending on this host (" & stateDir &
+      "); recover it first"
+  if readLiveCheckUnits(stateDir).len > 0 or
+      readLiveCheckTriggers(stateDir).len > 0:
+    return "a full apply died under its carried-state hold (its records " &
+      "in " & stateDir & "); run the next apply first"
+  ""
+
+proc requirementDropIns*(root: string): seq[string] =
+  ## Every per-unit restore requirement under ``root``'s
+  ## ``/etc/systemd/system``: ``install-unit``'s ``80-repro-state-restore.conf``
+  ## and the generations' ``50-repro-state-restore.conf``.
+  let unitDir = root / "etc/systemd/system"
+  if not dirExists(unitDir): return
+  for kind, d in walkDir(unitDir):
+    if kind != pcDir or not d.endsWith(".d"): continue
+    for name in [RestoreRequiredDropIn, "50-repro-" & RequirementDropInName & ".conf"]:
+      when mutated("retire-leaves-requirements"):
+        # FALSIFYING MUTATION: only install-unit's drop-ins are removed.
+        if name != RestoreRequiredDropIn: continue
+      if fileExists(d / name): result.add(d / name)
+  result.sort()
+
+proc retireCarriedState*(dir, root, stateDir: string;
+                         reload: proc () {.closure.} = nil;
+                         crashAt: proc (point: string) {.closure.} = nil):
+    seq[string] =
+  ## ``repro system state retire`` (§13 decision 194): end the carried-state
+  ## protection once a restore has succeeded. Returns what it removed.
+  ## Order: the record that the retire began (durable), the marker (the
+  ## commit point: before it the host keeps every protection), then every
+  ## restore requirement, then the restore unit and its link, then the
+  ## reload and the completed record. A crash after the commit point
+  ## leaves only requirements on a restore that succeeds -- fail-closed --
+  ## and a second run finishes. ``crashAt`` is a test seam: it is called
+  ## after each step with its name, and may raise.
+  let marker = installedMarkerPath(dir)
+  let record = retiredRecordPath(dir)
+  let resuming = not fileExists(marker) and fileExists(record)
+  if not resuming:
+    let why = retireRefusal(dir, root, stateDir)
+    if why.len > 0: raise newException(StateSetError, why)
+  proc step(point: string) =
+    if crashAt != nil: crashAt(point)
+  proc dropRequirements(): seq[string] =
+    for f in requirementDropIns(root):
+      removeFile(f)
+      result.add(f)
+      let d = parentDir(f)
+      var empty = true
+      for _ in walkDir(d):
+        empty = false
+        break
+      if empty: removeDir(d)
+    step("requirements-removed")
+  if not resuming:
+    writeDurably(record, "retiring " & dir & "\n")
+    step("record-written")
+    when mutated("retire-requirements-first"):
+      # FALSIFYING MUTATION: the requirements go before the marker.
+      result.add(dropRequirements())
+    removeFile(marker)
+    fsyncDir(parentDir(marker))
+    result.add(marker)
+    step("marker-removed")
+  when not mutated("retire-requirements-first"):
+    result.add(dropRequirements())
+  else:
+    if resuming: result.add(dropRequirements())
+  let unitDir = root / "etc/systemd/system"
+  for f in [unitDir / "sysinit.target.wants" / RestoreUnitName,
+            unitDir / RestoreUnitName]:
+    if symlinkExists(f) or fileExists(f):
+      removeFile(f)
+      result.add(f)
+  step("unit-removed")
+  if reload != nil: reload()
+  writeDurably(record, "retired " & dir & "\n")
+
 type
   StateCommand* = object
     ## A `repro system addon state <verb>` command line (and `repro system
     ## state <verb>`), as the add-on's parser read it.
     verb*: string
-      ## `backup`, `release`, `verify`, `restore`, `digest`, `unit` or
-      ## `install-unit`.
+      ## `backup`, `release`, `verify`, `restore`, `digest`, `unit`,
+      ## `install-unit` or `retire`.
     profile*, outDir*, fromDir*, root*, only*, path*: string
       ## ``--profile``, ``--out``, ``--from``, ``--root``, ``--only`` and
       ## `digest`'s directory; empty when the verb was not given one.
@@ -271,6 +407,25 @@ proc runStateCommand*(c: StateCommand): int =
         if r.exitCode != 0:
           raise newException(StateSetError, "systemctl daemon-reload " &
             "failed: " & r.output)
+      0
+    of "retire":
+      # The carried directory of the system under --root, as install-unit
+      # and restore read it (§13 decision 194).
+      if fromDir.len > 0:
+        raise newException(ValueError, "retire reads " & CarriedStateDir &
+          ", the directory install-unit installed; it takes no --from")
+      let dir = under(root, CarriedStateDir)
+      let stateDir = under(root, osDefaultSystemStateDir())
+      let removed = retireCarriedState(dir, root, stateDir,
+        reload = (if root == "/":
+                    proc () =
+                      let r = runSystemctl(["daemon-reload"])
+                      if r.exitCode != 0:
+                        raise newException(StateSetError, "systemctl " &
+                          "daemon-reload failed: " & r.output)
+                  else: nil))
+      for f in removed: stdout.write("removed " & f & "\n")
+      stdout.write("carried state retired at " & dir & "\n")
       0
     else:
       raise newException(ValueError, "unknown state command " & verb)
