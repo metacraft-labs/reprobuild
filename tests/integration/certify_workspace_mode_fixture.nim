@@ -130,16 +130,24 @@ proc setupWorkspaceCertifyFixture*(label: string; stems: openArray[string];
   discard result.cf.gitIn(app, "commit -q -m project")
   discard result.cf.gitIn(app, "push -q origin main")
 
+proc reproEnv*(fx: WorkspaceCertifyFixture;
+               extra: openArray[tuple[name, value: string]] = []):
+    seq[tuple[name, value: string]] =
+  ## The environment overlay every ``repro`` this fixture runs gets: off the
+  ## caller's daemon (``ownDaemonEnv``), the tool on ``PATH``, the daemon key
+  ## handed to issuance, then ``extra``, which wins.
+  result = ownDaemonEnv() & daemonKeyEnv(fx.cf.daemonKey, certifyKeyId)
+  result.add((name: "PATH", value: fx.binDir & $PathSep & getEnv("PATH")))
+  for e in extra: result.add(e)
+
 proc reproIn*(fx: WorkspaceCertifyFixture; args: openArray[string]):
     CmdResult =
-  ## The built ``repro`` in ``app`` with the tool on ``PATH`` and the daemon
-  ## key handed to issuance.
-  var env = daemonKeyEnv(fx.cf.daemonKey, certifyKeyId)
-  env.add((name: "PATH", value: fx.binDir & $PathSep & getEnv("PATH")))
+  ## The built ``repro`` in ``app``, in the environment ``reproEnv`` gives:
+  ## the build runs in this process tree, never in the caller's daemon.
   var argv = @[fx.cf.sib.repro]
   for arg in args:
     argv.add(arg)
-  runShell(shellCommand(argv, env), fx.app)
+  runShell(shellCommand(argv, fx.reproEnv), fx.app)
 
 proc executedOutputs*(fx: WorkspaceCertifyFixture): seq[string] =
   ## The outputs the tool wrote, one per executed edge, in run order.

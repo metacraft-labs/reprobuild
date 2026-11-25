@@ -91,7 +91,8 @@ proc setupLockUpdateFixture*(label: string; requireTest = false):
     discard result.cf.gitIn(app, "push -q origin main")
 
 proc hookEnv(fx: WorkspaceCertifyFixture): seq[tuple[name, value: string]] =
-  @[(name: "REPROBUILD_REPRO", value: fx.cf.sib.repro)]
+  ## The hooks run ``repro``, so they stay off the caller's daemon too.
+  ownDaemonEnv() & @[(name: "REPROBUILD_REPRO", value: fx.cf.sib.repro)]
 
 proc ensureHooks*(fx: WorkspaceCertifyFixture) =
   ## ``repro hooks ensure --vcs app``, serviced by the built ``repro``.
@@ -114,14 +115,11 @@ proc mustGitApp*(fx: WorkspaceCertifyFixture; args: varargs[string]): string =
 
 proc reproInEnv*(fx: WorkspaceCertifyFixture; args: openArray[string];
                  extra: openArray[tuple[name, value: string]]): CmdResult =
-  ## ``reproIn`` with additional environment.
-  var env = daemonKeyEnv(fx.cf.daemonKey, certifyKeyId)
-  env.add((name: "PATH", value: fx.binDir & $PathSep & getEnv("PATH")))
-  for e in extra: env.add(e)
+  ## ``reproIn`` with additional environment, which wins over the fixture's.
   var argv = @[fx.cf.sib.repro]
   for arg in args:
     argv.add(arg)
-  runShell(shellCommand(argv, env), fx.app)
+  runShell(shellCommand(argv, fx.reproEnv(extra)), fx.app)
 
 proc lockText*(fx: WorkspaceCertifyFixture): string =
   readFile(fx.app / "repro.lock")
