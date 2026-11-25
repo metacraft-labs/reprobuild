@@ -1951,7 +1951,7 @@ proc carriedRequirementRoutes*(p: SystemProfile; dir = CarriedStateDir;
           next.add(a)
     for u in unitClosure(next, p, root, stop, uncertain):
       via(u, "a unit the profile starts starts it in turn, and the host's " &
-        "boot does not (decision 60's onward closure)")
+        "boot does not (decision 60's onward dependency closure)")
   var names: seq[string]
   for u in units: names.add(u)
   names.sort()
