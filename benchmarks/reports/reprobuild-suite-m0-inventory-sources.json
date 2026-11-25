@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 36,
-    "nimTestBinaries": 3252,
+    "nimTestBinaries": 3253,
     "pureUnitConsolidationGroups": 96,
     "pureUnitTests": 852,
     "staticallyDetectedRuntimeCompilerFlowTests": 163,
-    "testEntries": 3311
+    "testEntries": 3312
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1862,7 +1862,7 @@
       "integration": 1831,
       "platform/destructive": 205,
       "pure unit": 852,
-      "unclassified": 394
+      "unclassified": 395
     },
     "graphOwnedTestArtifacts": [
       {
@@ -2082,9 +2082,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 3252,
+    "nimTestBinaryCount": 3253,
     "pythonTestFileCount": 59,
-    "testEntryCount": 3311
+    "testEntryCount": 3312
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -20891,6 +20891,24 @@
       "source": "libs/repro_elevation/tests/t_elevation_pipe_squatting.nim",
       "sourceSuiteCount": 2,
       "staticCaseCount": 5,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_fs_system_file_writes_never_follow_links",
+      "class": "unclassified",
+      "classificationReason": "imports `posix`, which grants out-of-process reach",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_elevation",
+        "repro_test_support"
+      ],
+      "owner": "libs/repro_elevation",
+      "requiresReproBinary": false,
+      "source": "libs/repro_elevation/tests/t_fs_system_file_writes_never_follow_links.nim",
+      "sourceSuiteCount": 3,
+      "staticCaseCount": 18,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
