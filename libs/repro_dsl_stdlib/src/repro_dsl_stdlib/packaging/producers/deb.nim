@@ -26,6 +26,11 @@ const dpkgDebTool = dpkg_deb_module.dpkg_deb
 
 const DpkgDebSelector* = "dpkg-deb"
 
+const DebZshCompletionDir* = "usr/share/zsh/vendor-completions"
+  ## Where a .deb puts zsh completion functions: Debian's zsh reads other
+  ## packages' functions from here (its ``README.Debian``), not from
+  ## ``site-functions``, which is left to the local administrator.
+
 proc debArtifactName*(dist: Distribution): string =
   ## Debian's own convention: ``<name>_<version>_<arch>.deb``,
   ## underscore-separated, with Debian's architecture spelling.
@@ -116,6 +121,11 @@ proc debConffilesText*(dist: Distribution): string =
 proc debPackage*(dist: Distribution; site = noSite()): PackagedArtifact =
   ## Produce a ``.deb`` from the one ``Distribution`` definition.
   var tree = stageInstallTree(dist, "deb", site)
+  # The shell completion of each executable with a ``cli:`` description,
+  # at Debian's locations (zsh's ``README.Debian`` names
+  # ``vendor-completions`` for other packages' functions).
+  tree.addShellCompletion(
+    systemShellCompletionLayout(zshDir = DebZshCompletionDir), site)
 
   # The systemd units, if any. These are ROOT-relative rather than
   # prefix-relative — systemd looks in fixed absolute locations — which

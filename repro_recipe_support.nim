@@ -521,6 +521,13 @@ const
       artifacts: @[TestGraphArtifact(
         path: "build/bin/repro-completion-files",
         actionId: "reprobuild.apps.repro-completion-files")]),
+    # Same producer: the packages of a `cli:` executable carry its files.
+    TestGraphArtifacts(
+      source: "tests/integration/" &
+        "test_cs_m8d_generated_packages_add_completion.nim",
+      artifacts: @[TestGraphArtifact(
+        path: "build/bin/repro-completion-files",
+        actionId: "reprobuild.apps.repro-completion-files")]),
     TestGraphArtifacts(
       source: "libs/repro_build_engine/tests/t_engine_macos_sip_safe_launch.nim",
       artifacts: @[TestGraphArtifact(

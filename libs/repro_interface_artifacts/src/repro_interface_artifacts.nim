@@ -380,6 +380,13 @@ type
       ## unchanged; carried across lock-pinned fetches on the interface so a
       ## non-standard layout is known from the fetched interface alone.
     location*: SourceLocation
+    sourceGitlinks*: seq[GitlinkSourceRequirement]
+      ## Cross-Repo-Source-Consumption §4.2a.2a: the gitlinks the exported
+      ## source requires. Carried from v39 on, after ``location``; a v<39
+      ## payload decodes it empty, and a nonempty value is never written at
+      ## a version that cannot carry it (``writeLibrary`` refuses), so a
+      ## reader that cannot honour the requirement refuses the envelope by
+      ## version instead of compiling against source missing those trees.
 
   InterfaceResourceDeterminism* = enum
     ## RP4: the determinism class carried on an ``InterfaceResource``,
@@ -1332,8 +1339,19 @@ proc `==`*(a, b: InterfaceToolUse): bool {.noSideEffect.} =
 
 const
   EnvelopeMagic = [byte(ord('R')), byte(ord('B')), byte(ord('S')), byte(ord('Z'))]
-  EnvelopeVersion = 38'u16
-    ## v38 (current): ``ProjectInterface`` retains ``pinnedSiblings`` (the
+  EnvelopeVersion = 39'u16
+    ## v39 (current): ``InterfaceLibrary`` retains ``sourceGitlinks``
+    ##                (Cross-Repo-Source-Consumption §4.2a.2a), a ``u32``
+    ##                count plus one string per required gitlink path,
+    ##                appended after the row's ``location``. v38 and older
+    ##                payloads decode it empty. The requirement is mandatory
+    ##                source semantics, so the version is the refusal: a v38
+    ##                reader rejects every v39 envelope, and a nonempty
+    ##                declaration is never encoded at v<39 (``writeLibrary``
+    ##                raises) where it would be dropped. The fingerprint
+    ##                projection writes the block only when it is non-empty,
+    ##                so no fingerprint of a library declaring none moves.
+    ## v38: ``ProjectInterface`` retains ``pinnedSiblings`` (the
     ##                recipe's ``pinned:`` block, Unified-Locking-And-Hooks.md
     ##                §14.2 item 4), a string list after
     ##                ``provisioningContributions``. v37 and older payloads
@@ -2063,6 +2081,9 @@ proc readExecutable(bytes: openArray[byte]; pos: var int): InterfaceExecutable =
   for i in 0 ..< count:
     result.commands[i] = readCommand(bytes, pos)
 
+const FirstEnvelopeVersionWithSourceGitlinks = 39'u16
+  ## The first envelope version whose library rows carry ``sourceGitlinks``.
+
 proc writeLibrary(outp: var seq[byte]; lib: InterfaceLibrary;
                   version = EnvelopeVersion; forFingerprint = false) =
   outp.writeString(lib.name)
@@ -2072,6 +2093,20 @@ proc writeLibrary(outp: var seq[byte]; lib: InterfaceLibrary;
   if version >= 11'u16:
     outp.writeString(lib.exportedPath)
   outp.writeLocation(lib.location, forFingerprint)
+  # v39 (§4.2a.2a): ``sourceGitlinks`` at the row's tail. A version that
+  # cannot carry a nonempty requirement refuses instead of dropping it: the
+  # empty default is for a NEW reader decoding an old payload, never for an
+  # old payload standing in for a new mandatory requirement.
+  if version < FirstEnvelopeVersionWithSourceGitlinks:
+    if lib.sourceGitlinks.len > 0:
+      raiseEnvelopeError(eeMalformed, "interface library '" & lib.name &
+        "' declares sourceGitlinks, which interface envelope version " &
+        $version & " cannot carry (they need version " &
+        $FirstEnvelopeVersionWithSourceGitlinks & " or later)")
+  elif not forFingerprint or lib.sourceGitlinks.len > 0:
+    outp.writeU32Le(uint32(lib.sourceGitlinks.len))
+    for req in lib.sourceGitlinks:
+      outp.writeString(req.relativePath)
 
 proc readLibrary(bytes: openArray[byte]; pos: var int;
                  version = EnvelopeVersion): InterfaceLibrary =
@@ -2085,6 +2120,13 @@ proc readLibrary(bytes: openArray[byte]; pos: var int;
   if version >= 11'u16:
     result.exportedPath = readString(bytes, pos)
   result.location = readLocation(bytes, pos)
+  # v39 (§4.2a.2a). v<39 rows have none: decode the empty default.
+  if version >= FirstEnvelopeVersionWithSourceGitlinks:
+    let count = readElementCount(bytes, pos, 4)
+    result.sourceGitlinks = newSeq[GitlinkSourceRequirement](count)
+    for i in 0 ..< count:
+      result.sourceGitlinks[i] = GitlinkSourceRequirement(
+        relativePath: readString(bytes, pos))
 
 proc writeResource(outp: var seq[byte]; res: InterfaceResource;
                    forFingerprint = false) =
@@ -3697,7 +3739,8 @@ proc toProjectInterface*(pkg: PackageDef;
       name: lib.name,
       kind: lib.kind,
       exportedPath: lib.exportedPath,
-      location: SourceLocation(file: lib.sourceFile, line: lib.sourceLine)))
+      location: SourceLocation(file: lib.sourceFile, line: lib.sourceLine),
+      sourceGitlinks: lib.sourceGitlinks))
   # RP4 (Provider-Runtime-Protocol-v1 §5): fold every ``resourceType``
   # declaration into the interface. Resource types are declared at
   # module scope (like ``registerResourceProvider``), not lexically

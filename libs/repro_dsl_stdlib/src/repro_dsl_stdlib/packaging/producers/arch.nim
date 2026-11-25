@@ -457,6 +457,10 @@ proc archPackage*(dist: Distribution; site = noSite()): PackagedArtifact =
   ## engine keys the ACTION CACHE by id — sharing them would serve one
   ## tree's outputs for the other.
   var tree = stageInstallTree(dist, "arch", site)
+  # The shell completion of each executable with a ``cli:`` description,
+  # in the directories Arch's bash-completion, zsh and fish read. Before
+  # the size is measured and the ``.MTREE`` written, so both count them.
+  tree.addShellCompletion(systemShellCompletionLayout(), site)
 
   # systemd units, UNDER ``usr/lib`` rather than ``lib``.
   #

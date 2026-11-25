@@ -7526,6 +7526,27 @@ compileProfileBinary()
         The census and live-name gate below validate both sides on their host.
         """
         exclusive = {
+            # The system-file driver runs as root over a throwaway /etc built
+            # with Linux user and mount namespaces; every other host registers
+            # the one skipping placeholder that names why. ADDED with the
+            # source: one more source, eight Linux-only and one darwin-only
+            # name.
+            "libs/repro_elevation/tests/"
+            "t_fs_system_file_writes_never_follow_links.nim": {
+                "linux": {
+                    "fs.systemFile as root over a real /etc::a plain write lands, with its directories, mode 0644, atomically",
+                    "fs.systemFile as root over a real /etc::a link as the file is refused and its target is untouched",
+                    "fs.systemFile as root over a real /etc::a link as a directory on the path is refused, naming it",
+                    "fs.systemFile as root over a real /etc::a world-writable directory under /etc is refused, naming it",
+                    "fs.systemFile as root over a real /etc::a world-writable ancestor of an allowlisted root is refused",
+                    "fs.systemFile as root over a real /etc::an allowlisted root an ordinary user can write is refused",
+                    "fs.systemFile as root over a real /etc::a directory writable by root's group is trusted",
+                    "fs.systemFile as root over a real /etc::destroy removes the file, and never through a link",
+                },
+                "darwin": {
+                    "fs.systemFile as root over a real /etc::the driver cases need Linux namespaces",
+                },
+            },
             # The shared-root flock observation is declared only on Linux;
             # the remaining retention cases are common to both hosts.
             "tests/integration/t_local_store_prune_keeps_newest_and_head_tree.nim": {

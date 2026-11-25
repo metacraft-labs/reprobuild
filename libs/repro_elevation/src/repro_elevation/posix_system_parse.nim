@@ -414,6 +414,27 @@ proc isAllowedSystemFilePath*(path: string; programDataRoot = ""): bool =
       return true
   return false
 
+proc systemFileHostPath*(path: string; darwin: bool): string =
+  ## The path a no-follow walk opens for the allowlisted ``path``. On
+  ## macOS ``/etc`` is a symbolic link to ``private/etc`` on the sealed,
+  ## read-only system volume, so a walk that refuses every link would
+  ## refuse every ``/etc`` write there; the link is resolved here, from
+  ## its fixed text, and the walk then refuses any OTHER link on the way.
+  ## ``/usr/local/etc`` is a real directory on both platforms. Pure, so it
+  ## is tested on every platform.
+  if darwin and path.startsWith("/etc/"): "/private" & path
+  else: path
+
+proc systemFileTrustRoot*(hostPath: string): string =
+  ## The allowlist root ``hostPath`` (a ``systemFileHostPath`` result) is
+  ## under: the first directory the driver requires to be under root's
+  ## control. Its ancestors are the operating system's; the no-follow walk
+  ## still refuses a link among them. "" for a path under no POSIX root.
+  for root in ["/private/etc/", "/usr/local/etc/", "/etc/"]:
+    if hostPath.startsWith(root):
+      return root[0 ..< root.high]
+  ""
+
 const NonCanonicalPathMutation {.strdefine: "reproAddonMutation".} = ""
   ## The add-on's falsifying-mutation selector (``repro_addon/mutations``).
   ## ``scope-accepts-unnormalised-paths`` compiles the check below out, so

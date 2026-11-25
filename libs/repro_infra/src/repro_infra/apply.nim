@@ -976,11 +976,15 @@ proc triggerDropInRefusal*(p: SystemProfile): seq[string] =
   ## check refuses before it writes anything (the owner decision "refuse
   ## Service=/Unit= there", 2026-11-18, §13 decision 177; A13 review round
   ## 14): a drop-in on a dashed prefix (``systemd-.socket``, which applies
-  ## to ``systemd-networkd.socket`` and every unit the prefix names), on a
-  ## template (``foo@.socket``) or type-wide (``socket.d``) that sets
-  ## ``Service=``, ``Unit=`` or ``Sockets=`` -- it re-points triggers this
-  ## check cannot enumerate, an essential one among them. One line each,
-  ## naming the drop-in, its unit and the key.
+  ## to ``systemd-networkd.socket`` and every unit the prefix names; also
+  ## one that keeps an instance, ``app-@x.socket``, which applies to every
+  ## ``app-*@x.socket``, A13 review round 15) or on a template
+  ## (``foo@.socket``) that sets ``Service=``, ``Unit=`` or ``Sockets=`` --
+  ## it re-points triggers this check cannot enumerate, an essential one
+  ## among them. One line each, naming the drop-in, its unit and the key.
+  ## A type-wide drop-in (``socket.d``) never reaches here: the profile's
+  ## unit-name validation (``posix_system_parse.systemdUnitNameError``)
+  ## refuses a drop-in unit without a unit name.
   when ApplyMutation == "prefix-trigger-dropins-allowed":
     # FALSIFYING MUTATION: such a drop-in is let through.
     return
@@ -989,8 +993,12 @@ proc triggerDropInRefusal*(p: SystemProfile): seq[string] =
     let u = r.diUnit
     let dot = u.rfind('.')
     let stem = if dot > 0: u[0 ..< dot] else: ""
-    let typeWide = dot < 0 and u in ["socket", "timer", "path", "service"]
-    if not (typeWide or stem.endsWith("-") or stem.endsWith("@")): continue
+    # systemd reads ``<prefix>-@<instance>.<type>.d`` for every
+    # ``<prefix>-*@<instance>``: the part before any ``@`` is the prefix
+    # (``dropInApplies`` agrees).
+    let at = stem.find('@')
+    let prefixPart = if at >= 0: stem[0 ..< at] else: stem
+    if not (prefixPart.endsWith("-") or stem.endsWith("@")): continue
     var keys: seq[string]
     for line in systemdLogicalLines(r.diContent):
       let t = line.strip()
@@ -1985,11 +1993,11 @@ when defined(posix):
     let ess = essentialInHoldSet(result.units & result.adopted,
                                  result.requirers, result.triggers, host)
     if ess.len > 0: raise essentialRefusal(ess)
-    # And a drop-in that re-points triggers it cannot list (the owner
-    # decision "refuse Service=/Unit= there", 2026-11-18).
-    let dropIns = triggerDropInRefusal(p)
-    if dropIns.len > 0:
-      raise newException(ECarriedStatePending, dropIns.join("; "))
+    # (A drop-in that re-points triggers the check cannot list is refused
+    # once, before the apply does anything: ``triggerDropInRefusal`` reads
+    # only the generation, which nothing between there and here changes, so
+    # a second refusal here could never be the one that acts -- A13 review
+    # round 15.)
     for u in result.adoptedActive:
       if u notin result.wasActive: result.wasActive.add(u)
     for u in result.requirers & result.adopted:
@@ -2288,8 +2296,12 @@ proc runInfraApply*(profileText: string; opts: ApplyOptions): ApplyResult =
       let essProfile = parseSystemProfile(essText)
       if liveReachUnits(essProfile, essDir, essRoot).len > 0:
         let refused = triggerDropInRefusal(essProfile)
-        if refused.len > 0:
-          raise newException(ECarriedStatePending, refused.join("; "))
+        when ApplyMutation == "dropin-refusal-before-writes-skipped":
+          # FALSIFYING MUTATION: the refusal's only call site is skipped.
+          discard refused
+        else:
+          if refused.len > 0:
+            raise newException(ECarriedStatePending, refused.join("; "))
       let ess = essentialRefusalBeforeWrites(essText, essDir, essRoot)
       if ess.len > 0: raise essentialRefusal(ess)
   # Before any mutation: an add-on switch interrupted on this host (its

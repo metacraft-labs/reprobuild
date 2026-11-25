@@ -59,10 +59,14 @@ import repro_attest_agent
 
 include attestation_agent_harness
 
-proc stillServes(port: Port): bool =
+proc stillServes(port: Port; timeoutMs = 4_000): bool =
   ## The clause. A full exchange — challenge in, schema-valid envelope
   ## out, with the 64 bytes recomputed here — not merely a 200.
-  let response = get(port, "/attestation?challenge=" & ChallengeA)
+  ## ``timeoutMs`` is how long the CLIENT waits for the daemon to answer.
+  ## The daemon is single-threaded, so a probe queued behind abandoned
+  ## connections waits for all of them first.
+  let response = request(port, "GET", "/attestation?challenge=" & ChallengeA,
+    timeoutMs = timeoutMs)
   if response.status != 200: return false
   let report =
     try:
@@ -259,7 +263,7 @@ suite "attestation agent — abuse bounds":
     l.rateRefillPerSecond = 10_000.0
     l.perClientCapacity = 10_000.0
     l.perClientRefillPerSecond = 10_000.0
-    var agent = newAttestationAgent(driver = newBigChainDriver(),
+    var agent = newAttestationAgent(driver = newBigChainDriver(bigQuotes = 4),
       identity = sampleIdentity())
     var h = startHarness(agent, l)
     defer: stopHarness(h)
@@ -281,8 +285,17 @@ suite "attestation agent — abuse bounds":
     # promptly. Four abandoned connections may each cost up to a deadline,
     # so the budget is generous -- but it is finite, and an unbounded
     # spin is not.
+    #
+    # Two things keep this from measuring the host instead of the daemon.
+    # Only the four abandoned requests get the megabyte chain; the probe
+    # is a cheap answer, since building a megabyte is CPU the connection
+    # deadline does not pause for and on a starved host it alone outlasts
+    # the deadline (probes closed unanswered after 12-50 s under 64 busy
+    # loops on 4 cores). And the client waits as long as the bound below,
+    # not the harness's 4 s default, which is shorter than the four
+    # abandoned connections served one after another at 1.2 s each.
     let started = epochTime()
-    check stillServes(h.port)
+    check stillServes(h.port, AbuseConnectionDeadlineMs * 30)
     let elapsed = epochTime() - started
     # The bound separates "gave up per the deadline" from "spins forever";
     # 6x the deadline was a wall-clock budget that a correct daemon missed

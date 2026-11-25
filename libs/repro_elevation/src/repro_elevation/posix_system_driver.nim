@@ -75,6 +75,7 @@ elif defined(windows):
   # consume the same `icacls <path>` invocation, so a single parser
   # serves both observations.
   import ./windows_system_parse
+  import ./windows_nofollow_write
 
 # ---------------------------------------------------------------------------
 # Digest helpers — the canonical-bytes model shared with every other
@@ -783,6 +784,29 @@ proc createManagedDirs(path, what: string) =
   except NoFollowError as e:
     raiseProtocol(what & " cannot create " & path & ": " & e.msg)
 
+proc refuseUntrustedDirs(dir, root, what: string) =
+  ## Refuse a write under ``dir`` when a directory from the allowlist
+  ## ``root`` down to it can be modified by a user other than root or the
+  ## writer (``untrustedDirOnPath``): a root-owned file there is still
+  ## under that user's control. Used by ``fs.systemFile``, whose allowlist
+  ## includes ``/usr/local/etc``, which Intel Homebrew hands to a user.
+  when DriverMutation == "path-based-write-follows-links":
+    return
+  var bad = ""
+  try:
+    bad = untrustedDirOnPath(dir, judgeFrom = root)
+  except SymlinkOnPath as e:
+    raiseProtocol(what & " refuses to write through a symbolic link: " &
+      e.link & " (threat model G29)")
+  except NoFollowError as e:
+    raiseProtocol(what & " cannot inspect " & dir & ": " & e.msg)
+  except OSError as e:
+    raiseProtocol(what & " cannot inspect " & dir & ": " & e.msg)
+  if bad.len > 0:
+    raiseProtocol(what & " refuses to write under " & bad & ": a user " &
+      "other than root can modify that directory, so it could replace " &
+      "or remove what is written there (threat model G29)")
+
 proc systemctlDaemonReload(what: string) =
   let (reloadOut, reloadCode) = execCmdEx("systemctl daemon-reload")
   if reloadCode != 0:
@@ -1338,6 +1362,40 @@ when defined(windows):
     ## The `${PROGRAMDATA}` root the Windows `fs.systemFile` allowlist
     ## adds at apply time.
     getEnv("PROGRAMDATA")
+
+  proc writeSystemFileWindows(path, content: string) =
+    ## The Windows `fs.systemFile` write: never through a reparse point,
+    ## never under a directory an ordinary user controls, atomic
+    ## (`windows_nofollow_write`). Each refusal is `EProtocol` naming it.
+    try:
+      let parent = parentDir(path)
+      if parent.len > 0:
+        createDirsNoFollowWin(parent)
+      writeFileNoFollowWin(path, content)
+    except SymlinkOnPath as e:
+      raiseProtocol("fs.systemFile refuses to write through a reparse " &
+        "point (junction or symbolic link): " & e.link & " (threat model G29)")
+    except UntrustedDirectory as e:
+      raiseProtocol("fs.systemFile " & e.msg & " (threat model G29)")
+    except NoFollowError as e:
+      raiseProtocol("fs.systemFile cannot write " & path & ": " & e.msg)
+    except OSError as e:
+      raiseProtocol("fs.systemFile cannot write " & path & ": " & e.msg)
+
+  proc removeSystemFileWindows(path: string): bool =
+    ## Remove the managed file without following a reparse point on the
+    ## way; false when it was already gone.
+    try:
+      removeLeafNoFollowWin(path)
+    except SymlinkOnPath as e:
+      raiseProtocol("fs.systemFile refuses to remove through a reparse " &
+        "point (junction or symbolic link): " & e.link & " (threat model G29)")
+    except UntrustedDirectory as e:
+      raiseProtocol("fs.systemFile " & e.msg & " (threat model G29)")
+    except NoFollowError as e:
+      raiseProtocol("fs.systemFile cannot remove " & path & ": " & e.msg)
+    except OSError as e:
+      raiseProtocol("fs.systemFile cannot remove " & path & ": " & e.msg)
 elif defined(linux) or defined(macosx):
   proc programDataRoot(): string = ""
 
@@ -1537,13 +1595,14 @@ proc applyFsSystemFile*(ctx: FixtureContext;
     let scopeErr = systemFileScopeError(op.sfPath, programDataRoot())
     if scopeErr.len > 0:
       raiseProtocol(scopeErr)
+    # The path the no-follow walk opens: on macOS `/etc` is itself a link
+    # (to `private/etc`), resolved here from its fixed text.
+    let target = systemFileHostPath(op.sfPath, darwin = defined(macosx))
     if op.sfDestroy:
-      when defined(linux):
-        discard removeManagedFile(op.sfPath, "fs.systemFile")
+      when defined(linux) or defined(macosx):
+        discard removeManagedFile(target, "fs.systemFile")
       else:
-        if fileExists(op.sfPath):
-          try: removeFile(op.sfPath)
-          except OSError: discard
+        discard removeSystemFileWindows(target)
       # Post-apply re-probe: a destroy is "done" when the file no
       # longer exists.
       if fileExists(op.sfPath) or symlinkExists(op.sfPath):
@@ -1558,31 +1617,26 @@ proc applyFsSystemFile*(ctx: FixtureContext;
     # digest mismatch raises `EProtocol` here, so we never truncate
     # the target with empty bytes when the source is bad.
     let desired = desiredFileContent(op)
-    let parent = parentDir(op.sfPath)
-    when defined(linux):
+    let parent = parentDir(target)
+    when defined(linux) or defined(macosx):
+      when defined(macosx):
+        # The macOS driver does not set `mode` or `group` (see
+        # `refuseUnsupportedHolding`).
+        refuseUnsupportedHolding(op)
       # The declared group is resolved before anything is written: a
       # missing group fails the operation with the file untouched.
       let gid = resolveGroupId(op)
       if parent.len > 0:
+        refuseUntrustedDirs(parent, systemFileTrustRoot(target), "fs.systemFile")
         createManagedDirs(parent, "fs.systemFile")
-      writeManagedFile(ctx.materialisationOf(op), op.sfPath, desired, 0o644,
+      writeManagedFile(ctx.materialisationOf(op), target, desired, 0o644,
                        "fs.systemFile",
                        exactMode = (if op.sfMode.len > 0:
                                       parseOctInt(op.sfMode) else: -1),
                        gid = gid)
     else:
       refuseUnsupportedHolding(op)
-      if parent.len > 0:
-        createDir(parent)
-      block:
-        var f: File
-        if not open(f, op.sfPath, fmWrite):
-          raiseProtocol("fs.systemFile cannot open " & op.sfPath)
-        try:
-          if desired.len > 0:
-            discard f.writeBuffer(unsafeAddr desired[0], desired.len)
-        finally:
-          close(f)
+      writeSystemFileWindows(target, desired)
     # Post-apply re-probe — see the contract comment above. It compares
     # what `observeFsSystemFile` covers: the content, and the declared
     # mode and group when there are any.

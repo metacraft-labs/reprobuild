@@ -1,0 +1,87 @@
+name: System file writes (Windows)
+
+# The `fs.systemFile` driver's Windows write path, on native Windows.
+#
+# `${PROGRAMDATA}` lets every local user create folders, so the elevated
+# write must never follow a junction or a symbolic link planted there, and
+# must never land under a folder an ordinary user can take over. The rules
+# themselves are tested on Linux (libs/repro_elevation/tests/
+# t_fs_system_file_writes_never_follow_links.nim); what only Windows can show
+# is that the driver's handle-relative NtCreateFile walk, its reparse-point
+# refusal, its DACL reading and its rename-over-the-leaf really do that on
+# NTFS. tests/windows/windows_fs_system_file_never_follows_reparse_points.nim
+# plants each attack and checks the file behind the link is untouched.
+#
+# WHY IT IS ITS OWN WORKFLOW AND NOT A JOB IN ci.yml: ci.yml cancels its own
+# older runs on a saturated pool, and a Windows-only change should be
+# dispatchable on a branch without queuing the Linux suite with it (the same
+# reasoning as agent-protocol-windows.yml).
+#
+# The case that plants a file symbolic link needs SeCreateSymbolicLinkPrivilege,
+# which an administrator holds; the job prints `whoami /groups` first so a
+# failure there names the identity it ran as.
+
+# Path-filtered on every branch but `agents` (which has no CI by policy).
+on:
+  push:
+    branches-ignore: [agents]
+    paths:
+      - libs/repro_elevation/src/repro_elevation/windows_nofollow_write.nim
+      - libs/repro_elevation/src/repro_elevation/nofollow_write.nim
+      - libs/repro_elevation/src/repro_elevation/posix_system_driver.nim
+      - tests/windows/windows_fs_system_file_never_follows_reparse_points.nim
+      - .github/workflows/system-file-writes-windows.yml
+  pull_request:
+    branches-ignore: [agents]
+    paths:
+      - libs/repro_elevation/src/repro_elevation/windows_nofollow_write.nim
+      - libs/repro_elevation/src/repro_elevation/nofollow_write.nim
+      - libs/repro_elevation/src/repro_elevation/posix_system_driver.nim
+      - tests/windows/windows_fs_system_file_never_follows_reparse_points.nim
+      - .github/workflows/system-file-writes-windows.yml
+  workflow_dispatch:
+
+concurrency:
+  group: system-file-writes-windows-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows:
+    name: System file writes | windows-x64
+    runs-on: [self-hosted, windows, x64]    # CIP-5: DIY-Windows (env.ps1) -> eph-win-x64
+    # A cold DIY-Windows environment setup alone took 45 minutes
+    # (run 45497839959, attempt 1, cancelled at 60).
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Job identity
+        shell: pwsh
+        run: whoami /user /groups
+
+      - name: Mint installation token for Windows dev environment
+        id: ci_token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.CI_TOKEN_PROVIDER_APP_ID }}
+          private-key: ${{ secrets.CI_TOKEN_PROVIDER_PRIVATE_KEY }}
+          owner: metacraft-labs
+
+      - name: Setup Windows dev environment
+        uses: metacraft-labs/metacraft-github-actions/setup-dev-env@dev
+        with:
+          env-flavor: windows-diy
+          gh-token: ${{ steps.ci_token.outputs.token }}
+
+      - name: The driver refuses every planted link and untrusted folder
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force build/test-bin | Out-Null
+          nim c -r --threads:on --hints:off --warnings:off --nimcache:build/nimcache/windows_fs_system_file_never_follows_reparse_points --out:build/test-bin/windows_fs_system_file_never_follows_reparse_points.exe tests/windows/windows_fs_system_file_never_follows_reparse_points.nim
+          if ($LASTEXITCODE -ne 0) { throw "windows_fs_system_file_never_follows_reparse_points failed with exit code $LASTEXITCODE" }
+
+      - name: The shared trust rules
+        shell: pwsh
+        run: |
+          nim c -r --threads:on --hints:off --warnings:off --nimcache:build/nimcache/t_fs_system_file_writes_never_follow_links --out:build/test-bin/t_fs_system_file_writes_never_follow_links.exe libs/repro_elevation/tests/t_fs_system_file_writes_never_follow_links.nim
+          if ($LASTEXITCODE -ne 0) { throw "t_fs_system_file_writes_never_follow_links failed with exit code $LASTEXITCODE" }
