@@ -257,9 +257,7 @@ suite "committed root provenance validation":
     withFixture("malformed-v3"):
       refresh(project)
       let generated = readFile(project / "repro.lock")
-      var depsLine = ""
-      for line in generated.splitLines():
-        if line.startsWith("deps = ["): depsLine = line
+      let depsLine = lockStatementSource(generated, "deps")
       doAssert depsLine.len > 0
       for entries in [
           "{ name = \"same\", coord_kind = \"vcs\" }, { name = \"same\", coord_kind = \"vcs\" }",

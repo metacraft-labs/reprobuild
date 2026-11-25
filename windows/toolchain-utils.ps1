@@ -108,26 +108,38 @@ function Assert-PeMachine {
   }
 }
 
-function Get-PeImportNames {
-  ## The DLL names in a PE image's import directory (data directory 1), in
-  ## table order. Delay-load imports are not included: nothing in the release
-  ## closure delay-loads. PE/COFF layout:
-  ## https://learn.microsoft.com/windows/win32/debug/pe-format#the-idata-section
-  param([Parameter(Mandatory = $true)][string]$Path)
+function Read-PeImportDirectoryNames {
+  ## The DLL names one of a PE image's import directories names, in table
+  ## order. $Directory is the data-directory index: 1 for the import table,
+  ## 13 for the delay-load import table. PE/COFF layout:
+  ## https://learn.microsoft.com/windows/win32/debug/pe-format ("Optional
+  ## Header Data Directories", "The .idata Section", "Delay-Load Import
+  ## Tables"). An import descriptor is 20 bytes with the name RVA at +12; a
+  ## delay-load descriptor is 32 bytes with its attributes at +0 and the name
+  ## at +4. Each table ends at an all-zero descriptor, here its zero name.
+  param(
+    [Parameter(Mandatory = $true)][string]$Path,
+    [Parameter(Mandatory = $true)][ValidateSet(1, 13)][int]$Directory
+  )
 
   $bytes = [IO.File]::ReadAllBytes((Resolve-Path -LiteralPath $Path).ProviderPath)
   $pe = [BitConverter]::ToInt32($bytes, 0x3c)
-  if ([BitConverter]::ToUInt32($bytes, $pe) -ne 0x4550) { throw "Not a PE image: $Path" }
+  if ($pe -lt 0 -or $pe + 24 -gt $bytes.Length -or [BitConverter]::ToUInt32($bytes, $pe) -ne 0x4550) {
+    throw "Not a PE image: $Path"
+  }
   $sections = [BitConverter]::ToUInt16($bytes, $pe + 6)
   $optSize = [BitConverter]::ToUInt16($bytes, $pe + 20)
   $opt = $pe + 24
-  $magic = [BitConverter]::ToUInt16($bytes, $opt)
-  $dataDirs = $opt + $(if ($magic -eq 0x20b) { 112 } else { 96 })
-  $importRva = [BitConverter]::ToUInt32($bytes, $dataDirs + 8)
-  if ($importRva -eq 0) { return @() }
+  $pe32Plus = [BitConverter]::ToUInt16($bytes, $opt) -eq 0x20b
+  $imageBase = if ($pe32Plus) { [BitConverter]::ToUInt64($bytes, $opt + 24) } else { [uint64][BitConverter]::ToUInt32($bytes, $opt + 28) }
+  $dirCount = [BitConverter]::ToUInt32($bytes, $opt + $(if ($pe32Plus) { 108 } else { 92 }))
+  if ($Directory -ge $dirCount) { return @() }
+  $dataDirs = $opt + $(if ($pe32Plus) { 112 } else { 96 })
+  $tableRva = [BitConverter]::ToUInt32($bytes, $dataDirs + 8 * $Directory)
+  if ($tableRva -eq 0) { return @() }
   $sectionTable = $opt + $optSize
   $toOffset = {
-    param([uint32]$rva)
+    param([uint64]$rva)
     for ($i = 0; $i -lt $sections; $i++) {
       $h = $sectionTable + $i * 40
       $virtSize = [BitConverter]::ToUInt32($bytes, $h + 8)
@@ -139,36 +151,72 @@ function Get-PeImportNames {
     }
     return -1
   }
+  $stride = if ($Directory -eq 13) { 32 } else { 20 }
+  $nameField = if ($Directory -eq 13) { 4 } else { 12 }
   $names = New-Object System.Collections.Generic.List[string]
-  $entry = & $toOffset $importRva
-  while ($entry -ge 0 -and $entry + 20 -le $bytes.Length) {
-    $nameRva = [BitConverter]::ToUInt32($bytes, $entry + 12)
-    if ($nameRva -eq 0) { break }
-    $at = & $toOffset $nameRva
+  $entry = & $toOffset $tableRva
+  if ($entry -lt 0) { throw "Import directory $Directory outside every section: $Path" }
+  while ($entry + $stride -le $bytes.Length) {
+    $nameRef = [uint64][BitConverter]::ToUInt32($bytes, $entry + $nameField)
+    if ($nameRef -eq 0) { break }
+    # A delay-load descriptor whose attributes lack bit 0 is the old form,
+    # whose fields are virtual addresses rather than RVAs.
+    if ($Directory -eq 13 -and ([BitConverter]::ToUInt32($bytes, $entry) -band 1) -eq 0) {
+      if ($nameRef -lt $imageBase) { throw "Delay-load name below the image base: $Path" }
+      $nameRef -= $imageBase
+    }
+    $at = & $toOffset $nameRef
     if ($at -lt 0) { throw "Import name outside every section: $Path" }
     $end = [Array]::IndexOf($bytes, [byte]0, $at)
+    if ($end -lt 0) { throw "Unterminated import name: $Path" }
     $names.Add([Text.Encoding]::ASCII.GetString($bytes, $at, $end - $at))
-    $entry += 20
+    $entry += $stride
   }
   # Not `,$names`: a wrapped array would iterate as ONE element in a caller's
   # foreach, and the closure audit would check nothing.
   return $names.ToArray()
 }
 
+function Get-PeImportNames {
+  ## The DLL names in a PE image's import table (data directory 1).
+  param([Parameter(Mandatory = $true)][string]$Path)
+  return Read-PeImportDirectoryNames -Path $Path -Directory 1
+}
+
+function Get-PeDelayImportNames {
+  ## The DLL names in a PE image's delay-load import table (data directory
+  ## 13). The loader resolves these on first call instead of at start-up, so
+  ## a missing one passes a launch smoke test and fails later, in the field.
+  param([Parameter(Mandatory = $true)][string]$Path)
+  return Read-PeImportDirectoryNames -Path $Path -Directory 13
+}
+
 function Assert-WindowsDllClosure {
-  ## The release closure audit (reprobuild-pm Distribution-And-Packaging.md
-  ## §7.1, W5): every DLL an image in $BinDir imports, transitively, is either
-  ## in $BinDir and of the leg's machine, or an operating-system DLL (an
-  ## api-ms-win-*/ext-ms-win-* API set, or a file in System32). Anything else
-  ## is a DLL the archive would need and does not carry. Throws listing every
-  ## violation.
+  ## The release closure audit of the windows-aarch64 leg: every DLL an image
+  ## in $BinDir imports, through its import table or its delay-load import
+  ## table, is either in $BinDir or an operating-system DLL (an
+  ## api-ms-win-*/ext-ms-win-* API set, or a file in $SystemDir). Every image
+  ## in $BinDir is itself checked, so a DLL resolved from $BinDir has its own
+  ## imports audited too, which makes the walk transitive; and every image must
+  ## be of the leg's machine ($Arch). Anything else is a DLL the archive would
+  ## need and does not carry, or carries for the wrong machine. Throws listing
+  ## every violation. A $BinDir with no image at all is refused: an audit that
+  ## checked nothing must not pass.
+  ##
+  ## $SystemDir defaults to the host's System32. Tests pass a stand-in.
   param(
     [Parameter(Mandatory = $true)][string]$BinDir,
-    [Parameter(Mandatory = $true)][string]$Arch
+    [Parameter(Mandatory = $true)][string]$Arch,
+    [string]$SystemDir = ""
   )
-  $system32 = Join-Path $env:SystemRoot "System32"
+  if ([string]::IsNullOrEmpty($SystemDir)) {
+    if ([string]::IsNullOrEmpty($env:SystemRoot)) { throw "closure audit: no -SystemDir and no SystemRoot to find System32 in." }
+    $SystemDir = Join-Path $env:SystemRoot "System32"
+  }
   $violations = New-Object System.Collections.Generic.List[string]
+  $systemUsed = New-Object 'System.Collections.Generic.SortedSet[string]' ([StringComparer]::OrdinalIgnoreCase)
   $images = @(Get-ChildItem -LiteralPath $BinDir -File | Where-Object { $_.Extension -in @('.exe', '.dll') })
+  if ($images.Count -eq 0) { throw "closure audit failed for ${BinDir}: no .exe or .dll image to audit" }
   foreach ($image in $images) {
     try {
       Assert-PeMachine -Path $image.FullName -Arch $Arch -Consumer "closure-audit"
@@ -176,18 +224,26 @@ function Assert-WindowsDllClosure {
       $violations.Add($_.Exception.Message)
       continue
     }
-    foreach ($import in (Get-PeImportNames -Path $image.FullName)) {
+    $refs = @()
+    $refs += @(Get-PeImportNames -Path $image.FullName | ForEach-Object { @{ name = $_; verb = "imports" } })
+    $refs += @(Get-PeDelayImportNames -Path $image.FullName | ForEach-Object { @{ name = $_; verb = "delay-loads" } })
+    foreach ($ref in $refs) {
+      $import = $ref.name
       if ($import -match '^(?i)(api|ext)-ms-win-') { continue }
       $local = Join-Path $BinDir $import
       if (Test-Path -LiteralPath $local -PathType Leaf) { continue }   # its machine is checked as an image
-      if (Test-Path -LiteralPath (Join-Path $system32 $import) -PathType Leaf) { continue }
-      $violations.Add("$($image.Name) imports $import, which is neither in bin/ nor an operating-system DLL")
+      if (Test-Path -LiteralPath (Join-Path $SystemDir $import) -PathType Leaf) {
+        [void]$systemUsed.Add($import)
+        continue
+      }
+      $violations.Add("$($image.Name) $($ref.verb) $import, which is neither in bin/ nor an operating-system DLL")
     }
   }
   if ($violations.Count -ne 0) {
     throw ("closure audit failed for $BinDir`n  " + ($violations -join "`n  "))
   }
   Write-Host "closure audit: $($images.Count) image(s) in $BinDir, every import resolved"
+  Write-Host "closure audit: operating-system DLLs relied on: $(@($systemUsed) -join ', ')"
 }
 
 function Get-WindowsArchRuntimeNames {

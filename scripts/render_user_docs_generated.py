@@ -141,6 +141,7 @@ HEALTH_CHECK_SPECS: list[tuple[str, str, str]] = [
     ("repository-identities", "Compares declared repository URLs against canonical forge identities to spot renames or redirects.", "No"),
     ("vcs-hooks", "Verifies that managed Git hooks are installed, unshadowed, worktree-safe and contract-compatible across participating repositories.", "Yes (missing, shadowed, path-unsafe)"),
     ("chained-hooks", "Checks that any chained `<hook>.repro-local` scripts name interpreters and executables that exist.", "No"),
+    ("hook-configs", "Finds generated pre-commit or prek hooks, in a hook slot or chained behind a managed hook, whose configuration file is gone, so the hook refuses every fire.", "No"),
     ("hook-interpreter", "Verifies that shells on this host resolve the same `repro` binary that wrote the managed Git hooks.", "No"),
     ("certificate-propagation", "Reports certificate store roots, linked library version, `pre-push` carrier status and policy configuration.", "No"),
     ("lock-writer", "Reads the `post-commit` lock-writer trace to surface silent lock-refresh refusals.", "No"),

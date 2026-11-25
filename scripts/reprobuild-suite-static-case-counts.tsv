@@ -795,6 +795,7 @@ libs/repro_local_store/tests/t_win_store_gc_refuses_referenced_entry.nim	nim	9
 libs/repro_local_store/tests/t_win_store_hardlink_cap_falls_back_per_file.nim	nim	7
 libs/repro_local_store/tests/t_write_sequence_never_falls_behind_a_surviving_record.nim	nim	14
 libs/repro_lock/tests/t_a_lock_value_spread_over_lines_reads_whole.nim	nim	7
+libs/repro_lock/tests/t_a_lock_writes_one_dependency_per_line.nim	nim	5
 libs/repro_lock/tests/t_a_store_pin_carries_its_archive_through_the_lock.nim	nim	5
 libs/repro_lock/tests/t_catalog_import_pins.nim	nim	5
 libs/repro_lock/tests/t_lock_identity_feature_change_differs.nim	nim	3
@@ -2597,6 +2598,7 @@ tests/integration/t_r2_iso_boot.nim	nim	2
 tests/integration/t_r9_systemd_boot.nim	nim	2
 tests/integration/t_recertify_is_noop_when_no_executed_function_changed.nim	nim	1
 tests/integration/t_recipe_compile_per_computation_dirs.nim	nim	1
+tests/integration/t_recipe_compile_time_tools_come_from_the_declared_path.nim	nim	1
 tests/integration/t_recipe_compiles_do_not_record_the_host_shell.nim	nim	5
 tests/integration/t_recipe_imports_a_module_of_a_declared_package_by_name.nim	nim	1
 tests/integration/t_recipe_lock_consistency_refuses.nim	nim	4
@@ -2873,6 +2875,7 @@ tests/integration/t_unsatisfiable_floor_does_not_fall_through_to_path.nim	nim	6
 tests/integration/t_unsigned_or_wrong_key_certificate_is_rejected.nim	nim	1
 tests/integration/t_untracked_inputs_flag_read_set_and_strict.nim	nim	1
 tests/integration/t_user_docs_command_rows_carry_one_line_help.nim	nim	5
+tests/integration/t_user_docs_health_table_names_every_health_check.nim	nim	2
 tests/integration/t_uses_refuses_a_package_declared_for_another_platform.nim	nim	9
 tests/integration/t_uses_resolves_reprobuild_packages_interface.nim	nim	3
 tests/integration/t_uses_resolves_sqlite3_from_real_reprobuild_packages.nim	nim	3
@@ -2985,6 +2988,7 @@ tests/integration/test_cs_m12_editor_checks_repro_nim.nim	nim	4
 tests/integration/test_cs_m12_engine_modes_unchanged.nim	nim	4
 tests/integration/test_cs_m12_program_imports_repro_nim.nim	nim	6
 tests/integration/test_cs_m12_thin_import_cost.nim	nim	5
+tests/integration/test_cs_m14_idiomatic_program.nim	nim	6
 tests/integration/test_cs_m14_package_build_generates_completion_files.nim	nim	4
 tests/integration/test_cs_m14_repro_collects_tests_per_entry.nim	nim	6
 tests/integration/test_cs_m14_reprobuild_repro_nim_imports_thin.nim	nim	2
