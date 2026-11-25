@@ -169,8 +169,8 @@ require_count flake.nix 'codeTracerTraceFormatNimSrc = reprobuild.codeTracerTrac
 require_count flake.nix 'export CODETRACER_TRACE_FORMAT_NIM_SRC=${codeTracerTraceFormatNimSrc}' 1
 require_count "${package_nix}" 'CODETRACER_TRACE_FORMAT_NIM_SRC = codeTracerTraceFormatNimSrc;' 1
 require_count flake.nix 'CODETRACER_TRACE_FORMAT_NIM_SRC = codeTracerTraceFormatNimSrc;' 1
-require_count "${package_nix}" '--set-default CODETRACER_TRACE_FORMAT_NIM_SRC ${codeTracerTraceFormatNimSrc} \' 1
-require_count flake.nix 'CODETRACER_TRACE_FORMAT_NIM_SRC|${codeTracerTraceFormatNimSrc}' 1
+require_count "${package_nix}" '--set-default REPRO_ENGINE_CODETRACER_TRACE_FORMAT_NIM_SRC ${codeTracerTraceFormatNimSrc} \' 1
+require_count flake.nix 'REPRO_ENGINE_CODETRACER_TRACE_FORMAT_NIM_SRC|${codeTracerTraceFormatNimSrc}' 1
 require_count flake.nix '                                      ${ctTraceFormatSrc} \' 1
 
 # The incremental-test seam (``ct_incremental_adapter.nim``), for the same

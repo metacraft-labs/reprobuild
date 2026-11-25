@@ -669,9 +669,9 @@ type
   PathMeta* = tuple[kind: PathKind; uid: int; mode: int]
     ## What ``lstat(2)`` says of one path: its kind, owner and permission
     ## bits. ``pkMissing`` stands for any failure to read it.
-  PathProbe* = object
+  TraversalProbe* = object
     ## The metadata source of ``ownedTraversal``. The real one reads the
-    ## file system (``realPathProbe``); a test passes a table, because the
+    ## file system (``realTraversalProbe``); a test passes a table, because the
     ## metadata the walker refuses on -- a root-owned link into a directory
     ## an ordinary user may write -- is what an ordinary user cannot make.
     meta*: proc (path: string): PathMeta {.closure, gcsafe.}
@@ -682,7 +682,7 @@ const MaxTraversalLinks* = 40
   ## The links one resolution may follow, Linux's own bound (path_resolution(7):
   ## "a maximum of 40 symbolic links" per resolution, ``ELOOP`` beyond).
 
-proc realPathProbe*(): PathProbe =
+proc realTraversalProbe*(): TraversalProbe =
   ## ``lstat(2)`` and ``readlink(2)`` on the live file system.
   result.meta = proc (path: string): PathMeta {.closure, gcsafe.} =
     var st: Stat
@@ -695,7 +695,7 @@ proc realPathProbe*(): PathProbe =
   result.readlink = proc (path: string): string {.closure, gcsafe.} =
     try: expandSymlink(path) except OSError: ""
 
-proc ownedTraversal*(path: string; probe = realPathProbe()):
+proc ownedTraversal*(path: string; probe = realTraversalProbe()):
     tuple[problem, resolved: string] =
   ## Resolve ``path`` one component at a time, as the kernel does
   ## (path_resolution(7)), and say why some directory the resolution

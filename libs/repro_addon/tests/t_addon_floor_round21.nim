@@ -23,13 +23,14 @@
 ##   filter's only with SIGSYS.
 ##
 ## Falsifying builds, red here: ``boot-hold-dash-prefix``,
-## ``boot-hold-ls-failure-ignored``, ``boot-hold-clear-record-two-step``,
+## ``boot-hold-ls-failure-ignored``, ``boot-hold-list-write-failure-ignored``
+## (round 22), ``boot-hold-clear-record-two-step``,
 ## ``boot-hold-triggers-before-record``,
 ## ``environment-file-traversal-lexical``, ``fetch-unit-without-mdwe``.
 ##
 ## *Mocking.* The boot-hold script runs in ``boot_hold_sandbox`` (stand-ins
 ## for ``systemctl``, ``sleep`` and, in its case, ``ls``; see there). The
-## traversal walker is given a metadata table (``PathProbe``) instead of
+## traversal walker is given a metadata table (``TraversalProbe``) instead of
 ## the file system: the metadata it must refuse -- a root-owned link into a
 ## directory another user may write, root-owned files under it -- cannot be
 ## made by the unprivileged user the tests run as. The same production
@@ -79,6 +80,21 @@ suite "A9 review round 21: the boot-hold unit has no `-` (decision 172, 2026-11-
     check "nothing to hold" notin o
     check "systemd reloaded" notin o
     check not dirExists(s.root / "x.socket.d")
+  test "a line of the list that cannot be written fails closed (round 22)":
+    let s = setup()
+    defer: removeDir(s.tmp)
+    # The last entry is no activator, so the loop's own status would be 0.
+    for n in ["x.socket", "zz.service"]:
+      writeFile(s.etc / n, "[Unit]\n")
+    createDir(parentDir(s.written))
+    # Every write to /dev/full fails (ENOSPC). Under the falsifying build
+    # the script goes on to read it, which never ends: bounded.
+    createSymlink("/dev/full", parentDir(s.written) / "boot-hold-list")
+    let o = run(s, limitSec = 20)
+    checkpoint o
+    check "cannot list the units to hold" in o
+    check "SLEEP 120" in o
+    check "nothing to hold" notin o
   test "the same listing that succeeds still holds the activators":
     let s = setup()
     defer: removeDir(s.tmp)
@@ -165,7 +181,7 @@ proc link(f: var FakeFs; p, target: string; uid = 0) =
   f.meta[p] = (pkLink, uid, 0o777)
   f.links[p] = target
 
-proc probe(f: FakeFs): PathProbe =
+proc probe(f: FakeFs): TraversalProbe =
   let m = f.meta
   let l = f.links
   result.meta = proc (p: string): PathMeta {.closure, gcsafe.} =
@@ -251,11 +267,7 @@ proc ownUnits(): seq[(string, string)] =
     if o.kind == ookUnit and o.unit.endsWith(".service"):
       result.add((o.unit, o.content))
 
-const GateUnits = ["repro-agent-apply.service", "repro-addon-reassert.service",
-  "repro-addon-boot-confirm.service", "repro-addon-secrets.service",
-  "repro-addon-store-verify.service", "repro-addon-boot-hold.service",
-  "repro-agent-fetch.service", "repro-addon-evidence.service"]
-  ## The units ``t_e2e_addon_confinement_settings_each_hold`` runs.
+# ``GateUnits`` is ``confinement_rows``': the gate's own list (round 22).
 
 suite "A9 review round 21: the confinement table (M1, M2, M3, L2, L4)":
   let units = ownUnits()
@@ -270,6 +282,13 @@ suite "A9 review round 21: the confinement table (M1, M2, M3, L2, L4)":
       check text.len > 0
       check missingSettings(u, text).len == 0
       checkpoint u & " lacks " & missingSettings(u, text).join(", ")
+  test "the gate's units are every service unit generation 0 renders but the egress check's":
+    # A unit added to generation 0 is in the gate, or named here as not.
+    const NotRun = ["repro-addon-egress-check.service"]
+    for (n, _) in units:
+      checkpoint n
+      check n in GateUnits or n in NotRun
+    for u in PrivilegedUnits: check u in GateUnits
   test "each reason not to set a setting names a unit the gate runs":
     for (u, k, why) in UnsetByDesign:
       check u in GateUnits
@@ -314,9 +333,18 @@ suite "A9 review round 21: the confinement table (M1, M2, M3, L2, L4)":
       check not rowApplies(row, unit("repro-agent-apply.service"), true).ok
     check found
   test "a kill is the filter's only with SIGSYS":
-    check parseOutcome("", "signal", "31").killed
-    check parseOutcome("", "core-dump", "31").killed
-    check not parseOutcome("", "signal", "15").killed
-    check not parseOutcome("", "signal", "9").killed
-    check not parseOutcome("", "signal").killed
-    check not heldOk(exBlocked, parseOutcome("", "signal", "11"))
+    check parseOutcome("", "x", "signal", "31").killed
+    check parseOutcome("", "x", "core-dump", "31").killed
+    check not parseOutcome("", "x", "signal", "15").killed
+    check not parseOutcome("", "x", "signal", "9").killed
+    check not parseOutcome("", "x", "signal").killed
+    check not heldOk(exBlocked, parseOutcome("", "x", "signal", "11"))
+  test "a line is the row's probe's only when it names that probe (round 22)":
+    # A setup step that failed prints its own name: neither blocked nor
+    # let through, so the pair is red whatever it says.
+    let setup = parseOutcome("A9PROBE mdwe-setup -1 12", "mdwe", "success")
+    check not setup.ran
+    check not heldOk(exBlocked, setup)
+    check not removedOk(exBlocked, parseOutcome("A9PROBE affinity-setup 0 0",
+                                                "affinity", "success"))
+    check parseOutcome("A9PROBE mdwe -1 1", "mdwe", "success").ran

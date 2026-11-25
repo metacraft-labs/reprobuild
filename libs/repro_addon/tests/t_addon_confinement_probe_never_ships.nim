@@ -61,12 +61,12 @@ suite "a copy keeps the unit's confinement":
       if rowApplies(row, apply, true).ok: inc ran
     check ran >= 20
   test "the outcome reader":
-    check heldOk(exBlocked, parseOutcome("A9PROBE mdwe -1 1", "success"))
-    check removedOk(exBlocked, parseOutcome("A9PROBE mdwe 0 0", "success"))
-    check heldOk(exBlocked, parseOutcome("", "signal", "31"))
-    check removedOk(exErrnoNumber, parseOutcome("", "signal", "31"))
-    check removedOk(exErrnoNumber, parseOutcome("", "core-dump", "31"))
-    check heldOk(exBlocked, parseOutcome("", "core-dump", "31"))
-    check not removedOk(exErrnoNumber, parseOutcome("A9PROBE filter -1 1", "success"))
-    check removedOk(exFilter, parseOutcome("A9PROBE filter -1 2", "success"))
-    check not heldOk(exFilter, parseOutcome("A9PROBE filter -1 2", "success"))
+    check heldOk(exBlocked, parseOutcome("A9PROBE mdwe -1 1", "mdwe", "success"))
+    check removedOk(exBlocked, parseOutcome("A9PROBE mdwe 0 0", "mdwe", "success"))
+    check heldOk(exBlocked, parseOutcome("", "x", "signal", "31"))
+    check removedOk(exErrnoNumber, parseOutcome("", "x", "signal", "31"))
+    check removedOk(exErrnoNumber, parseOutcome("", "x", "core-dump", "31"))
+    check heldOk(exBlocked, parseOutcome("", "x", "core-dump", "31"))
+    check not removedOk(exErrnoNumber, parseOutcome("A9PROBE filter -1 1", "filter", "success"))
+    check removedOk(exFilter, parseOutcome("A9PROBE filter -1 2", "filter", "success"))
+    check not heldOk(exFilter, parseOutcome("A9PROBE filter -1 2", "filter", "success"))
