@@ -59,7 +59,7 @@
 ## directory-write access (see the M19 suite's identical rule in
 ## ``t_workspace_post_commit_lock_refresh_is_best_effort``).
 
-import std/[json, os, osproc, sequtils, strutils, tempfiles, unittest]
+import std/[json, options, os, osproc, sequtils, strutils, tempfiles, unittest]
 
 when defined(posix):
   import std/posix
@@ -67,6 +67,7 @@ when defined(posix):
 import repro_test_support
 import repro_test_support/reasoned_skip
 import repro_workspace_manifests
+import repro_cli_support/post_commit_trace
 
 const
   NoGitReason = "git not on PATH; every case drives a real git workspace"
@@ -418,9 +419,14 @@ suite "lock-writer — health reports the post-commit writer's outcome":
       commitAndDispatch(fx, "two.txt")
       showTrace(fx)
       # Control: the REAL writer produced exactly the lines this case is
-      # about. Without it an ``ok`` below could be an empty trace.
+      # about. Without it an ``ok`` below could be an empty trace. Counted
+      # are the LOCK WRITER's lines only: each dispatch also spawns the
+      # detached eager cache push, which appends a ``cache-push-skipped``
+      # line (this fixture has no shared bare) whenever it gets to it. That
+      # line is not an outcome, and the row below must ignore it too.
       let outcomes = readFile(fx.tracePath).splitLines().filterIt(
-        it.split(' ').len > 1).mapIt(it.split(' ')[1])
+        it.split(' ').len > 1).mapIt(it.split(' ')[1]).filterIt(
+        parsePostCommitOutcomeTag(it).isSome)
       check outcomes == @["no-manifest-record", "no-manifest-record"]
 
       let row = lockWriterRow(fx)
