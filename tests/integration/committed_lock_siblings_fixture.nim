@@ -26,6 +26,7 @@ import std/[os, osproc, strutils, tempfiles, unittest]
 
 import repro_test_support
 import repro_test_support/recipe_dependencies
+import repro_lock
 import repro_workspace_manifests
 
 proc q*(value: string): string = quoteShell(value)
@@ -166,7 +167,24 @@ proc depEntry*(lockBody, name: string): string =
   if open < 0 or close < 0: return ""
   lockBody[open .. close]
 
+proc oneLineDepsLayout*(body: string): string =
+  ## ``body`` with its ``deps`` statement laid out on ONE line, the layout
+  ## every committed lock had until the writer moved to one record per line.
+  ## For tests
+  ## that need a hand-edited or legacy layout to start from.
+  let statement = lockStatementSource(body, "deps")
+  var records: seq[string]
+  for line in statement.splitLines():
+    let l = line.strip().strip(chars = {','})
+    if l.startsWith("{"): records.add(l)
+  if records.len == 0: body
+  else: body.replace(statement, "deps = [" & records.join(", ") & "]")
+
 proc linePrefixed*(body, prefix: string): string =
+  ## The first line of ``body`` starting with ``prefix``. A ``deps = ``
+  ## prefix names the whole ``deps`` STATEMENT, which the writer lays out one
+  ## record per line.
+  if prefix.startsWith("deps = "): return lockStatementSource(body, "deps")
   for line in body.splitLines():
     if line.startsWith(prefix): return line
   ""

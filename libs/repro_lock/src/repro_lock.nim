@@ -27,7 +27,11 @@
 ## inputs_digest = "fnv1a64:0123abcd..."
 ## variants = [{ name = "compiler", value = "clang" }]
 ## packages = [{ name = "nim", version = "2.2.0", source = "nim", selection = "selected" }]
-## deps = [{ name = "app", self = "true", coord_kind = "vcs", url = "...", revision = "<sha>", integrity = "git-sha1:<sha>", ... }, { name = "lib", coord_kind = "vcs", ... }]
+## deps = [
+##   { name = "app", self = "true", coord_kind = "vcs", url = "...", revision = "<sha>", integrity = "git-sha1:<sha>", ... },
+##   # (comment: the self entry changes on every landing, so it is set apart)
+##   { name = "lib", coord_kind = "vcs", ... }
+## ]
 ## ```
 ##
 ## **There is exactly one schema every writer emits, and it is v3.**
@@ -1044,6 +1048,45 @@ proc serializeDepInline(d: LockedDep): string =
     result.add(", catalog = \"" & tomlEscape(d.catalog) & "\"")
   result.add(" }")
 
+const SelfDepSeparatorComment* =
+  "# The entry above is this repository itself; its revision changes on " &
+  "every landing,\n  # so it is kept apart from the pins below and a merge " &
+  "that moves one of them never touches it."
+
+proc serializeDepsStatement(sorted: openArray[LockedDep]): string =
+  ## The ``deps`` statement: one record per physical line, the lock's OWN
+  ## entry first and set apart from the pins by a comment line.
+  ##
+  ## Why: the self entry's revision is rewritten by every landing. When the
+  ## whole array sat on one line, every landing touched the line that also
+  ## carried every pin, so any two branches that changed that line -- one
+  ## moving a pin, one just landing -- conflicted, and git cannot merge a
+  ## single line by parts. With one record per line, a pin change touches only its own
+  ## line; the comment line is an unchanged line between the self record and
+  ## the first pin, so git does not treat their edits as adjacent. The
+  ## reader accepts this layout (``tomlStatements``: comments and newlines
+  ## inside an array are part of the statement).
+  ## ``sorted`` is sorted by name; the self entry is moved first.
+  if sorted.len == 0: return "deps = []"
+  var records: seq[string]
+  var selfCount = 0
+  for d in sorted:
+    if isSelfLockedDep(d):
+      records.add("  " & serializeDepInline(d) & ",")
+      inc selfCount
+  if selfCount > 0 and selfCount < sorted.len:
+    records.add("  " & SelfDepSeparatorComment)
+  var pins: seq[string]
+  for d in sorted:
+    if not isSelfLockedDep(d): pins.add("  " & serializeDepInline(d))
+  # A comma after every record but the last, so a pin appended or removed at
+  # the end changes two lines at most.
+  if selfCount > 0 and pins.len == 0:
+    records[^1].removeSuffix(',')
+  for i, r in pins:
+    records.add(if i < pins.high: r & "," else: r)
+  "deps = [\n" & records.join("\n") & "\n]"
+
 proc serializeLockedDependencies*(ld: LockedDependencies): string =
   ## Render the unified model to canonical ``reprobuild.solved-graph-lock.v3``
   ## TOML. The solved-graph payload is preserved verbatim as a sub-part;
@@ -1094,11 +1137,8 @@ proc serializeLockedDependencies*(ld: LockedDependencies): string =
   var sorted = ld.deps
   sorted.sort(proc(a, b: LockedDep): int =
     cmp(a.name, b.name))
-  result.add("deps = [")
-  for i, d in sorted:
-    if i > 0: result.add(", ")
-    result.add(serializeDepInline(d))
-  result.add("]\n")
+  result.add(serializeDepsStatement(sorted))
+  result.add("\n")
   # provisioning — M7 D2's locked realizations. Emitted ONLY when there is
   # one, so a lock without them is byte-identical to what this writer
   # produced before they existed. Raises ``LockedRealizationError`` on a

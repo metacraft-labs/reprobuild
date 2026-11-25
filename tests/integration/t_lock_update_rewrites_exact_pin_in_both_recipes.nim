@@ -226,11 +226,23 @@ proc appFiles(fx: Nf2Fixture): AppFiles =
     flakeLock: readOr(lockPath(fx)), reproNim: readOr(fx.app / "repro.nim"),
     reproLock: readOr(fx.app / "repro.lock"), tree: indexTree(fx))
 
+proc oneLineDepsLayout(body: string): string =
+  ## ``body`` with its ``deps`` statement on ONE line, the layout every
+  ## committed lock had until the writer moved to one record per line.
+  ## The
+  ## continuation-line case below starts from it. The same helper, for the
+  ## other fixture, is in committed_lock_siblings_fixture.nim.
+  let statement = lockStatementSource(body, "deps")
+  var records: seq[string]
+  for line in statement.splitLines():
+    let l = line.strip().strip(chars = {','})
+    if l.startsWith("{"): records.add(l)
+  if records.len == 0: body
+  else: body.replace(statement, "deps = [" & records.join(", ") & "]")
+
 proc depLineOf(lockText: string): string =
-  ## The ``deps = [...]`` line of a committed lock, or "".
-  for line in lockText.splitLines():
-    if line.startsWith("deps = ["): return line
-  ""
+  ## The ``deps = [...]`` statement of a committed lock, or "".
+  lockStatementSource(lockText, "deps")
 
 proc asRewritten(lockText: string): string =
   ## ``lockText`` as a partial lock writer leaves it once it rewrites the
@@ -238,15 +250,9 @@ proc asRewritten(lockText: string): string =
   ## ``path``, the self entry marked) and the schema tagged v3 — the rest of
   ## the document byte for byte. The fixture commits a v2 lock, so the first
   ## write migrates it; that is the documented behaviour, not churn.
-  var depsLine = ""
-  for line in serializeLockedDependencies(
-      parseLockedDependencies(lockText)).splitLines():
-    if line.startsWith("deps = ["): depsLine = line
-  result = lockText
-  for line in lockText.splitLines():
-    if line.startsWith("deps = ["):
-      result = result.replace(line, depsLine)
-      break
+  let depsLine = lockStatementSource(
+    serializeLockedDependencies(parseLockedDependencies(lockText)), "deps")
+  result = lockText.replace(lockStatementSource(lockText, "deps"), depsLine)
   result = result.replace("schema = \"" & SolvedGraphLockSchemaV2 & "\"",
     "schema = \"" & SolvedGraphLockSchemaV3 & "\"")
 
@@ -709,7 +715,7 @@ suite "HL-11 M4: repro lock update":
       checkpoint(locked.output)
       check locked.code == 0
       writeAppReproLock(fx, betaSeed)
-      let canonical = readFile(fx.app / "repro.lock")
+      let canonical = oneLineDepsLayout(readFile(fx.app / "repro.lock"))
       let line = depLineOf(canonical)
       let spreadDeps =
         line.replace("}, { name = \"beta\"", "}\n, { name = \"beta\"")

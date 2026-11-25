@@ -3408,3 +3408,21 @@ suite "a secret put is a switch for the carried-state check (§13 decision 190)"
     # Control: nothing to judge, nothing reloaded.
     check secretPutLiveProblems([], p, rootShow, proc () = inc reloads).len == 0
     check reloads == 1
+
+  test "decision 190: a put judges its consumers in the composed profile, own and user":
+    # Falsifier: secret-put-user-profile-only. A credential consumer
+    # starts repro-addon-secrets.service, which only the add-on's own
+    # profile defines: in the user profile alone it reaches everything and
+    # is never judged (the first measurement at a491dae2cc).
+    let (root, d) = installed15("r15-put-compose")
+    let user = "secrets.secretFile {\n  service = \"a13p\"\n  name = \"token\"\n}\n" &
+      unit("a13p.service", "[Service]\nDynamicUser=yes\nNoNewPrivileges=yes\n" &
+        "ExecStart=/bin/sleep infinity\n", "  credentials = [\"token\"]\n" &
+        "  floorExceptions = [\"serviceFloor: the decision-190 probe\"]\n")
+    let own = unit("repro-addon-secrets.service",
+      "[Service]\nType=oneshot\nExecStart=/bin/true\n")
+    let composed = composedLiveProfile(own, user)
+    checkpoint $liveReachUnits(composed, d, root)
+    check "a13p.service" in liveReachUnits(composed, d, root)
+    # Control: the user profile alone leaves the consumer unjudged.
+    check "a13p.service" notin liveReachUnits(composedLiveProfile("", user), d, root)

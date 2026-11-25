@@ -136,7 +136,7 @@ suite "a committed lock's bytes do not depend on remote-tracking refs":
       # THE PROPERTY: the same pins are the same bytes.
       check lock1 == lock2
       # No pin records a branch at all.
-      check "ref = " notin linePrefixed(lock1, "deps = [")
+      check "ref = " notin linePrefixed(lock1, "deps = ")
 
       # Publishing lib-c changes no pinned commit, so it changes no byte:
       # neither in the clone that fetched the publication nor in the one

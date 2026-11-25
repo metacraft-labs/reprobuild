@@ -64360,12 +64360,10 @@ type
     dirty: bool
 
 proc committedLockDepsLine(ld: LockedDependencies): string =
-  ## The ``deps = [...]`` line ``serializeLockedDependencies`` writes for
-  ## ``ld``. Splicing only this line into the existing document is what keeps
+  ## The ``deps = [...]`` statement (one record per line) that
+  ## ``serializeLockedDependencies`` writes for ``ld``. Splicing only this line into the existing document is what keeps
   ## every other byte — the solve — identical (§13.3 "No solver").
-  for line in serializeLockedDependencies(ld).splitLines():
-    if line.startsWith("deps = ["): return line
-  ""
+  lockStatementSource(serializeLockedDependencies(ld), "deps")
 
 proc splicedCommittedLockDeps(text, originalDeps, depsLine: string):
     string =
