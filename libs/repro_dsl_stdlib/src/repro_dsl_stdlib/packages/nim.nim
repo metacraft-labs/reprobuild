@@ -406,6 +406,11 @@ package nim:
         # graph edge (the ``test-fixtures`` collection in ``repro.nim``)
         # instead of a per-test runtime ``nim c --app:lib`` shell-out.
         boolFlag appLib is bool, alias = "--app:lib"
+        # ``--app:staticlib`` produces a static archive instead:
+        # ``nim_library`` for a library whose ``api:`` block declares
+        # ``linkKind static`` (From-Source-Build-Recipes.md, the ``api:``
+        # block's ``linkKind`` field).
+        boolFlag appStaticLib is bool, alias = "--app:staticlib"
         # The user's configuration ($XDG_CONFIG_HOME/nim) is no source of
         # the tree: an edge that must not depend on it skips it.
         boolFlag skipUserCfg is bool, alias = "--skipUserCfg"
