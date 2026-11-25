@@ -668,8 +668,34 @@ registers nim-entrypoints' `describeProgram` is asked for candidates through
 `--entrypoint=complete`, and any other program through clispec's
 `__complete`. The compile is the one whose `--out:` file is named after the
 executable's binary; two such compiles in one package are refused. An
-executable no Nim compile builds gets no scripts. The paths do not depend on
-`--target`, so a cross build writes the same files as a native one.
+executable no Nim compile builds gets no scripts. Under
+`repro build --target=<triple>` both paths are under `build@<triple>/`
+instead of `build/` (`build@<triple>/completions/<binary>/`), as the
+target's compile outputs are, so a cross build and a native build never
+write each other's files.
+
+#### In the packages the packaging layer builds
+
+The packaging producers (`debPackage`, `rpmPackage`, `archPackage`,
+`tarballPackage`, `appImagePackage` and `installedPrefix`) install these
+scripts on their own, for every executable component built by such a
+compile; the recipe declares nothing for them. The scripts are named after,
+and complete, the name the package installs the executable under. `<p>`
+below is that name:
+
+| Format | Bash | Zsh | Fish |
+|---|---|---|---|
+| `.deb` | `/usr/share/bash-completion/completions/<p>` | `/usr/share/zsh/vendor-completions/_<p>` | `/usr/share/fish/vendor_completions.d/<p>.fish` |
+| `.rpm`, Arch | `/usr/share/bash-completion/completions/<p>` | `/usr/share/zsh/site-functions/_<p>` | `/usr/share/fish/vendor_completions.d/<p>.fish` |
+| tarball, installed prefix | `<prefix>/share/bash-completion/completions/<p>` | `<prefix>/share/zsh/site-functions/_<p>` | `<prefix>/share/fish/vendor_completions.d/<p>.fish` |
+| AppImage | `<prefix>/share/bash-completion/completions/<p>` inside the image | `<prefix>/share/zsh/site-functions/_<p>` | `<prefix>/share/fish/vendor_completions.d/<p>.fish` |
+
+The native packages use the system directories whatever the distribution's
+prefix, because those are where the distribution's shells look. No Linux
+format carries the PowerShell script. A package built for another machine
+gets the same files, since the program is never run. To ship none, set
+`omitShellCompletion = true` on the `Distribution` (or on the
+`InstalledPrefixSpec`).
 
 ## Profiles
 

@@ -2434,7 +2434,7 @@ tests/integration/t_membership_model_fork_upstream_remote_alignment.nim	nim	2
 tests/integration/t_membership_model_resolves_sets_and_prefixes.nim	nim	8
 tests/integration/t_membership_model_retired_names_fail_as_unknown.nim	nim	5
 tests/integration/t_membership_model_schemas_round_trip.nim	nim	6
-tests/integration/t_membership_model_sets_cli.nim	nim	7
+tests/integration/t_membership_model_sets_cli.nim	nim	8
 tests/integration/t_membership_model_templates_scaffold_sets.nim	nim	7
 tests/integration/t_membership_push_scope_is_the_pushed_range.nim	nim	5
 tests/integration/t_membership_repo_push_anchors_no_foreign_lock_record.nim	nim	1
@@ -2980,6 +2980,7 @@ tests/integration/test_cs_m14_package_build_generates_completion_files.nim	nim	4
 tests/integration/test_cs_m14_repro_collects_tests_per_entry.nim	nim	6
 tests/integration/test_cs_m14_reprobuild_repro_nim_imports_thin.nim	nim	2
 tests/integration/test_cs_m14_shim_answers_tests_entry.nim	nim	2
+tests/integration/test_cs_m8d_generated_packages_add_completion.nim	nim	4
 tests/integration/test_dev_env_local_flake_root.py	python	3
 tests/integration/test_nix_daemon_cache.py	python	3
 tests/test_dev_env_m9_policy.py	python	11

@@ -32638,7 +32638,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g15",
+    group: "t_group_tests_integration_g14",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_shorthand_equals_to.nim",
@@ -33562,7 +33562,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g16",
+    group: "t_group_tests_integration_g15",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_tdx_agent_backend.nim",
@@ -34342,7 +34342,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g17",
+    group: "t_group_tests_integration_g16",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_v3_artifact_refused_on_a_v2_host.nim",
@@ -35062,7 +35062,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g18",
+    group: "t_group_tests_integration_g17",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_workspace_migrate_refuses_to_endanger_work.nim",
@@ -35667,6 +35667,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/integration/test_cs_m14_shim_answers_tests_entry.nim",
     binary: "build/test-bin/test_cs_m14_shim_answers_tests_entry",
+    defines: @[],
+    requiresReproBinary: true,
+    requiresMonitorShim: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_tests_integration_g18",
+    singleReason: ""),
+  TestSpec(
+    source: "tests/integration/test_cs_m8d_generated_packages_add_completion.nim",
+    binary: "build/test-bin/test_cs_m8d_generated_packages_add_completion",
     defines: @[],
     requiresReproBinary: true,
     requiresMonitorShim: true,
