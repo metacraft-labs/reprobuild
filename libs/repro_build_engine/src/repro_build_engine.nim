@@ -19863,6 +19863,15 @@ when not defined(windows):
     ## The variables that decide where the helper's ``nix`` reads its
     ## configuration and keeps its caches and temporary files.
 
+  proc nixHelperMountNamespace*(): string =
+    ## The mount namespace of this process, as ``mnt:[<inode>]`` (Linux), or
+    ## ``""`` where it cannot be read (other platforms, a hidden ``/proc``).
+    ## It names the filesystem view the caller's paths are resolved in.
+    try:
+      expandSymlink("/proc/self/ns/mnt")
+    except OSError, IOError:
+      ""
+
   proc nixDaemonHelperKey*(daemonExe: string): string =
     ## The identity of the helper this process would START: a digest of the
     ## resolved helper file's bytes, or ``""`` when only a bare name (a PATH
@@ -19888,12 +19897,21 @@ when not defined(windows):
     ## helper every other process then shared; once that caller deleted its
     ## directory, every fetch through the helper failed with ``could not find
     ## repository at '<deleted>/nix/tarball-cache-v2'`` until it idled out.
+    ##
+    ## THE FILESYSTEM VIEW IS PART OF THE IDENTITY. The caller sends paths
+    ## (workspace roots, recipe directories) that the helper must open, and
+    ## the helper sees only the mount namespace it was started in. A sandbox
+    ## shares ``/tmp`` -- so the socket -- with the host but has its own view
+    ## of ``$HOME``: a helper started in one answered the other with ``No
+    ## such file or directory`` for a directory that exists for the caller.
+    ## One helper per mount namespace keeps the sharing that is valid.
     if daemonExe.len == 0 or not fileExists(daemonExe):
       return ""
     try:
       var identity = readFile(daemonExe)
       for name in NixHelperEnvironment:
         identity.add("\0" & name & "=" & getEnv(name))
+      identity.add("\0mnt=" & nixHelperMountNamespace())
       toHex(weakFingerprintFromText(identity).bytes)[0 ..< 16]
     except IOError, OSError:
       ""
