@@ -790,6 +790,12 @@ lint:
     # contributor to edit a copy nobody reads; the published page under
     # docs/users/content/ goes stale. Pure grep, no build needed.
     bash ./scripts/check_superseded_doc_pointers.sh 2>&1 | tee -a test-logs/lint.log
+    # The generated user-docs regions (command tables, the `repro health`
+    # check table, installer help, llms.txt) must match the sources they are
+    # rendered from. Before this line only the docs build ran `--check`, so a
+    # health check added to the engine without a row in the generator's table
+    # landed on `agents` and broke the next docs build. Python only, seconds.
+    python3 ./scripts/render_user_docs_generated.py --check 2>&1 | tee -a test-logs/lint.log
     # The private-reference ratchet, beside the pointer gate above because it
     # guards the same thing one level out: a comment that sends a public reader
     # somewhere they cannot go. This repository is public and its
