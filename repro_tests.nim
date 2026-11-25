@@ -15229,6 +15229,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_libs_repro_workspace_vcs_tests_g01",
     singleReason: ""),
   TestSpec(
+    source: "libs/repro_workspace_vcs/tests/t_published_detached_sibling_at_ancestor.nim",
+    binary: "build/test-bin/t_published_detached_sibling_at_ancestor",
+    defines: @[],
+    requiresReproBinary: false,
+    requiresMonitorShim: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_libs_repro_workspace_vcs_tests_g01",
+    singleReason: ""),
+  TestSpec(
     source: "libs/repro_workspace_vcs/tests/t_shared_bare_refresh_advances_refs_and_wiring_compares_paths.nim",
     binary: "build/test-bin/t_shared_bare_refresh_advances_refs_and_wiring_compares_paths",
     defines: @[],
