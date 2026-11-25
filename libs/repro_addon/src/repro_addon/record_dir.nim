@@ -24,7 +24,7 @@
 ## https://pubs.opengroup.org/onlinepubs/9799919799/functions/renameat.html,
 ## https://pubs.opengroup.org/onlinepubs/9799919799/functions/unlinkat.html.
 
-import std/[algorithm, os, posix, strutils, tables]
+import std/[algorithm, os, posix, strutils, tables, times]
 
 import ./mutations
 
@@ -743,18 +743,81 @@ proc writeDelegatedEntry*(dir, name, bytes: string; staging = "";
 # check's entries, moved into the shipping unit's outbox).
 # ---------------------------------------------------------------------------
 
-type DropEntry* = tuple[name: string; bytes: string]
+type
+  DropEntry* = tuple[name: string; bytes: string]
+  DropHarvest* = object
+    ## What one emptying of a drop directory did.
+    moved*: int              ## entries handed over and unlinked
+    left*: seq[string]       ## regular entries ``take`` failed for; they
+                             ## stay for the next run
+    asideNames*: seq[string] ## entries moved aside unread, with why
+
+proc dropAsideDir*(dir: string): string =
+  ## Where an entry that cannot be handed over goes: a root directory beside
+  ## the drop directory, so it no longer keeps the drop directory non-empty
+  ## (the path unit's ``DirectoryNotEmpty=``) and is kept for the operator.
+  dir & "-rejected"
+
+proc dropEntryNames*(dir: string; suffix = ".evr"): seq[string] =
+  ## The regular ``*<suffix>`` entries of ``dir``, judged without following
+  ## a link, oldest name first; empty when ``dir`` is absent or not a
+  ## directory. What uninstall counts as queued besides the outbox.
+  let dfd = posix.open(dir.cstring, O_RDONLY or ODirectory or ONoFollow or
+                       O_CLOEXEC)
+  if dfd < 0: return
+  defer: discard posix.close(dfd)
+  let lfd = dup(dfd)
+  if lfd < 0: return
+  let d = fdopendirC(lfd)
+  if d == nil:
+    discard posix.close(lfd)
+    return
+  while true:
+    let ent = readdir(d)
+    if ent == nil: break
+    let name = $cast[cstring](addr ent.d_name)
+    if name == "." or name == ".." or not name.endsWith(suffix): continue
+    var st: Stat
+    if fstatatC(dfd, name.cstring, st, AtSymlinkNoFollow) == 0 and
+        S_ISREG(st.st_mode):
+      result.add(name)
+  discard closedir(d)
+  result.sort()
+
+proc moveAside(dfd: cint; dir, name: string): string =
+  ## ``name`` renamed (the entry itself, never what a link names) into
+  ## ``dropAsideDir(dir)``, made root 0700 beside ``dir``; "" when done,
+  ## else why not, after which the entry is unlinked if it can be.
+  let parent = parentDir(dir)
+  let pfd = posix.open(parent.cstring, O_RDONLY or ODirectory or O_CLOEXEC)
+  if pfd < 0: return "open " & parent & ": " & osErrorMsg(osLastError())
+  defer: discard posix.close(pfd)
+  var afd: cint
+  try:
+    afd = openOrMakeDirAt(pfd, extractFilename(dropAsideDir(dir)),
+                          dropAsideDir(dir))
+  except OSError as e:
+    return e.msg
+  defer: discard posix.close(afd)
+  let t = getTime()
+  let target = name & "." & $(t.toUnix() * 1_000_000_000 + int64(t.nanosecond))
+  if renameatC(dfd, name.cstring, afd, target.cstring) != 0:
+    return "rename aside: " & osErrorMsg(osLastError())
+  ""
 
 proc takeDropEntries*(dir: string; maxBytes: int; suffix = ".evr";
-                      take: proc (e: DropEntry) {.closure.}): seq[string] =
+                      take: proc (e: DropEntry) {.closure.}): DropHarvest =
   ## Each regular ``*<suffix>`` file of ``dir`` handed to ``take`` and then
   ## unlinked, oldest name first. ``dir`` is opened ``O_NOFOLLOW`` (a link
-  ## in its place is refused), each entry is judged without following a link
-  ## and opened ``O_NOFOLLOW|O_NONBLOCK``, and read up to ``maxBytes``. An
-  ## entry that is not a regular file (a planted link, a FIFO) or is larger
-  ## is unlinked without being read, and named in the result with why; so
-  ## is a name that does not end in ``suffix``. An entry ``take`` raised for
-  ## stays for the next run. Absent ``dir``: nothing.
+  ## or a file in its place raises), each entry is judged without following
+  ## a link and opened ``O_NOFOLLOW|O_NONBLOCK``, and read up to
+  ## ``maxBytes``. Anything else -- a directory, a planted link, a FIFO, a
+  ## larger file, a name that does not end in ``suffix`` -- is moved aside
+  ## unread into ``dropAsideDir`` and named in ``asideNames``, so nothing
+  ## keeps the drop directory non-empty for good (A11 round 26). An entry
+  ## ``take`` raised for (the outbox full, say) stays for the next run and
+  ## is named in ``left``; the caller counts it toward the shipping unit's
+  ## backoff. Absent ``dir``: nothing.
   let dfd = posix.open(dir.cstring, O_RDONLY or ODirectory or ONoFollow or
                        O_CLOEXEC)
   if dfd < 0:
@@ -776,19 +839,33 @@ proc takeDropEntries*(dir: string; maxBytes: int; suffix = ".evr";
     names.add(name)
   discard closedir(d)
   names.sort()
+  var h: DropHarvest
+  proc aside(name, why: string) =
+    let failed = moveAside(dfd, dir, name)
+    if failed.len == 0:
+      h.asideNames.add(name & ": " & why & "; moved aside unread to " &
+                            dropAsideDir(dir))
+    else:
+      discard unlinkatC(dfd, name.cstring, 0)
+      h.asideNames.add(name & ": " & why & "; could not be moved aside (" &
+                            failed & "), removed if it could be")
   for name in names:
     var st: Stat
     let statFlags = when mutated("egress-drop-follows-links"): 0.cint
                     else: AtSymlinkNoFollow
     if fstatatC(dfd, name.cstring, st, statFlags) != 0: continue
-    if S_ISDIR(st.st_mode): continue
+    if S_ISDIR(st.st_mode):
+      when mutated("egress-drop-leaves-dirs"):
+        continue                    # FALSIFYING BUILD: a directory stays
+      else:
+        aside(name, "a directory")
+        continue
     var why = ""
     if not name.endsWith(suffix): why = "not a " & suffix & " entry"
     elif not S_ISREG(st.st_mode): why = "not a regular file"
     elif st.st_size > maxBytes: why = "larger than " & $maxBytes & " bytes"
     if why.len > 0:
-      discard unlinkatC(dfd, name.cstring, 0)
-      result.add(name & ": " & why & "; removed unread")
+      aside(name, why)
       continue
     var bytes = ""
     when mutated("egress-drop-follows-links"):
@@ -799,13 +876,14 @@ proc takeDropEntries*(dir: string; maxBytes: int; suffix = ".evr";
     else:
       let fd = openatC(dfd, name.cstring, O_RDONLY or O_CLOEXEC or ONoFollow or
                        ONonBlock)
-      if fd < 0: continue
+      if fd < 0:
+        aside(name, "cannot be opened: " & osErrorMsg(osLastError()))
+        continue
       var fst: Stat
       if fstat(fd, fst) != 0 or not S_ISREG(fst.st_mode) or
           fst.st_size > maxBytes:
         discard posix.close(fd)
-        discard unlinkatC(dfd, name.cstring, 0)
-        result.add(name & ": changed while read; removed unread")
+        aside(name, "changed while read")
         continue
       var buf = newString(4096)
       var ok = true
@@ -821,12 +899,13 @@ proc takeDropEntries*(dir: string; maxBytes: int; suffix = ".evr";
           break
       discard posix.close(fd)
       if not ok:
-        discard unlinkatC(dfd, name.cstring, 0)
-        result.add(name & ": unreadable or grew past " & $maxBytes &
-          " bytes; removed")
+        aside(name, "unreadable or grew past " & $maxBytes & " bytes")
         continue
     try:
       take((name, bytes))
-    except CatchableError:
+    except CatchableError as e:
+      h.left.add(name & ": not moved (" & e.msg & "); left for the next run")
       continue
     discard unlinkatC(dfd, name.cstring, 0)
+    inc h.moved
+  result = h

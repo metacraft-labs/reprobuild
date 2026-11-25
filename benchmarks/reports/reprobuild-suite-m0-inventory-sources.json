@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 36,
-    "nimTestBinaries": 3277,
+    "nimTestBinaries": 3278,
     "pureUnitConsolidationGroups": 97,
     "pureUnitTests": 854,
     "staticallyDetectedRuntimeCompilerFlowTests": 164,
-    "testEntries": 3336
+    "testEntries": 3337
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1877,7 +1877,7 @@
       "integration": 1850,
       "platform/destructive": 206,
       "pure unit": 854,
-      "unclassified": 397
+      "unclassified": 398
     },
     "graphOwnedTestArtifacts": [
       {
@@ -2097,9 +2097,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 3277,
+    "nimTestBinaryCount": 3278,
     "pythonTestFileCount": 59,
-    "testEntryCount": 3336
+    "testEntryCount": 3337
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -10294,6 +10294,23 @@
       "owner": "libs/repro_addon",
       "requiresReproBinary": false,
       "source": "libs/repro_addon/tests/t_addon_egress_control_proves_the_observer.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 4,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_addon_egress_drop_round26",
+      "class": "unclassified",
+      "classificationReason": "imports `posix`, which grants out-of-process reach",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_addon"
+      ],
+      "owner": "libs/repro_addon",
+      "requiresReproBinary": false,
+      "source": "libs/repro_addon/tests/t_addon_egress_drop_round26.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 4,
       "staticallyDetectedRuntimeCompilerFlow": false,

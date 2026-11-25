@@ -517,6 +517,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "",
     singleReason: "self-spawn marker getAppFilename"),
   TestSpec(
+    source: "libs/repro_addon/tests/t_addon_egress_drop_round26.nim",
+    binary: "build/test-bin/t_addon_egress_drop_round26",
+    defines: @[],
+    requiresReproBinary: false,
+    requiresMonitorShim: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "",
+    singleReason: "module-level statement runs at every start-up: let root = getTempDir() / (\"addon-drop-r26-\" & $getCurrentPr..."),
+  TestSpec(
     source: "libs/repro_addon/tests/t_addon_egress_observer.nim",
     binary: "build/test-bin/t_addon_egress_observer",
     defines: @[],

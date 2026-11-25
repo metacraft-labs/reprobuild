@@ -1392,6 +1392,20 @@
 ##                                            by path, following a planted
 ##                                            link (decision 188, drop
 ##                                            directory)
+## ``egress-drop-leaves-dirs``                 the drop harvest leaves a planted
+##                                            directory in the drop directory
+##                                            (decision 188, drop, round 26)
+## ``ship-backoff-ignores-drop``              the shipping run's backoff does
+##                                            not count drop entries the
+##                                            harvest could not move (decision
+##                                            188, drop, round 26)
+## ``harvest-failure-fails-step``             a harvest that cannot read the
+##                                            drop directory fails the shipping
+##                                            unit's first step (decision 188,
+##                                            drop, round 26)
+## ``uninstall-ignores-drop``                 uninstall's queued total leaves
+##                                            out the drop entries (decision
+##                                            188, drop, round 26)
 ## ``outbox-listed-by-path``                  the outbox is listed by path,
 ##                                            through a link its dynamic user
 ##                                            planted (decision 181)
@@ -2564,6 +2578,10 @@ const
                           "egress-check-unlocked",
                           "egress-check-dac-override",
                           "egress-drop-follows-links",
+                          "egress-drop-leaves-dirs",
+                          "ship-backoff-ignores-drop",
+                          "harvest-failure-fails-step",
+                          "uninstall-ignores-drop",
                           "outbox-listed-by-path",
                           "confined-output-unescaped",
                           "confined-copy-shared",
