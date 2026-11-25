@@ -421,7 +421,12 @@
       # `libc.so.6` and the loader, as io-mon's builder's does. The range
       # also records each path-resolution observation once per process
       # (3d3077a).
-      url = "github:metacraft-labs/io-mon/1365943692eedfb0699ce90e59c4602d90317561";
+      # Bumped 13659436 -> 02206627 (2026-11-25, io-mon `agents`): on macOS
+      # `gcc` and `g++` get a toolchain drop-in like `cc` and `clang`, so a
+      # monitored edge whose bare `gcc` resolves to the SIP-protected
+      # `/usr/bin/gcc` shim (the C conventions' link edge on a Nix host) is
+      # observed and can be cached instead of re-running on every build.
+      url = "github:metacraft-labs/io-mon/0220662775e1c79028522d2d1787fa4d9ce7479a";
       flake = false;
     };
     nim-shm-gset-src = {
