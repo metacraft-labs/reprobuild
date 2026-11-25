@@ -197,3 +197,6 @@
 186 A reset of the egress table's counters is a field of the check's heartbeat, and the check's state is locked | heartbeat, lock, reset, counter, egress
 187 The add-on reloads its egress table when it finds it gone, at apply and at the boot re-assertion | reload, table, read-only, apply, re-assert, egress
 188 The egress check writes its records into a root drop directory, and holds no `CAP_DAC_OVERRIDE` | drop directory, drop, CAP_DAC_OVERRIDE, egress
+190 A `secret put` is a switch for the carried-state check | secret put, switch, consumer, judge, hold
+191 The restore runs beside the boot, safely and bounded | restore, sysinit, placeholder, timeout, rename
+192 An essential unit never requires the restore: such an apply is refused | essential, requirement, restore, refuse, route
