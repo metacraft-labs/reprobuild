@@ -24,5 +24,9 @@
     "resultsSrc": "nim-results-src",
     "checksumsSrc": "nim-checksums-src",
     "nimonySrc": "nim-nimony-src"
-  }
+  },
+  "pin-derived": [
+    "codetracer-src",
+    "ct-trace-format-src"
+  ]
 }

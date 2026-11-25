@@ -82,7 +82,6 @@ suite "tarball mode refuses the Linux C toolchain":
       env["REPRO_STORE_ROOT"] = root / "store-root"
       env["REPRO_CACHE_DISABLE"] = "1"
       env["REPROBUILD_NO_RUNQUOTA"] = "1"
-      env["REPRO_INTERFACE_COMPILE_TIMEOUT_SECONDS"] = "7200"
       let res = execCmdEx(quoteShellCommand([binary, "build", "--daemon=off",
         "--tool-provisioning=tarball", "--progress=quiet", "--log=actions"]),
         env = env, workingDir = root / "consumer")

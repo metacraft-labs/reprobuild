@@ -152,10 +152,10 @@ proc runEngine(cwd, storeRoot, cacheRoot: string; args: seq[string]): Run =
   # A compiler nothing has used before has an empty nimcache, so the
   # interface extraction and the provider compile are both COLD compiles of
   # the whole DSL (hundreds of C units each). Measured on a loaded Windows
-  # host (2026-10-02) the first one ran past the default 1800 s cap while
-  # still making progress. The cap stays finite, so a wedged compile still
-  # fails the test rather than hanging it.
-  env["REPRO_INTERFACE_COMPILE_TIMEOUT_SECONDS"] = "7200"
+  # host (2026-10-02) the first one ran past the 1800 s fixed cap of the time
+  # while still making progress. That cap is gone: the default watchdog kills
+  # a compile whose output stops, so a slow cold compile passes and a wedged
+  # one still fails the test rather than hanging it.
   env["REPRO_FULL_CLI"] = engineBinary()
   env["REPRO_PUBLIC_CLI_PATH"] = engineBinary()
   for name in ["REPRO_SELFHOST_RESOLVED", "REPRO_NIM_COMPILER",

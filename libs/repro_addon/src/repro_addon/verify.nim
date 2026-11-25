@@ -15,6 +15,7 @@ import ./addon_apply
 import ./generation0
 from repro_infra/host_exec import runSystemctl
 import ./ledger
+import ./egress_converge
 import ./record_dir
 
 type
@@ -71,6 +72,9 @@ proc runAddonVerify*(stateDir = DefaultStateDir;
   except CatchableError as e:
     return VerifyReport(status: "degraded", findings: @[e.msg])
   result.status = "ok"
+  # Read-only (§13 decision 187): a missing egress table is reported below,
+  # never reloaded.
+  result.notes.add(readOnlyMustNotReload(l))
   for e in l.entries:
     let d = try: observeDrift(e) except CatchableError as ex: ex.msg
     if d.len > 0:

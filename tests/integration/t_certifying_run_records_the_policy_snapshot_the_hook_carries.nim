@@ -50,7 +50,8 @@ proc healthRow(fx: WorkspaceCertifyFixture;
   ## The row called ``name`` in ``repro health app --json``, or nil.
   let res = runShell(shellCommand(@[fx.cf.sib.repro, "health", "app",
     "--json", "--workspace-root=" & fx.cf.sib.ws],
-    @[(name: "REPROBUILD_REPRO", value: fx.cf.sib.repro)]), fx.app)
+    ownDaemonEnv() & @[(name: "REPROBUILD_REPRO", value: fx.cf.sib.repro)]),
+    fx.app)
   checkpoint("repro health:\n" & res.output)
   let start = res.output.find("{")
   if start < 0:

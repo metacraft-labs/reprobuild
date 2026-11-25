@@ -311,6 +311,7 @@ sources and builds the artifact.
 | `name: "<file name>"` | `executable` | The file name of the program when it differs from `<name>`, such as `"image-tool"` |
 | `kind: <kind>` | `library` | `static`, `shared`, `both` or `headerOnly` |
 | `exportedPath: "<dir>"` | `library` | The directory that holds the library's sources for a consumer, by default `src` |
+| `sourceGitlinks:` | `library` | Git submodules inside `exportedPath` that the sources cannot be compiled without ([Required submodules](#required-submodules)) |
 | `build:` | `executable`, `library`, `files` | The actions that produce the artifact ([Build actions](#build-actions)) |
 | `cli:` | `executable` | The program's typed command-line interface ([Typed tool interfaces](#typed-tool-interfaces)) |
 | `lockFile <name>` | `executable`, `library` | The named lock file the artifact's dependencies are resolved in, when it differs from the package's |
@@ -334,6 +335,39 @@ package `my-lib`:
     build:
       discard writeText("build/version.txt", "1.0\n")
 ```
+
+### Required submodules
+
+A Nim library whose exported sources read a vendored tree from a Git
+submodule names the submodule's path with `sourceGitlinks:`. The paths are
+repository-relative and must lie inside `exportedPath`:
+
+```nim title="repro.nim"
+library isonim:
+  sourceGitlinks:
+    "src/isonim/layout/yoga"
+```
+
+A project that consumes the library then compiles against a read-only copy
+of the exported directory with each submodule's files at its declared
+place. Its own checkout of the library, and the submodule there, are only
+read; nothing initializes or updates them.
+
+- When the submodule is not initialized, Reprobuild fetches the commit that
+  the library's committed tree records for that path, from the URL its
+  committed `.gitmodules` gives. An uncommitted change to `.gitmodules` or to
+  the recorded commit stops the build with an explanation, because neither
+  identifies a revision.
+- When the submodule is initialized, its files are copied as they are,
+  including uncommitted edits.
+- A submodule inside a required submodule is not fetched. If it is not
+  initialized, the build stops.
+
+The form takes only string literals. The URL and the commit always come
+from the library's Git metadata, and there is no field to run a command,
+choose a branch or override the revision. An entry that is not a
+normalized relative path, a duplicate, or any other statement in the block
+is a compile error.
 
 ## Build actions
 
@@ -634,8 +668,34 @@ registers nim-entrypoints' `describeProgram` is asked for candidates through
 `--entrypoint=complete`, and any other program through clispec's
 `__complete`. The compile is the one whose `--out:` file is named after the
 executable's binary; two such compiles in one package are refused. An
-executable no Nim compile builds gets no scripts. The paths do not depend on
-`--target`, so a cross build writes the same files as a native one.
+executable no Nim compile builds gets no scripts. Under
+`repro build --target=<triple>` both paths are under `build@<triple>/`
+instead of `build/` (`build@<triple>/completions/<binary>/`), as the
+target's compile outputs are, so a cross build and a native build never
+write each other's files.
+
+#### In the packages the packaging layer builds
+
+The packaging producers (`debPackage`, `rpmPackage`, `archPackage`,
+`tarballPackage`, `appImagePackage` and `installedPrefix`) install these
+scripts on their own, for every executable component built by such a
+compile; the recipe declares nothing for them. The scripts are named after,
+and complete, the name the package installs the executable under. `<p>`
+below is that name:
+
+| Format | Bash | Zsh | Fish |
+|---|---|---|---|
+| `.deb` | `/usr/share/bash-completion/completions/<p>` | `/usr/share/zsh/vendor-completions/_<p>` | `/usr/share/fish/vendor_completions.d/<p>.fish` |
+| `.rpm`, Arch | `/usr/share/bash-completion/completions/<p>` | `/usr/share/zsh/site-functions/_<p>` | `/usr/share/fish/vendor_completions.d/<p>.fish` |
+| tarball, installed prefix | `<prefix>/share/bash-completion/completions/<p>` | `<prefix>/share/zsh/site-functions/_<p>` | `<prefix>/share/fish/vendor_completions.d/<p>.fish` |
+| AppImage | `<prefix>/share/bash-completion/completions/<p>` inside the image | `<prefix>/share/zsh/site-functions/_<p>` | `<prefix>/share/fish/vendor_completions.d/<p>.fish` |
+
+The native packages use the system directories whatever the distribution's
+prefix, because those are where the distribution's shells look. No Linux
+format carries the PowerShell script. A package built for another machine
+gets the same files, since the program is never run. To ship none, set
+`omitShellCompletion = true` on the `Distribution` (or on the
+`InstalledPrefixSpec`).
 
 ## Profiles
 

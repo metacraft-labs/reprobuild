@@ -32,8 +32,9 @@ pins that absence, because a fallback would let a caller measure the wrong
 program and report success.
 
 Set `$CT_TEST` to measure a specific build. The dev shell's `ct-test` comes
-from the `codetracer-src` flake input, which the workspace `.envrc`
-auto-overrides to a `../codetracer` sibling when one exists — so on a
+from the CodeTracer pin (`pins/codetracer.json` in metacraft-github-actions)
+unless the `codetracer-src` flake input overrides it, which the workspace `.envrc`
+does to a `../codetracer` sibling when one exists — so on a
 workspace host it is not necessarily the pinned revision.
 
 ## Consumers

@@ -440,6 +440,12 @@ proc appImagePackage*(dist: Distribution; site = noSite()): PackagedArtifact =
       "' is staged for " & $dist.targetOs)
 
   var tree = stageInstallTree(dist, "appimage", site)
+  # The shell completion of each executable with a ``cli:`` description,
+  # under the AppDir's prefix (``usr/share/...``), as in any prefix. No
+  # shell reads inside a mounted image; the files are there for whatever
+  # installs the AppImage to copy out (``--appimage-extract``), and the
+  # same scripts are what the program prints for ``completion <shell>``.
+  tree.addShellCompletion(prefixShellCompletionLayout(dist.prefix), site)
 
   # NO SYSTEMD UNITS. deb, rpm and Arch all stage one here; see the
   # header. A unit inside a squashfs image mounted at a path that

@@ -351,6 +351,11 @@ proc rpmSpecText*(dist: Distribution; tree: StagedTree;
 proc rpmPackage*(dist: Distribution; site = noSite()): PackagedArtifact =
   ## Produce a ``.rpm`` from the one ``Distribution`` definition.
   var tree = stageInstallTree(dist, "rpm", site)
+  # The shell completion of each executable with a ``cli:`` description,
+  # at the values of Fedora's ``%{bash_completions_dir}``,
+  # ``%{zsh_completions_dir}`` and ``%{fish_completions_dir}``. Before the
+  # spec is written, so ``%files`` lists them.
+  tree.addShellCompletion(systemShellCompletionLayout(), site)
 
   # The systemd units, ROOT-relative for the same reason as in the deb
   # producer: systemd looks in fixed absolute locations, so this tree

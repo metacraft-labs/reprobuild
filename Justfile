@@ -215,6 +215,13 @@ e2e_addon_recovery_never_holds_up_boot:
 e2e_addon_refused_recovery_keeps_its_record:
     REPRO_ADDON_BASES="${REPRO_ADDON_BASES:-debian-12-amd64,debian-13-amd64,ubuntu-24.04-amd64}" bash ./scripts/run_addon_gate.sh t_e2e_addon_refused_recovery_keeps_its_record
 
+# §6.4 step 0 / §13 decision 122 (milestone A11): uninstall refuses with
+# EAddOnSwitchPending while a switch's pending marker exists. The switch
+# is paused after its marker by the seam build and its apply SIGKILLed,
+# with no reboot (a boot's re-assert would recover the marker first).
+e2e_addon_uninstall_refuses_pending_switch:
+    REPRO_ADDON_BASES="${REPRO_ADDON_BASES:-debian-13-amd64,ubuntu-24.04-amd64}" bash ./scripts/run_addon_gate.sh t_e2e_addon_uninstall_refuses_pending_switch
+
 e2e_addon_net_sysctl_applies_in_host_namespace:
     REPRO_ADDON_BASES="${REPRO_ADDON_BASES:-debian-13-amd64,ubuntu-24.04-amd64}" bash ./scripts/run_addon_gate.sh t_e2e_addon_net_sysctl_applies_in_host_namespace
 
@@ -357,6 +364,13 @@ dev-shell-hooks:
 # `runquotad`; see tests/test_run_tests_runquota_endpoint.sh.
 test-run-tests-runquota-endpoint:
     bash ./tests/test_run_tests_runquota_endpoint.sh
+
+# The test phase of `just test` bounds every process's memory, so a runaway
+# case dies of its own failed allocation rather than the host's OOM killer.
+# Allocates up to 3 GiB in the control case; see
+# tests/test_run_tests_bounds_process_memory.sh.
+test-run-tests-bounds-process-memory:
+    bash ./tests/test_run_tests_bounds_process_memory.sh
 
 dev-env-full-regression:
     mkdir -p test-logs

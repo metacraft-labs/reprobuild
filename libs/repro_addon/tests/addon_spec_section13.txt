@@ -135,7 +135,7 @@
 119 A snapshot deletion that fails during a revert
 120 Network configuration goes through the `network` class on every base
 121 A revert that starts because the timer is gone arms a fresh timer first
-122 Uninstall waits for every switch and clears the guard's leftovers
+122 Uninstall waits for every switch and clears the guard's leftovers | pending marker, pending, uninstall, EAddOnSwitchPending, switch
 123 Boot recovery arms a fresh guard timer before a revert
 124 Who creates the guard lock
 125 Every recovery revert has a timer, and a failed arm is reported
@@ -194,3 +194,6 @@
 178 Bootstrap makes the uninstall records' directory | uninstall records, records' directory, bootstrap, verify
 180 A dead full apply's holds are kept and adopted by the next check | dead, adopt, hold, check
 181 The sink's decoders run as the shipping unit's dynamic user | shipping, dynamic user, outbox, sink, confine, egress
+186 A reset of the egress table's counters is a field of the check's heartbeat, and the check's state is locked | heartbeat, lock, reset, counter, egress
+187 The add-on reloads its egress table when it finds it gone, at apply and at the boot re-assertion | reload, table, read-only, apply, re-assert, egress
+188 The egress check writes its records into a root drop directory, and holds no `CAP_DAC_OVERRIDE` | drop directory, drop, CAP_DAC_OVERRIDE, egress

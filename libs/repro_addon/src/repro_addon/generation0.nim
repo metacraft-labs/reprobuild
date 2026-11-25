@@ -231,6 +231,16 @@ const
     ## each entry through descriptors that follow no link and hand it to
     ## that user (``record_dir.writeDelegatedEntry``). A root reader takes
     ## only entry names from it, never their bytes (§13 decision 181).
+  EgressDropDir* = EvidenceDirPath & "/egress-drop"
+    ## The egress check's sink-form entries (§13 decision 188): a root-owned
+    ## directory inside the root-only evidence directory, which the check
+    ## writes without ``CAP_DAC_OVERRIDE``. The shipping unit's privileged
+    ## first step (``ExecStartPre=+ ... evidence-harvest``) moves each entry
+    ## into the outbox: not through a link, regular files only, each under
+    ## ``DropEntryMaxBytes``.
+  DropEntryMaxBytes* = 256 * 1024
+    ## The largest drop entry the harvest moves; a larger one is removed and
+    ## reported (an egress check record is a few hundred bytes).
   EvidenceShipConfinedEnv* = "REPRO_ADDON_SHIP_CONFINED"
     ## Set in the shipping unit and its transient runs: the shipping and
     ## credential-check commands decode the sink's bytes only where it is
@@ -705,8 +715,9 @@ proc bootHoldScript*(): string =
   # The units to hold conservatively. A failed listing is not "nothing to
   # hold" (A9 review round 21, M4): ``&&`` makes ``ls``'s status the
   # status of the subshell that writes the list, which then takes the
-  # fail-closed path; otherwise the loop's status is 0 (every branch of its
-  # ``case`` ends in a command that succeeds).
+  # fail-closed path, and so does a line of the list that cannot be
+  # written (round 22). The subshell's ``exit 1`` is the script's only
+  # non-zero exit, and it ends the subshell, not the script.
   let conservative =
     when mutated("boot-hold-ls-failure-ignored"):
       # FALSIFYING MUTATION: round 20's loop over the listing's output,
@@ -714,11 +725,22 @@ proc bootHoldScript*(): string =
       "for u in $(/usr/bin/ls -1 " & ConservativeHoldDir & "); do case $u in " &
       essentialActivatorPattern() & ") continue;; " &
       "*.socket|*.timer|*.path) echo $u.d;; esac; done"
-    else:
+    elif mutated("boot-hold-list-write-failure-ignored"):
+      # FALSIFYING MUTATION: round 21's loop, whose status is its last
+      # command's, so a write that failed for an earlier unit is hidden
+      # when the last entry is essential or no activator.
       "us=$(/usr/bin/ls -1 " & ConservativeHoldDir & ") && " &
       "for u in $us; do case $u in " &
       essentialActivatorPattern() & ") continue;; " &
       "*.socket|*.timer|*.path) echo $u.d;; esac; done"
+    else:
+      # ``|| exit 1`` leaves the subshell at the first line it cannot
+      # write (A9 review round 22): its status is then that failure, not
+      # the last entry's.
+      "us=$(/usr/bin/ls -1 " & ConservativeHoldDir & ") && " &
+      "for u in $us; do case $u in " &
+      essentialActivatorPattern() & ") continue;; " &
+      "*.socket|*.timer|*.path) echo $u.d || exit 1;; esac; done"
   let recordAbsent =
     when mutated("boot-hold-record-absent-skips"):
       # FALSIFYING MUTATION: round 19's script -- a pending marker with no
@@ -1274,14 +1296,19 @@ proc egressCheckUnit*(reproExe: string): string =
   "[Service]\n" &
   "Type=oneshot\n" &
   "ExecStart=" & reproExe & " system addon egress-check\n" &
-  # CAP_DAC_OVERRIDE: its records go into the outbox, which belongs to the
-  # shipping unit's dynamic user (§13 decision 181); root without it cannot
-  # write into a directory another user owns.
-  "CapabilityBoundingSet=CAP_NET_ADMIN CAP_DAC_OVERRIDE\n" &
+  # CAP_NET_ADMIN alone (§13 decision 188): its sink-form entries go into
+  # the root drop directory under the evidence directory (EgressDropDir),
+  # which the shipping unit's privileged first step moves into the
+  # dynamic user's outbox; it never writes a directory another user owns.
+  (when mutated("egress-check-dac-override"):
+     "CapabilityBoundingSet=CAP_NET_ADMIN CAP_DAC_OVERRIDE\n"
+   else: "CapabilityBoundingSet=CAP_NET_ADMIN\n") &
   "AmbientCapabilities=\n" &
   "NoNewPrivileges=yes\n" &
   "ProtectSystem=strict\n" &
-  "ReadWritePaths=" & EvidenceDirPath & " -" & EvidenceShipStateDir & "\n" &
+  (when mutated("egress-check-dac-override"):
+     "ReadWritePaths=" & EvidenceDirPath & " -" & EvidenceShipStateDir & "\n"
+   else: "ReadWritePaths=" & EvidenceDirPath & "\n") &
   "InaccessiblePaths=-/var/lib/repro/agent -/run/repro\n" &
   "ProtectHome=yes\n" &
   "PrivateTmp=yes\n" &
@@ -1661,6 +1688,10 @@ proc evidenceShipPathUnit*(): string =
      "PathChanged=" & EvidenceOutboxPath & "\n"
    else:
      "DirectoryNotEmpty=" & EvidenceOutboxPath & "\n") &
+  # The egress check's drop directory too (§13 decision 188): an entry
+  # there starts the shipping unit, whose privileged first step moves it
+  # into the outbox.
+  "DirectoryNotEmpty=" & EgressDropDir & "\n" &
   # No trigger limit either: a path unit that hits one fails and stays
   # failed (A11 audit F2).
   (when mutated("evidence-path-rate-limited"): "" else:

@@ -1288,7 +1288,14 @@ file="$STANDIN_DIR/script-$n.ps1"
 printf '%s' "$script" > "$file"
 printf '%s\n----\n' "$script" >> "$STANDIN_SCRIPTS"
 "$STANDIN_PWSH" -NoProfile -NonInteractive -File "$STANDIN_PARSER" "$file" >&2 || exit 1
-cd "$STANDIN_DIR" && "$STANDIN_MSIINFO" export "$REPRO_MSI_DB" "$REPRO_MSI_TABLE" | tail -n +4
+# As the reader answers: a stream column ('v'/'V' in the export's type line)
+# is its length in bytes (Record.DataSize); msiinfo wrote the stream to
+# <table>/<cell> under the working directory.
+cd "$STANDIN_DIR" && "$STANDIN_MSIINFO" export "$REPRO_MSI_DB" "$REPRO_MSI_TABLE" | tr -d '\r' |
+  awk -F '\t' -v OFS='\t' -v dir="$STANDIN_DIR/$REPRO_MSI_TABLE" '
+    NR == 2 { for (k = 1; k <= NF; k++) stream[k] = ($k ~ /^[vV]/); next }
+    NR <= 3 { next }
+    { for (k = 1; k <= NF; k++) if (stream[k]) { c = "wc -c < \"" dir "/" $k "\""; c | getline n; close(c); gsub(/[^0-9]/, "", n); $k = n } print }'
 """
 
     def without_msiinfo_env(self):
@@ -1370,6 +1377,95 @@ cd "$STANDIN_DIR" && "$STANDIN_MSIINFO" export "$REPRO_MSI_DB" "$REPRO_MSI_TABLE
         self.assertIn("cannot read the Directory table", run.stderr)
         self.assertIn("Unexpected token", run.stderr)
         self.assertNotIn("does not install", run.stderr)
+
+    # ------------------------------ the Windows reader and stream columns
+    # The Binary table's Data column is a binary stream, and the Windows
+    # Installer automation object refuses Record.StringData on one: on a
+    # real Windows host the reader stopped with "reading MSI table Binary
+    # failed: Exception calling InvokeMember with 5 argument(s):
+    # StringData,Field". The reader now takes each column's type from
+    # View.ColumnInfo(1) and reads a 'v'/'V' (stream) column with
+    # Record.DataSize. The COM object exists only on Windows, so these cases
+    # run the reader's own functions (the text before its "# main:" line,
+    # unchanged) under pwsh with Get-ComProperty -- the one function through
+    # which the reader touches the COM object -- replaced by a stand-in that
+    # answers as the object did on that host: StringData on a stream field
+    # throws "StringData,Field", DataSize gives the stream's length. What the
+    # stand-in cannot show (that the real object answers DataSize for the
+    # WixCA row) is the Windows host's packages check.
+    READER_STANDIN_PS = r"""
+function Get-ComProperty($Object, [string]$Name, [object[]]$Arguments) {
+  $k = [int]$Arguments[0]
+  if ($Name -eq 'StringData') {
+    if ($Object.Types[$k - 1] -cmatch '^[vV]') {
+      throw 'Exception calling "InvokeMember" with "5" argument(s): "StringData,Field"'
+    }
+    return $Object.Values[$k - 1]
+  }
+  if ($Name -eq 'DataSize') { return $Object.Sizes[$k - 1] }
+  throw "the stand-in has no property $Name"
+}
+$record = @{ Types = @('s72', 'v0'); Values = @('WixCA', $null); Sizes = @(5, 3000) }
+try {
+  $cells = foreach ($k in 1..2) { Get-MsiCell $record $k $record.Types[$k - 1] }
+  [Console]::Out.WriteLine(($cells -join [char]9))
+  foreach ($t in @('s72', 'v0', 'V0', 'i2', 'l255', 'S0')) {
+    [Console]::Out.WriteLine($t + '=' + (Test-MsiStreamColumn $t))
+  }
+} catch {
+  [Console]::Error.WriteLine('reader failed: ' + $_.Exception.Message)
+  exit 1
+}
+"""
+
+    def reader_functions(self, packager_text):
+        start = packager_text.index("MSI_TABLE_PS=\"$(cat <<'MSI_TABLE_PS_EOF'\n")
+        body = packager_text[start:].split("\n", 1)[1]
+        body = body[:body.index("\nMSI_TABLE_PS_EOF\n")]
+        self.assertIn("# main:", body, "the reader lost its main marker; update this test")
+        return body[:body.index("# main:")]
+
+    def run_reader_functions(self, packager_text):
+        script = self.work / "reader-functions.ps1"
+        script.write_text(self.reader_functions(packager_text) + self.READER_STANDIN_PS,
+                          encoding="utf-8")
+        self.assertEqual([], powershell_parse_errors(script))
+        return subprocess.run([shutil.which("pwsh"), "-NoProfile", "-NonInteractive",
+                               "-File", str(script)],
+                              capture_output=True, text=True, check=False, timeout=120)
+
+    @unittest.skipUnless(shutil.which("pwsh"), "needs pwsh (PowerShell 7) to run the reader's functions")
+    def test_cs_m8e_the_msi_reader_reads_a_stream_column_as_its_length(self):
+        run = self.run_reader_functions(PACKAGER.read_text(encoding="utf-8"))
+        self.assertEqual(0, run.returncode, run.stderr)
+        lines = run.stdout.splitlines()
+        self.assertEqual("WixCA\t3000", lines[0])
+        self.assertEqual(["s72=False", "v0=True", "V0=True", "i2=False", "l255=False", "S0=False"],
+                         lines[1:])
+
+    @unittest.skipUnless(shutil.which("pwsh"), "needs pwsh (PowerShell 7) to run the reader's functions")
+    def test_cs_m8e_a_reader_that_reads_every_column_as_a_string_fails_on_the_binary_table(self):
+        """Control: the reader as it was (StringData for every column) fails
+        on the Binary row with the Windows host's message."""
+        text = PACKAGER.read_text(encoding="utf-8")
+        old = text.replace("  if (Test-MsiStreamColumn $Type) {\n", "  if ($false) {\n")
+        self.assertNotEqual(old, text, "the reader's stream branch moved; update this control")
+        run = self.run_reader_functions(old)
+        self.assertNotEqual(0, run.returncode, run.stdout)
+        self.assertIn("StringData,Field", run.stderr)
+
+    def test_cs_m8e_the_packager_refuses_an_empty_wixca_binary(self):
+        """The read-back now wants the WixCA stream non-empty (its length,
+        read through msiinfo here); a package whose WixCA is empty is
+        refused, and the same build with the placeholder DLL passes (the
+        other MSI cases)."""
+        env = self.wix_standin()
+        empty = self.work / "empty-wixca.dll"
+        empty.write_bytes(b"")
+        env["WIX_STANDIN_DLL"] = str(empty)
+        run = self.build_msi(toolset_env=env)
+        self.assertNotEqual(0, run.returncode, run.stderr)
+        self.assertIn("no non-empty WixCA binary", run.stderr)
 
     @unittest.skipUnless(shutil.which("pwsh"), "needs pwsh (PowerShell 7) to parse the hooks")
     def test_the_scoop_hooks_parse_as_powershell(self):

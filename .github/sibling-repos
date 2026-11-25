@@ -14,15 +14,22 @@
 # (src/ct_test/incremental) and the trace-format-nim CTFS reader it imports,
 # reached through ct_incremental_adapter (the engine-free seam). One-way
 # dependency: reprobuild -> codetracer.
-codetracer=dev
-# Pinned to the revision flake.lock's `ct-trace-format-src` names, not to a
-# branch: the repository develops on `agents` and reaches `dev` only through a
-# promotion, so `=dev` lagged by 131 commits and then jumped by 52 when one
-# landed. The ct build re-detaches this clone to the revision codetracer's own
-# repro.lock names (scripts/reconcile_locked_siblings.sh); this entry is what
-# every other job sees. scripts/check_sibling_lock_pins.py holds it equal to
-# flake.lock. Move it together with `ct-trace-format-src`.
-codetracer-trace-format-nim=31be9a10007c007af429951616c13bc275587c76
+#
+# CodeTracer is cloned at the organisation's CodeTracer pin
+# (pins/codetracer.json in metacraft-github-actions, which flake.nix reads),
+# not at a branch: a branch tip is a CodeTracer no pin names, and it moved this
+# repository's CI under commits that changed nothing here. trace-format-nim is
+# cloned at the revision that CodeTracer revision's repro.lock names, the one
+# the flake derives for it. clone-siblings cannot read a pin, so both are
+# written out, and two gates fail when either differs from the pin: `just lint`
+# (scripts/check_sibling_lock_pins.py, which evaluates the flake) and the flake
+# check `ct-trace-format-pin-coherence` (CI's Nix Build job). Move them when
+# `nix flake update metacraft-github-actions` moves the pin. The ct build still
+# re-detaches the trace-format clone to the revision codetracer's own
+# repro.lock names (scripts/reconcile_locked_siblings.sh), which is the same
+# revision.
+codetracer=a7cddd8bce554f5d73a7636e2bad15605b71963c
+codetracer-trace-format-nim=4c67a4507b1fe64752f71f287e62e8c4a3953b61
 
 # The two siblings CodeTracer's own build REQUIRES, as opposed to the ones its
 # Nim `--path` merely prefers. `scripts/build-once.sh` refuses to start without
@@ -267,7 +274,17 @@ reprobuild-packages
 # flake.nix and flake.lock: every compile of the Linux shim links only the C
 # runtime (`--as-needed` and `-static-libgcc` from `linux_preload.nim.cfg`,
 # e40577a). b1c32599 is an ancestor.
-io-mon=1365943692eedfb0699ce90e59c4602d90317561
+# Moved to 02206627 (2026-11-25), io-mon's `agents` tip, with `io-mon-src` in
+# flake.nix and flake.lock: on macOS `gcc` and `g++` get a toolchain drop-in
+# like `cc` and `clang`. 13659436 is an ancestor.
+# Moved to 02ec1410 (2026-11-25), io-mon's `agents` tip, with `io-mon-src` in
+# flake.nix and flake.lock: io-mon builds against nim-stackable-hooks 0ada76e
+# (the Windows on Arm64 backend and the root machine gate). 02206627 is an
+# ancestor.
+# Moved to 1c1aa67 (2026-11-25), io-mon's `agents` tip, with `io-mon-src` in
+# flake.nix and flake.lock: the spawn hook refuses a hybrid ARM64X grandchild
+# through nim-stackable-hooks' shared machine gate. 02ec1410 is an ancestor.
+io-mon=1c1aa6783ff56eb46161b5c30ebc91b430e17200
 # `release-pipeline.yml` overrides `nim-stackable-hooks-src` to THIS clone, so the
 # clone must be the revision the flake pins, or the release compiles the
 # monitor shim from different sources than every other build. Cloned at
@@ -283,7 +300,7 @@ nim-stackable-hooks
 # commits behind the pin.
 # Private auto-start requires the explicit endpoint policy in this revision;
 # keep release archives and CI overrides on the same API as the Nix pin.
-runquota=83d89e581d01c96eadb157bee48cecab6aba1866
+runquota=f766cf21f2ccfb7f7904446f04888d92520d9644
 nim-shm-queue
 # Moved to 803a4fa (2026-11-22), nim-shm-gset's `agents` tip, with
 # `nim-shm-gset-src` in flake.nix and flake.lock: a reader handle stops

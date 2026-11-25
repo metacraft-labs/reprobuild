@@ -414,7 +414,20 @@ pinned_sources=(
 )
 flake_lock_json="$(nix flake metadata --json "${repo_root}" 2>/dev/null)"
 locked_rev_of() {
-  # The revision flake.lock pins for input $1.
+  # The revision flake.lock pins for input $1. CodeTracer and its trace-format
+  # source are not locked by name: the flake reads them from the CodeTracer pin
+  # (nix/codetracer-pin.nix), so their revision is the one the package was
+  # given, read back from its `sources`.
+  local arg=""
+  case "$1" in
+    codetracer-src) arg=codetracerSrc ;;
+    ct-trace-format-src) arg=ctTraceFormatSrc ;;
+  esac
+  if [ -n "${arg}" ]; then
+    nix eval --raw "${repo_root}#packages.${host_system}.default.sources.${arg}.rev" 2>/dev/null ||
+      printf 'unlocked'
+    return
+  fi
   printf '%s' "${flake_lock_json}" |
     jq -r --arg n "$1" '.locks.nodes[$n].locked.rev // "unlocked"'
 }

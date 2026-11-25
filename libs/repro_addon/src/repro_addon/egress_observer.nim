@@ -29,8 +29,11 @@
 ## it drops none (the unit's filter does).
 
 import std/[json, nativesockets, net, os, sets, strutils, tables, times]
+
+import repro_core/file_lock
 from std/posix import EPERM
 
+import ./egress_converge
 import ./evidence
 import ./evidence_ship
 import ./generation0
@@ -67,8 +70,9 @@ type
     counterReset*: string
       ## What went down, when a count of this table instance is lower than
       ## the last check saw it, or a destination left its set
-      ## (``freshSince``); "" otherwise. Printed by the check, not recorded
-      ## as a detection.
+      ## (``freshSince``); "" otherwise. Printed by the check and carried by
+      ## its heartbeat (``counterReset``), so it is visible off the host; not
+      ## a detection on the host (§13 decision 186).
     stateError*: string
       ## The check's own state could not be used (read, parsed, written).
     control*: string
@@ -568,9 +572,40 @@ proc freshSince*(refused: seq[RefusedDestination]; statePath: string;
     raise newException(EgressStateError, "the egress check's state " &
       statePath & " cannot be written: " & e.msg)
 
-proc checkEgress*(nft, statePath: string): EgressCheck =
-  ## Read the table and compare with the last check (see the header). The
-  ## state is rewritten only after the read succeeded.
+const EgressStateLockWaitMs* = 60_000
+  ## How long a check waits for another check's lock on the state.
+
+proc egressStateLockPath*(statePath: string): string = statePath & ".lock"
+
+proc checkEgressUnlocked(nft, statePath: string): EgressCheck
+
+proc checkEgress*(nft, statePath: string;
+                  lockWaitMs = EgressStateLockWaitMs): EgressCheck =
+  ## Read the table and compare with the last check (see the header), under
+  ## an exclusive lock on the check's state for the whole
+  ## read-compare-write (§13 decision 186): two checks at once (the unit's
+  ## and one run by hand) would otherwise read the counter and the state in
+  ## different orders, and the later writer would read a lower count than
+  ## the state holds and start over on a table nobody changed. A check that
+  ## cannot have the lock within ``lockWaitMs`` judges nothing and says so.
+  when mutated("egress-check-unlocked"):
+    return checkEgressUnlocked(nft, statePath)
+  var lock: ReproFileLock
+  var waited = 0
+  while not tryAcquireExclusiveFileLock(egressStateLockPath(statePath), lock):
+    if waited >= lockWaitMs:
+      return EgressCheck(error: "another egress check holds " &
+        egressStateLockPath(statePath) & " (waited " & $lockWaitMs & " ms)")
+    sleep(100)
+    waited += 100
+  try:
+    result = checkEgressUnlocked(nft, statePath)
+  finally:
+    releaseExclusiveFileLock(lock)
+
+proc checkEgressUnlocked(nft, statePath: string): EgressCheck =
+  ## ``checkEgress`` without its lock. The state is rewritten only after
+  ## the read succeeded.
   if nft.len == 0:
     return EgressCheck(error: "no nft on this host")
   let l = listTableNames(nft)
@@ -667,10 +702,10 @@ proc recordEgressCheck*(c: EgressCheck; site: EvidenceSite;
                         heartbeatMs: int64) =
   ## The check's records: one detection per fresh destination, one when the
   ## table is gone, and the heartbeat. A count that went down in place
-  ## (``counterReset``) is no record: the check prints it
-  ## (``runEgressCheckCommand``), and whether it should be a detection is an
-  ## open owner decision (reprobuild-pm issue
-  ## ``2026-11-19-addon-egress-counter-reset-is-not-a-detection.md``).
+  ## (``counterReset``) is no detection: the check prints it
+  ## (``runEgressCheckCommand``) and the heartbeat carries it as its
+  ## ``counterReset`` field, so it is visible off the host (§13 decision
+  ## 186, the operator's "heartbeat field + lock").
   ## Raises when a detection cannot be written (the unit then fails, which
   ## the journal shows).
   if c.stateError.len > 0:
@@ -720,14 +755,40 @@ proc recordEgressCheck*(c: EgressCheck; site: EvidenceSite;
               ("status", if c.error.len > 0: "error: " & c.error
                          elif c.present: "present" else: "missing"),
               ("control", if c.control.len > 0: c.control else: "not-run"),
-              ("count", $c.refused.len)]), site)
+              ("count", $c.refused.len)] &
+            # §13 decision 186: a reset of the table's counts, off the host.
+            (if c.counterReset.len > 0 and
+                not mutated("egress-reset-not-in-heartbeat"):
+               @[("counterReset", c.counterReset)]
+             else: @[])), site)
+
+const DefaultLedgerCopy = "/var/lib/repro/system/addon-ledger"
+  ## The add-on's ledger copy (``addon_apply.ledgerCopyPath`` of the default
+  ## state directory), read for the egress table's entry.
+
+proc egressCheckSite*(): EvidenceSite =
+  ## The check's evidence site: its sink-form entries go into the root drop
+  ## directory (``EgressDropDir``), never into the shipping unit's dynamic
+  ## user's outbox; the shipping unit's privileged first step moves them
+  ## there (``harvestDropEntries``, §13 decision 188), so the check needs no
+  ## ``CAP_DAC_OVERRIDE``.
+  result = defaultSite()
+  when not mutated("egress-check-dac-override"):
+    result.outbox = EgressDropDir
 
 proc runEgressCheckCommand*(): int =
   ## ``repro system addon egress-check`` (repro-addon-egress-check.service).
-  let site = defaultSite()
+  let site = egressCheckSite()
   let heartbeat = try: int64(loadEvidenceConf().heartbeatSec) * 1000
                   except CatchableError: 0'i64
   let c = checkEgress(nftBinary(), EvidenceDirPath / EgressStateName)
+  if c.error.len == 0 and not c.present:
+    # Read-only (§13 decision 187): a missing table is reported as
+    # egress-observer-missing, never reloaded here.
+    try:
+      for n in readOnlyMustNotReload(readLedger(DefaultLedgerCopy)):
+        stderr.write("repro system addon egress-check: " & n & "\n")
+    except CatchableError: discard
   try:
     recordEgressCheck(c, site, heartbeat)
   except CatchableError as e:

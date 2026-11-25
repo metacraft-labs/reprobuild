@@ -49,6 +49,7 @@ from repro_deploy_agent/secrets import ensureRecipientKeyFile
 
 import ./addon_apply
 import ./collision
+import ./egress_converge
 import ./generation0
 import ./host_exec
 import ./etc_write
@@ -854,6 +855,16 @@ proc runAddonReassert*(stateDir = DefaultStateDir; atBoot = false;
   except CatchableError as e:
     result.recovery.add("recovery failed: " & e.msg)
     result.status = "degraded"
+  # §13 decision 187: at boot, a missing egress table (a flush while the
+  # observer was active) is converged by reloading the observer unit,
+  # before the ledger is checked.
+  if atBoot and not mutated("reassert-skips-egress-reload"):
+    try:
+      let lp = ledgerCopyPath(stateDir)
+      if fileExists(lp):
+        result.notes.add(convergeEgressTable(readLedger(lp)))
+    except CatchableError as e:
+      result.notes.add("the egress table was not checked: " & e.msg)
   try:
     checkCurrent(stateDir, result)
   except CatchableError as e:
