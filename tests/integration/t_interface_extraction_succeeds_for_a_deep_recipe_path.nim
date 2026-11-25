@@ -56,8 +56,8 @@ suite "interface extraction at a deep recipe path":
       env["XDG_CACHE_HOME"] = tempRoot / "cache"
       createDir(tempRoot / "cache")
       let res = execCmdEx(quoteShellCommand([reproBin, "build",
-        "--list-targets", "--daemon=off", "--tool-provisioning=path",
-        dir / "repro.nim"]), env = env)
+        "--list-targets", "--no-runquota", "--daemon=off",
+        "--tool-provisioning=path", dir / "repro.nim"]), env = env)
       if res.exitCode != 0: checkpoint(res.output)
       check res.exitCode == 0
       check "cannot open" notin res.output

@@ -87,7 +87,7 @@ suite "sibling shim C names do not grow with the action-cache root":
       # Recipe-relative extraction is the default on POSIX; leave it alone.
       env.del("REPRO_RECIPE_RELATIVE_COMPILES")
       let res = execCmdEx(quoteShellCommand([reproBin, "build",
-        "--daemon=off", "--tool-provisioning=path",
+        "--no-runquota", "--daemon=off", "--tool-provisioning=path",
         "--action-cache-root=" & actionCacheRoot, "--progress=quiet",
         "--log=actions", ws / "consumer" / "repro.nim"]), env = env)
       if res.exitCode != 0: checkpoint(res.output)
