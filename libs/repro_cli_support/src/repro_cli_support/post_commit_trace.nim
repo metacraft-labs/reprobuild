@@ -133,6 +133,28 @@ proc parsePostCommitOutcomeTag*(tag: string): Option[PostCommitOutcome] =
       return some(outcome)
   none(PostCommitOutcome)
 
+# ---- other writers of the trace ---------------------------------------------
+
+const
+  PostCommitCachePushSkippedTag* = "cache-push-skipped"
+    ## The tag of the line the detached eager cache push
+    ## (``runCachePushCommand``) appends when it pushes nothing: the repo is
+    ## not in the active projects, resolves no clone URL, or has no shared
+    ## bare. It is deliberately NOT a ``PostCommitOutcome``: the cache push is
+    ## not the lock writer, so the ``lock-writer`` row must ignore it, as it
+    ## ignores the ``evidence`` lines (CLI/health.md, **Lock writer**).
+
+proc cachePushSkippedTraceLine*(timestamp, diagnostic: string): string =
+  ## One trace line for a skipped cache push, in the trace's shape
+  ## ``<ISO-8601 timestamp> cache-push-skipped <diagnostic>``. The trace is
+  ## one line per entry, so a newline in ``diagnostic`` (a repo path can hold
+  ## one) is flattened to a space rather than leaving an untimestamped
+  ## continuation line behind it.
+  var flat = diagnostic
+  for ch in ['\r', '\n']:
+    flat = flat.replace($ch, " ")
+  timestamp & " " & PostCommitCachePushSkippedTag & " " & flat
+
 # ---- reading the trace ------------------------------------------------------
 
 const
