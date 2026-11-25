@@ -1349,6 +1349,13 @@ jobs:
             github.com/metacraft-labs/codetracer-native-recorder=${{ steps.ci_token_test.outputs.token }}
         run: |
           rc=0
+          # The ct build step is disabled in this measurement, and the script
+          # that step ends with also puts the siblings back at reprobuild's lock
+          # (and at the sibling-repos file's explicit pins). Do that here, or
+          # the tests compile against CodeTracer's older siblings.
+          bash scripts/reconcile_locked_siblings.sh "$PWD/repro.lock" \
+            "$(cd .. && pwd)" "$(basename "$PWD")" --detach \
+            "$PWD/.github/sibling-repos"
           for f in tests/integration/t_recipe_compile_requires_nim_2_2_10.nim tests/integration/t_interface_extraction_succeeds_for_a_deep_recipe_path.nim tests/integration/t_interface_extraction_sibling_shim_name_does_not_grow_with_the_action_cache_root.nim tests/integration/t_a_pinned_nim_is_provisioned_from_a_cold_store.nim libs/repro_cli_support/tests/t_a_pinned_nim_archive_is_verified_against_the_lock.nim libs/repro_cli_support/tests/test_npc_m14_build_refuses_other_nim_for_condition.nim; do
             t=$(basename "$f" .nim)
             echo "=== $t"
