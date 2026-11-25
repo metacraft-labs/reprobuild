@@ -396,6 +396,7 @@ if ($onWindows) {
     Assert-PeMachine -Path $cmdExe -Arch $hostArch -Consumer t
   }
   $cmdImports = @(Get-PeImportNames -Path $cmdExe)
+  $cmdOsDlls = @($cmdImports) + @(Get-PeDelayImportNames -Path $cmdExe)
   Check "a system image's imports are read, one name each" {
     if ($cmdImports.Count -lt 2) { throw "expected several imports, got $($cmdImports.Count)" }
     foreach ($name in $cmdImports) {
@@ -407,9 +408,10 @@ if ($onWindows) {
   try {
     Copy-Item -LiteralPath $cmdExe -Destination (Join-Path $dir "ok.exe")
     Check "a bin/ of system-only imports passes the closure audit" {
-      # cmd.exe is a Windows image, so its imports are OS DLLs by construction;
-      # they stand in for the allowlist, which names only what reprobuild uses.
-      Assert-WindowsDllClosure -BinDir $dir -Arch $hostArch -OsDlls $cmdImports
+      # cmd.exe is a Windows image, so what it imports and delay-loads is an OS
+      # DLL by construction; that stands in for the allowlist, which names only
+      # what reprobuild uses.
+      Assert-WindowsDllClosure -BinDir $dir -Arch $hostArch -OsDlls $cmdOsDlls
     }
     # Negative control: the same image with one import renamed to a DLL that
     # exists nowhere. Same length, so the PE stays well formed.
@@ -428,12 +430,12 @@ if ($onWindows) {
       [Array]::Copy($fake, 0, $bytes, $at, $fake.Length)
       [IO.File]::WriteAllBytes((Join-Path $dir "bad.exe"), $bytes)
       Check "an import that is neither in bin/ nor in System32 fails the audit" {
-        Assert-Throws { Assert-WindowsDllClosure -BinDir $dir -Arch $hostArch -OsDlls $cmdImports } ("bad\.exe imports " + [regex]::Escape($fakeName))
+        Assert-Throws { Assert-WindowsDllClosure -BinDir $dir -Arch $hostArch -OsDlls $cmdOsDlls } ("bad\.exe imports " + [regex]::Escape($fakeName))
       }
     }
     Check "an image of another machine fails the audit" {
       $other = if ($hostArch -eq "arm64") { "x64" } else { "arm64" }
-      Assert-Throws { Assert-WindowsDllClosure -BinDir $dir -Arch $other -OsDlls $cmdImports } 'not the .* machine'
+      Assert-Throws { Assert-WindowsDllClosure -BinDir $dir -Arch $other -OsDlls $cmdOsDlls } 'not the .* machine'
     }
   } finally {
     Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue
