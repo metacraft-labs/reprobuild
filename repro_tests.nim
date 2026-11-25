@@ -31822,7 +31822,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g14",
+    group: "t_group_tests_integration_g13",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_reseal_on_generation_switch.nim",
@@ -32590,7 +32590,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g15",
+    group: "t_group_tests_integration_g14",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_shorthand_equals_to.nim",
@@ -33514,7 +33514,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g16",
+    group: "t_group_tests_integration_g15",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_tdx_agent_backend.nim",
@@ -34294,7 +34294,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g17",
+    group: "t_group_tests_integration_g16",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_v3_artifact_refused_on_a_v2_host.nim",
@@ -34491,6 +34491,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/integration/t_workspace_branch_roles_query.nim",
     binary: "build/test-bin/t_workspace_branch_roles_query",
+    defines: @[],
+    requiresReproBinary: true,
+    requiresMonitorShim: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_tests_integration_g17",
+    singleReason: ""),
+  TestSpec(
+    source: "tests/integration/t_workspace_certify_fixture_builds_off_the_callers_daemon.nim",
+    binary: "build/test-bin/t_workspace_certify_fixture_builds_off_the_callers_daemon",
     defines: @[],
     requiresReproBinary: true,
     requiresMonitorShim: false,

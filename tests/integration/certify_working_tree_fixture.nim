@@ -31,6 +31,16 @@ include tc5_cert_signing_helpers
 
 const certifyKeyId* = "tc8d-daemon-key"
 
+proc ownDaemonEnv*(): seq[tuple[name, value: string]] =
+  ## The overlay that keeps a fixture's ``repro`` off the caller's per-user
+  ## daemon: ``REPRO_DAEMON=off``, the direct in-process route (CLI/build.md
+  ## §"Daemon Mode"). Without it a ``repro build`` / ``repro test`` routes to
+  ## whatever daemon the inherited environment names, by default the
+  ## developer's resident one, whose image, groups and state belong to
+  ## someone else: a test must build in an environment it owns. A caller that
+  ## means to exercise the daemon route overrides it after this overlay.
+  @[(name: "REPRO_DAEMON", value: "off")]
+
 type
   CertifyFixture* = object
     storeEnv: ScopedEnv
@@ -117,7 +127,8 @@ proc certify*(fx: CertifyFixture; fixtureJson: string;
     "--certify",
     "--workspace-root=" & fx.sib.ws,
     "--current-repo=" & (if repo.len > 0: repo else: fx.sib.app)],
-    daemonKeyEnv(fx.daemonKey, certifyKeyId)), fx.sib.scratch)
+    ownDaemonEnv() & daemonKeyEnv(fx.daemonKey, certifyKeyId)),
+    fx.sib.scratch)
 
 proc gitIn*(fx: CertifyFixture; repo, args: string): string =
   fx.sib.git(repo, args)
