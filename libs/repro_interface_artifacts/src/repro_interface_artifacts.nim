@@ -244,11 +244,9 @@ proc builtSourcePackageRoot(envName: string): string =
     if entry[0] == envName:
       return entry[1]
 
-const SeededSourceEnvironmentVar* = "REPRO_BOOTSTRAP_SOURCE_ENV"
-  ## Private provenance for compiler source roots injected by this CLI. It
-  ## travels with child compiler environments, but is removed before a provider
-  ## captures the user's development environment. Values are hex encoded so
-  ## every valid filesystem path survives this environment-only transport.
+# ``SeededSourceEnvironmentVar`` and the reader of what it records live in
+# ``repro_core/source_root``, because the build engine, which sits below this
+# module, withholds the seeded roots from the actions it launches.
 
 proc seededSourcePackageEnvironmentNames*(): seq[string] =
   ## The names this process seeded that still hold the seeded value, followed
@@ -256,19 +254,7 @@ proc seededSourcePackageEnvironmentNames*(): seq[string] =
   ## ``clearSeededSourcePackageEnvironment`` removes. For a caller that has to
   ## keep the seeds for its own later compiles and so withdraws them from a
   ## child's environment table instead of from this process.
-  for line in getEnv(SeededSourceEnvironmentVar).splitLines():
-    let split = line.find('=')
-    if split <= 0:
-      continue
-    let name = line[0 ..< split]
-    try:
-      let value = parseHexStr(line[split + 1 .. ^1])
-      if existsEnv(name) and getEnv(name) == value and name notin result:
-        result.add(name)
-    except ValueError:
-      discard
-  if existsEnv(SeededSourceEnvironmentVar):
-    result.add(SeededSourceEnvironmentVar)
+  seededSourceRootNames()
 
 proc clearSeededSourcePackageEnvironment*() =
   ## Remove only unchanged bootstrap additions. Explicit caller values and
@@ -287,7 +273,10 @@ proc seedSourcePackageEnvironment*(roots: openArray[(string, string)]) =
     # silently changes its meaning. New binaries normalize such roots while
     # compiling; rejecting them here also keeps older binaries from poisoning
     # cold out-of-tree interface extraction.
-    if not existsEnv(envName) and root.isAbsolute and
+    # Empty counts as unset: a build withholds the engine's roots from its
+    # actions by blanking them (``withheldSeededSourceRoots`` in the build
+    # engine), and an inner ``repro`` run by such an action seeds its own.
+    if getEnv(envName).len == 0 and root.isAbsolute and
         dirExists(extendedPath(root)):
       putEnv(envName, root)
       let previous = getEnv(SeededSourceEnvironmentVar)
@@ -299,6 +288,8 @@ proc seedSourcePackageEnvironment*(roots: openArray[(string, string)]) =
 # ONCE, in ``repro_core/source_root``, because the profile compile needs it too
 # and sits below this module (Gradual-Nix-To-Reprobuild-Migration GM1w). These
 # names are re-exported so existing importers keep resolving them here.
+export SeededSourceEnvironmentVar, ProjectVisibleSourceRootNames,
+  engineSourceRootName, engineSourceRootSeeds
 export InstalledSourceRootSubdir, InstalledSourceTreesSubdir,
   InstalledSourcePackageTrees, installedLayoutSourceRoot,
   installedLayoutPackageTrees, installedLayoutSourceRoots,
@@ -333,6 +324,11 @@ proc ensureInstalledSourcePackageEnvironment*() =
       return
 
 proc ensureBuiltSourcePackageEnvironment*() =
+  # The wrapper's roots first: they name what this package was built against
+  # and used to outrank the archive and build-time roots as explicit values.
+  # They arrive under private names (``repro_core/source_root``'s
+  # ``engineSourceRootSeeds``) and are seeded, so actions never inherit them.
+  seedSourcePackageEnvironment(engineSourceRootSeeds())
   ensureInstalledSourcePackageEnvironment()
   seedSourcePackageEnvironment(BuiltSourcePackageRoots)
 

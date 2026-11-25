@@ -42,7 +42,8 @@ suite "lock-writer trace reader":
       check parsePostCommitOutcomeTag(postCommitOutcomeTag(outcome)) ==
         some(outcome)
     # Retired spellings are not outcomes.
-    for retired in ["ok", "skipped-dirty", "failed", "evidence"]:
+    for retired in ["ok", "skipped-dirty", "failed", "evidence",
+                    PostCommitCachePushSkippedTag]:
       check parsePostCommitOutcomeTag(retired).isNone
     # The spec's table, row by row.
     for o in [pcoPublished, pcoWrittenPending, pcoWrittenLocalOnly,
@@ -67,6 +68,28 @@ suite "lock-writer trace reader":
     check noise.verdict == lwvOk
     check "no post-commit run recorded" in noise.detail
     check noise.data["outcomeLines"].getInt() == 0
+
+  test "a cache-push skip line has the trace's shape and is not an outcome":
+    let skipLine = cachePushSkippedTraceLine("2026-10-19T10:00:00Z",
+      "no shared bare at /cache/x.git (run `repro workspace shared-clones " &
+      "rewire`)")
+    check skipLine.startsWith("2026-10-19T10:00:00Z cache-push-skipped no " &
+      "shared bare at /cache/x.git")
+    let row = evaluateLockWriterTrace(skipLine & "\n", now, tracePath)
+    check row.verdict == lwvOk
+    check row.data["outcomeLines"].getInt() == 0
+    # Beside a refusal, the skip neither ends nor extends the run.
+    let mixed = summarizePostCommitTrace(
+      line("2026-10-19T09:00:00Z", pcoNoLockDirty, "NO lock: lib-b") &
+      skipLine & "\n" &
+      line("2026-10-19T11:00:00Z", pcoNoLockDirty, "NO lock: lib-b"))
+    check mixed.outcomeLines == 2
+    check mixed.runLength == 2
+    # A newline in the diagnostic cannot leave an untimestamped line behind.
+    let flat = cachePushSkippedTraceLine("2026-10-19T10:00:00Z",
+      "/ws/odd\nname resolves no clone URL")
+    check flat.splitLines().len == 1
+    check flat.endsWith("/ws/odd name resolves no clone URL")
 
   test "an empty run is ok and names the newest outcome and written record":
     let row = evaluateLockWriterTrace(

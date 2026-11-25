@@ -19,12 +19,14 @@
 ## directory's apply lock, the same two the switch takes, so a secret is
 ## never re-materialised under a running switch.
 
-import std/[os, posix, strutils]
+import std/[os, posix, strutils, tables]
 
 import repro_core/host_apply_lock
 import repro_infra
 import repro_infra/apply_lock
 import repro_infra/state_dir
+import repro_infra/start_holds
+import repro_infra/carried_state
 
 import repro_deploy_agent/agent
 import repro_deploy_agent/manifest
@@ -37,6 +39,7 @@ import repro_peer_cache/auth as peerAuth
 import ./addon_apply
 import ./addon_secrets
 import ./apt_hook
+import ./effective_floor
 import ./fingerprint
 import ./generation0
 import ./host_exec
@@ -78,6 +81,19 @@ proc currentGenerationProfile(stateDir: string): SystemProfile =
   if text.len == 0 and fileExists(userProfilePath(stateDir)):
     text = readFile(userProfilePath(stateDir))
   if text.len > 0: parseSystemProfile(text, stored = true) else: SystemProfile()
+
+proc currentGenerationLiveProfile(stateDir: string): SystemProfile =
+  ## The current generation's operator profile as it was installed
+  ## (``parseStoredUserProfile``: its floor rendered as stored), which the
+  ## carried-state cross-check of a ``secret put`` judges.
+  let current = readCurrentGenerationId(stateDir)
+  var text = ""
+  if current.len > 0:
+    let g = generationProfiles(stateDir, current)
+    if g.found: text = g.user
+  if text.len == 0 and fileExists(userProfilePath(stateDir)):
+    text = readFile(userProfilePath(stateDir))
+  if text.len > 0: parseStoredUserProfile(text, stateDir) else: SystemProfile()
 
 proc currentSecretDecls*(stateDir: string): seq[SecretFileDecl] =
   ## The current generation's ``secrets.secretFile`` declarations.
@@ -151,6 +167,33 @@ proc planConsumers(stateDir: string; services: seq[string]): ConsumerPlan =
     if r.suRestartHeld: result.pending.add(r.suName)
     elif exclusive: result.exclusive.add(r.suName)
     else: result.restart.add(r.suName)
+
+proc secretPutJudged*(starts: openArray[string];
+                      liveUnits: openArray[string]): seq[string] =
+  ## The consumers a ``secret put`` starts or restarts (``starts``) that the
+  ## carried-state cross-check judges (``liveUnits``, from
+  ## ``carried_state.liveReachUnits``): each one, or an instance of a
+  ## template among them (§13 decision 152's mapping). Empty when no carried
+  ## state is on the host, which leaves ``liveUnits`` empty.
+  when mutated("secret-put-unjudged"):
+    # FALSIFYING MUTATION: a put restarts its consumers on whatever systemd
+    # has loaded, as before the owner's decision of 2026-11-25.
+    return
+  for u in starts:
+    if heldBy(u, liveUnits) and u notin result: result.add(u)
+
+proc secretPutLiveProblems*(judged: openArray[string]; p: SystemProfile;
+    show: proc (unit: string): Table[string, string] {.closure.};
+    reload: proc () {.closure.};
+    running: proc (tmpl: string): seq[string] {.closure.} = nil): seq[string] =
+  ## A ``secret put`` treated as a switch for §11.1 (the owner's decision of
+  ## 2026-11-25, "treat as a switch"): after the caller held ``judged``,
+  ## systemd is reloaded and each is judged as systemd loaded it
+  ## (``liveReachProblems``, shared with every switch). A problem refuses
+  ## the put before any consumer is stopped or started.
+  if judged.len == 0: return
+  reload()
+  liveReachProblems(judged, p, show, "/", running)
 
 proc addEntry*(l: SecretsLayout; path, entry: string; content: LockedBytes;
               target: string; createIfAbsent: bool): string =
@@ -256,6 +299,34 @@ proc secretPut*(stateDir: string; l: SecretsLayout; service, name: string;
     let source = currentEnvelope(stateDir, l)
     let changes = plannedSecretChanges(l, decls, source)
     let plan = planConsumers(stateDir, changes)
+    # With carried state on the host a put is a switch for §11.1 (§13
+    # decision 190): the consumers it will start or restart that the
+    # carried-state cross-check judges are held, systemd is reloaded, and
+    # each is judged as systemd loaded it; one loaded unconfined refuses
+    # the put (ECarriedStatePending) before any consumer is stopped or
+    # started, the holds kept, as a refused switch keeps them. The sealed
+    # entry stays sealed and is materialised by the next switch, which
+    # judges its consumers in turn.
+    let judgeProfile = currentGenerationLiveProfile(stateDir)
+    let judged = secretPutJudged(plan.exclusive & plan.restart,
+      liveReachUnits(judgeProfile, CarriedStateDir, "/"))
+    var putHolds: seq[string]
+    if judged.len > 0:
+      putHolds = writeHolds(judged, StartHoldName, StartHoldText)
+      let problems = secretPutLiveProblems(judged, judgeProfile,
+        proc (u: string): Table[string, string] = showUnit(u),
+        proc () = daemonReload(),
+        proc (t: string): seq[string] = hostRunningInstances(t))
+      if problems.len > 0:
+        raise newException(ECarriedStatePending, "secret put: " &
+          entry & " is sealed but not materialised, and no consumer was " &
+          "stopped or restarted: " & problems.join("; ") & " (§11.1: a " &
+          "secret put judges its consumers as a switch does; the holds stay " &
+          "until a switch's check passes)")
+      # Passed: the holds go, and systemd is reloaded so the starts below
+      # are not held, as a switch releases its holds after its check.
+      removeHolds(putHolds)
+      daemonReload()
     var stopped: seq[string]
     try:
       for u in plan.exclusive:

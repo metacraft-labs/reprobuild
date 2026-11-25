@@ -179,7 +179,7 @@ suite "regression — eager cache push covers every active project":
       check fileExists(log)
       if fileExists(log):
         let text = readFile(log)
-        check "cache-push: skipped" in text and (f.ws / "s") in text
+        check " cache-push-skipped " in text and (f.ws / "s") in text
 
   test "t_post_commit_cache_push_falls_back_to_primary_when_a_member_is_broken":
     let gitBin = findExe("git")

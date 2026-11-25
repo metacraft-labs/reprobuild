@@ -82,6 +82,11 @@
 ##   ``strip`` rewrites its input, the producing edge's declared output, in
 ##   place, a write that edge does not declare.
 ##   The argv rendered with every parameter supplied is unchanged.
+## * ``nim c`` gained the optional ``appStaticLib`` flag
+##   (``--app:staticlib``): ``nim_library`` sets it, in place of ``appLib``,
+##   for a library whose ``api:`` block declares ``linkKind static``. It is
+##   rendered only when a caller sets it, so the every-parameter argv gains
+##   ``--app:staticlib`` and no other call's argv changed.
 ##
 ## The negative controls prove the comparison can fail: a model with one
 ## flag's ``alias`` changed, one with a flag's ``format`` changed, one with a
