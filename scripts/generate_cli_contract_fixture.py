@@ -399,6 +399,8 @@ COVERED_COMMANDS = [
     "tool",
     "tool realize",
     "nimble check",
+    "nimble develop",
+    "nimble gitlink-audit",
 ]
 
 BUILT_IN_FLAGS = {"--help", "-h"}

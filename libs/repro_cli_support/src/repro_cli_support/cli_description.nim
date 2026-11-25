@@ -1551,6 +1551,9 @@ proc buildFlags(): NimNode {.compileTime.} =
       help = "Solve a hidden lock under this version strategy (default, " &
         "lowest, highest or lowest-direct) and build from it; the " &
         "committed lock is neither used nor written"
+    boolFlag locked is bool,
+      help = "Build the trees the lock pins: no develop override is " &
+        "applied, automatic or recorded, and each one set aside is named"
     boolFlag printSolvedGraph is bool, clientSide = true,
       help = "Print the solved graph the build would pin, and build nothing"
     boolFlag listTargets is bool, clientSide = true,
@@ -2629,6 +2632,42 @@ proc reproCommandLineDescription*(): NimNode {.compileTime.} =
         flag store is string,
           help = "The source store (default: the user's, under the user " &
             "cache directory)"
+      subcmd "develop",
+          help = "Show the develop overrides of a lock's nimble: " &
+            "packages, record one for a fork or an undeclared checkout, " &
+            "or write the develop overlay lock":
+        pos package is string, required = false,
+          help = "The nimble: package to record an override of (without " &
+            "it, the proposals are printed and nothing is recorded)"
+        flag source is string,
+          help = "The checkout to develop it in, when no sibling's remote " &
+            "is its origin (a fork or another remote)"
+        flag lock is string,
+          help = "The lock (default: repro.lock in the current directory)"
+        flag workspaceRoot is string,
+          help = "The workspace whose develop overrides are written " &
+            "(default: found from the lock's directory)"
+        boolFlag relock is bool,
+          help = "Write the develop overlay lock .repro/develop.lock, " &
+            "solved for every override in effect"
+        boolFlag dryRun is bool,
+          help = "Print the override, or the overlay's differing rows, that " &
+            "would be written, and write nothing"
+      subcmd "gitlink-audit",
+          help = "Classify each git submodule of a project as a catalog " &
+            "package, an untagged catalog commit or an overlay":
+        pos project is string, required = false,
+          help = "The project checkout (default: the current directory)"
+        flag at is string,
+          help = "The revision whose .gitmodules and gitlinks are read " &
+            "(default: HEAD)"
+        flag lock is string,
+          help = "The lock whose Nimble index pin is read (default: the " &
+            "project's repro.lock; without a pin, the index the project's " &
+            "import names)"
+        flag platform is string,
+          help = "The platform the records are read for (default: the host's)"
+        boolFlag json is bool, help = "Print the report as JSON"
     subcmd "deps", help = "Refresh and check scanner-inferred dependencies":
       subcmd "refresh",
           help = "Scan the workspace and rewrite repro.scanned-deps.nim":
