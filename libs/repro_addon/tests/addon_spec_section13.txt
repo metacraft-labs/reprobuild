@@ -135,7 +135,7 @@
 119 A snapshot deletion that fails during a revert
 120 Network configuration goes through the `network` class on every base
 121 A revert that starts because the timer is gone arms a fresh timer first
-122 Uninstall waits for every switch and clears the guard's leftovers
+122 Uninstall waits for every switch and clears the guard's leftovers | pending marker, pending, uninstall, EAddOnSwitchPending, switch
 123 Boot recovery arms a fresh guard timer before a revert
 124 Who creates the guard lock
 125 Every recovery revert has a timer, and a failed arm is reported

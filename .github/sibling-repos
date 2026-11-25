@@ -277,7 +277,11 @@ reprobuild-packages
 # Moved to 02206627 (2026-11-25), io-mon's `agents` tip, with `io-mon-src` in
 # flake.nix and flake.lock: on macOS `gcc` and `g++` get a toolchain drop-in
 # like `cc` and `clang`. 13659436 is an ancestor.
-io-mon=0220662775e1c79028522d2d1787fa4d9ce7479a
+# Moved to 02ec1410 (2026-11-25), io-mon's `agents` tip, with `io-mon-src` in
+# flake.nix and flake.lock: io-mon builds against nim-stackable-hooks 0ada76e
+# (the Windows on Arm64 backend and the root machine gate). 02206627 is an
+# ancestor.
+io-mon=02ec141006286d268c0fa7dfabab5a94fc69c23e
 # `release-pipeline.yml` overrides `nim-stackable-hooks-src` to THIS clone, so the
 # clone must be the revision the flake pins, or the release compiles the
 # monitor shim from different sources than every other build. Cloned at
