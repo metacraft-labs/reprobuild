@@ -382,6 +382,94 @@ try {
     $out = Invoke-AuditScript -Bin $empty
     if ($LASTEXITCODE -ne 1) { throw "exit $LASTEXITCODE, expected 1`n$($out -join "`n")" }
   }
+
+  # The archive audit: every PE image anywhere in an extracted archive, not
+  # only bin/. Images outside bin/ (lib/ today) resolve their imports from
+  # bin/ or from Windows, like bin/'s own.
+  $pkg = Join-Path $synth "pkg"
+  $pkgBin = Join-Path $pkg "bin"
+  $pkgLib = Join-Path $pkg "lib"
+  $pkgShare = Join-Path $pkg "share"
+  New-Item -ItemType Directory -Path $pkgBin, $pkgLib, $pkgShare | Out-Null
+  New-TestPeImage -Path (Join-Path $pkgBin "repro.exe") -Machine $arm64 -Imports @("KERNEL32.dll", "libfoo.dll")
+  New-TestPeImage -Path (Join-Path $pkgBin "libfoo.dll") -Machine $arm64 -Imports @("KERNEL32.dll")
+  New-TestPeImage -Path (Join-Path $pkgLib "shim.dll") -Machine $arm64 -Imports @("KERNEL32.dll", "libfoo.dll") -DelayImports @("ADVAPI32.dll")
+  Set-Content -LiteralPath (Join-Path $pkgShare "notes.txt") -Value "not an image" -Encoding ascii
+  Check "a closed archive passes the archive audit, lib/ included" {
+    Assert-WindowsArchiveClosure -Root $pkg -Arch arm64 -SystemDir $synthSys
+  }
+  Check "a lib/ image with a non-system import fails the archive audit" {
+    $bad = Join-Path $pkgLib "bad.dll"
+    New-TestPeImage -Path $bad -Machine $arm64 -Imports @("KERNEL32.dll", "libmissing.dll")
+    try {
+      Assert-Throws { Assert-WindowsArchiveClosure -Root $pkg -Arch arm64 -SystemDir $synthSys } `
+        'lib/bad\.dll imports libmissing\.dll, which is neither in bin/ nor an operating-system DLL'
+    } finally { Remove-Item -LiteralPath $bad }
+  }
+  Check "a lib/ image importing a DLL that only lib/ holds fails: imports resolve to bin/ or Windows" {
+    $helper = Join-Path $pkgLib "libhelper.dll"
+    $user = Join-Path $pkgLib "user.dll"
+    New-TestPeImage -Path $helper -Machine $arm64 -Imports @("KERNEL32.dll")
+    New-TestPeImage -Path $user -Machine $arm64 -Imports @("libhelper.dll")
+    try {
+      Assert-Throws { Assert-WindowsArchiveClosure -Root $pkg -Arch arm64 -SystemDir $synthSys } `
+        'lib/user\.dll imports libhelper\.dll, which is neither in bin/ nor an operating-system DLL'
+    } finally { Remove-Item -LiteralPath $helper, $user }
+  }
+  Check "a lib/ image with a wrong-machine import fails the archive audit" {
+    $x64Dll = Join-Path $pkgBin "libx64.dll"
+    $user = Join-Path $pkgLib "uses-x64.dll"
+    New-TestPeImage -Path $x64Dll -Machine $x64 -Imports @("KERNEL32.dll")
+    New-TestPeImage -Path $user -Machine $arm64 -Imports @("libx64.dll")
+    try {
+      Assert-Throws { Assert-WindowsArchiveClosure -Root $pkg -Arch arm64 -SystemDir $synthSys } `
+        'lib/uses-x64\.dll imports libx64\.dll, which is an image for machine 0x8664, not the arm64 machine 0xAA64'
+    } finally { Remove-Item -LiteralPath $x64Dll, $user }
+  }
+  Check "a lib/ image of the wrong machine fails the archive audit" {
+    $wrong = Join-Path $pkgLib "wrong.dll"
+    New-TestPeImage -Path $wrong -Machine $x64 -Imports @("KERNEL32.dll")
+    try {
+      Assert-Throws { Assert-WindowsArchiveClosure -Root $pkg -Arch arm64 -SystemDir $synthSys } `
+        'lib.wrong\.dll is a PE image for machine 0x8664, not the arm64 machine 0xAA64'
+    } finally { Remove-Item -LiteralPath $wrong }
+  }
+  Check "an image in any other directory is audited too" {
+    $other = Join-Path $pkg "libexec"
+    New-Item -ItemType Directory -Path $other | Out-Null
+    New-TestPeImage -Path (Join-Path $other "tool.exe") -Machine $arm64 -Imports @("libnowhere.dll")
+    try {
+      Assert-Throws { Assert-WindowsArchiveClosure -Root $pkg -Arch arm64 -SystemDir $synthSys } `
+        'libexec/tool\.exe imports libnowhere\.dll'
+    } finally { Remove-Item -LiteralPath $other -Recurse }
+  }
+  Check "a file that starts like an image but is not a well-formed PE fails the archive audit" {
+    $fake = Join-Path $pkgShare "looks-like.bin"
+    [IO.File]::WriteAllBytes($fake, [byte[]](0x4d, 0x5a) + [byte[]]::new(126))
+    try {
+      Assert-Throws { Assert-WindowsArchiveClosure -Root $pkg -Arch arm64 -SystemDir $synthSys } `
+        'share/looks-like\.bin starts with MZ but is not a readable PE image'
+    } finally { Remove-Item -LiteralPath $fake }
+  }
+  Check "an archive with no image in bin/ fails the archive audit" {
+    $nobin = Join-Path $synth "nobin"
+    New-Item -ItemType Directory -Path (Join-Path $nobin "lib") | Out-Null
+    New-TestPeImage -Path (Join-Path (Join-Path $nobin "lib") "shim.dll") -Machine $arm64 -Imports @("KERNEL32.dll")
+    Assert-Throws { Assert-WindowsArchiveClosure -Root $nobin -Arch arm64 -SystemDir $synthSys } 'no \.exe or \.dll image in bin'
+  }
+  Check "the archive audit entry point audits -ArchiveRoot and refuses a lib/ violation with exit 1" {
+    $ErrorActionPreference = "Continue"
+    $out = @(& $shell -NoProfile -NonInteractive -File $auditScript -ArchiveRoot $pkg -Arch arm64 -SystemDir $synthSys 2>&1 | ForEach-Object { "$_" })
+    if ($LASTEXITCODE -ne 0) { throw "closed archive: exit $LASTEXITCODE`n$($out -join "`n")" }
+    if (-not (($out -join "`n") -match 'closure audit: 3 image\(s\) in')) { throw "no 3-image summary in:`n$($out -join "`n")" }
+    $bad = Join-Path $pkgLib "bad.dll"
+    New-TestPeImage -Path $bad -Machine $arm64 -Imports @("libmissing.dll")
+    try {
+      $out = @(& $shell -NoProfile -NonInteractive -File $auditScript -ArchiveRoot $pkg -Arch arm64 -SystemDir $synthSys 2>&1 | ForEach-Object { "$_" })
+      if ($LASTEXITCODE -ne 1) { throw "open archive: exit $LASTEXITCODE, expected 1`n$($out -join "`n")" }
+      if (-not (($out -join "`n") -match 'lib/bad\.dll imports libmissing\.dll')) { throw "violation not named in:`n$($out -join "`n")" }
+    } finally { Remove-Item -LiteralPath $bad }
+  }
 } finally {
   Remove-Item -LiteralPath $synth -Recurse -Force -ErrorAction SilentlyContinue
 }
