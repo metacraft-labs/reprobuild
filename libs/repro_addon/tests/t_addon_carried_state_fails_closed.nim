@@ -69,7 +69,7 @@ import repro_infra/start_holds
 from repro_test_support import testCaseScratchSlug
 import repro_elevation
 from repro_elevation/posix_system_parse import systemdUnitNameError
-import repro_addon/[addon_apply, adoption_cli, reassert, state_sets, transitions]
+import repro_addon/[addon_apply, adoption_cli, reassert, secrets_ops, state_sets, transitions]
 import repro_addon/agent_checks
 
 const
@@ -364,7 +364,7 @@ suite "carried state fails closed":
     # ... and the restore unit orders itself before each carried unit by
     # name, for one without default dependencies.
     let unitText = readFile(d / RestoreUnitName)
-    check "Before=sysinit.target shutdown.target eth-validator.service" in unitText
+    check "Before=shutdown.target eth-validator.service" in unitText
     check "ConditionPathExists" notin unitText
     # The installation is recorded beside the carried directory.
     check fileExists(installedMarkerPath(rooted))
@@ -3248,3 +3248,163 @@ Service=genalias.service
     let r = refusal15("gen-@x.service", "[Service]\nSockets=sshd.socket\n")
     checkpoint $r
     check r.len == 1 and "gen-@x.service sets Sockets=" in r[0]
+
+# --- A13 review round 15: the owner's decisions of 2026-11-25 ------------
+suite "the restore beside other units (§13 decision 191)":
+  test "decision 191: the restore unit is not before sysinit.target, and is bounded":
+    # Falsifiers: restore-holds-sysinit (the ordering back) and
+    # restore-unbounded (no start timeout).
+    let t = stateRestoreUnitText("/usr/bin/repro", @["eth-validator.service"])
+    checkpoint t
+    var before = ""
+    for l in t.splitLines():
+      if l.startsWith("Before="): before = l
+    check before == "Before=shutdown.target eth-validator.service"
+    check "sysinit.target" notin before
+    check ("TimeoutStartSec=" & RestoreStartTimeout & "\n") in t
+    check RestoreStartTimeout == "90min"
+    # Still pulled in at sysinit, and still never conditioned.
+    check "WantedBy=sysinit.target" in t
+    check "DefaultDependencies=no" in t
+
+  test "decision 191: a placeholder written to during the restore is refused, not removed":
+    # Falsifier: restore-removes-filled-placeholder (the round-14 recursive
+    # removal), under which the concurrent unit's file is lost.
+    let base = fresh("r15-place")
+    let staging = base / ".repro-restore-v-1"
+    let target = base / "v"
+    createDir(staging)
+    writeFile(staging / "validator.db", "history\n")
+    createDir(target)
+    writeFile(target / "written-meanwhile", "a concurrent unit's\n")
+    expect StateSetError:
+      placeStagedTree(staging, target, "/var/lib/v")
+    check readFile(target / "written-meanwhile") == "a concurrent unit's\n"
+    check fileExists(staging / "validator.db")
+    # Control: an empty placeholder, and none at all, take the tree.
+    removeFile(target / "written-meanwhile")
+    placeStagedTree(staging, target, "/var/lib/v")
+    check readFile(target / "validator.db") == "history\n"
+    check not dirExists(staging)
+    let staging2 = base / ".repro-restore-w-1"
+    createDir(staging2)
+    writeFile(staging2 / "x", "y\n")
+    placeStagedTree(staging2, base / "w", "/var/lib/w")
+    check readFile(base / "w" / "x") == "y\n"
+
+proc installed15(name: string): (string, string) =
+  ## As ``installedR6``, from a backup of its own (the shared one may have
+  ## been consumed by the suites before).
+  let src = fresh(name & "-src")
+  createDir(src / "var/lib/ethereum/validator")
+  writeFile(src / "var/lib/ethereum/validator/validator.db", "history\n")
+  let d = src / "carried"
+  discard backupStateSet(parseSystemProfile(Validator), d, "h", stopped(),
+                         hold = false, root = src)
+  let root = fresh(name)
+  discard restoreStateSet(d, stopped(), root = root)
+  writeFile(installedMarkerPath(d), d & "\n")
+  (root, d)
+
+suite "an essential unit never requires the restore (§13 decision 192)":
+  # Each unit is resolved by its Id= (decision 177): a stub systemd that
+  # knows an alias of logind and an instance of a getty template.
+  proc ids(aliases: Table[string, string]): LiveHost =
+    LiveHost(show: proc (u: string): Table[string, string] =
+      if u in aliases: {"Id": aliases[u]}.toTable
+      else: {"Id": u}.toTable)
+  let none = ids(initTable[string, string]())
+  proc refusals192(text: string; root, d: string; host: LiveHost): seq[string] =
+    result = essentialRequirementRefusal(parseSystemProfile(text), d, root, host)
+    checkpoint $result
+
+  test "decision 192, route 1: a profile drop-in over sshd.service":
+    let (root, d) = installed15("r15-ess1")
+    let r = refusals192("systemd.systemDropIn {\n  unit = \"sshd.service\"\n" &
+      "  name = \"harden\"\n  content = \"[Service]\nEnvironment=A=1\n\"\n}\n",
+      root, d, none)
+    check r.len == 1
+    check "sshd.service is essential and would require the carried-state " &
+      "restore: a profile drop-in over it (harden)" in r[0]
+
+  test "decision 192, route 2: a profile that defines an essential unit reaching everything":
+    let (root, d) = installed15("r15-ess2")
+    let r = refusals192(unit("dbus.service",
+      "[Service]\nExecStart=/bin/true\n"), root, d, none)
+    check r.len == 1 and "dbus.service is essential" in r[0] and
+      "the profile defines it" in r[0]
+
+  test "decision 192, route 3: a unit a profile unit starts, the boot's included":
+    let (root, d) = installed15("r15-ess3")
+    hostFile(root, "/lib/systemd/system/default.target",
+      "[Unit]\nWants=systemd-networkd.service\n")
+    hostFile(root, "/lib/systemd/system/systemd-networkd.service",
+      "[Service]\nExecStart=/bin/true\n")
+    let starter = unit("st.service", "[Unit]\nWants=systemd-networkd.service\n" &
+      "[Service]\nProtectSystem=strict\nNoNewPrivileges=yes\nUser=app\n" &
+      "ReadWritePaths=/var/lib/other\nExecStart=/bin/true\n")
+    let r = refusals192(starter, root, d, none)
+    # A directly started unit gets the requirement whatever the boot says
+    # (route 3, as §11.1 now reads), so it is refused though the boot
+    # starts it too.
+    check r.len == 1 and "systemd-networkd.service is essential" in r[0] and
+      "the profile's st.service starts it" in r[0]
+
+  test "decision 192, route 4: decision 60's onward dependency closure":
+    let (root, d) = installed15("r15-ess4")
+    hostFile(root, "/lib/systemd/system/default.target", "[Unit]\n")
+    hostFile(root, "/lib/systemd/system/online.target",
+      "[Unit]\nWants=systemd-networkd-wait-online.service\n")
+    hostFile(root, "/lib/systemd/system/systemd-networkd-wait-online.service",
+      "[Service]\nExecStart=/bin/true\n")
+    let starter = unit("on.service", "[Unit]\nWants=online.target\n" &
+      "[Service]\nProtectSystem=strict\nNoNewPrivileges=yes\nUser=app\n" &
+      "ReadWritePaths=/var/lib/other\nExecStart=/bin/true\n")
+    let r = refusals192(starter, root, d, none)
+    check r.len == 1 and "systemd-networkd-wait-online.service is essential" in r[0] and
+      "decision 60's onward dependency closure" in r[0]
+
+  test "decision 192: an alias and a template instance are matched by Id=":
+    let (root, d) = installed15("r15-ess5")
+    let host = ids({"dbus-org.freedesktop.login1.service":
+                    "systemd-logind.service"}.toTable)
+    let r = refusals192("systemd.systemDropIn {\n  unit = " &
+      "\"dbus-org.freedesktop.login1.service\"\n  name = \"x\"\n  content = " &
+      "\"[Service]\nEnvironment=A=1\n\"\n}\n" &
+      "systemd.systemDropIn {\n  unit = \"getty@tty3.service\"\n  name = \"y\"\n" &
+      "  content = \"[Service]\nEnvironment=A=1\n\"\n}\n", root, d, host)
+    check r.len == 2
+    check "dbus-org.freedesktop.login1.service (systemd-logind.service) is essential" in r[0] or
+      "dbus-org.freedesktop.login1.service (systemd-logind.service) is essential" in r[1]
+    check "getty@tty3.service is essential" in r[0] or
+      "getty@tty3.service is essential" in r[1]
+
+  test "decision 192 (control): no carried state installed, or no essential unit, refuses nothing":
+    let (root, d) = installed15("r15-ess6")
+    check refusals192(unit("ok.service", "[Service]\nExecStart=/bin/true\n"),
+      root, d, none).len == 0
+    removeFile(installedMarkerPath(d))
+    check refusals192("systemd.systemDropIn {\n  unit = \"sshd.service\"\n" &
+      "  name = \"harden\"\n  content = \"[Service]\nEnvironment=A=1\n\"\n}\n",
+      root, d, none).len == 0
+
+suite "a secret put is a switch for the carried-state check (§13 decision 190)":
+  test "decision 190: a put judges the consumers it restarts, and refuses one loaded as root":
+    # Falsifier: secret-put-unjudged (nothing is judged).
+    let judged = secretPutJudged(["a.service", "tpl@1.service", "other.service"],
+                                 ["a.service", "tpl@.service"])
+    check judged == @["a.service", "tpl@1.service"]
+    var reloads = 0
+    let p = parseSystemProfile(unit("a.service",
+      "[Service]\nDynamicUser=yes\nNoNewPrivileges=yes\nExecStart=/bin/true\n"))
+    let rootShow = proc (u: string): Table[string, string] =
+      {"ProtectSystem": "strict", "DynamicUser": "no", "NoNewPrivileges": "yes",
+       "User": "root", "Group": "root", "SupplementaryGroups": ""}.toTable
+    let problems = secretPutLiveProblems(["a.service"], p, rootShow,
+      proc () = inc reloads)
+    checkpoint $problems
+    check reloads == 1
+    check problems.len == 1 and "a.service as systemd loaded it is not confined" in problems[0]
+    # Control: nothing to judge, nothing reloaded.
+    check secretPutLiveProblems([], p, rootShow, proc () = inc reloads).len == 0
+    check reloads == 1

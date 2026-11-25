@@ -46,6 +46,7 @@
 import std/[algorithm, json, os, posix, sequtils, sets, strutils, times]
 
 import repro_core/host_apply_lock
+import repro_infra/addon_diagnostics
 
 import repro_elevation/posix_system_driver
 
@@ -62,6 +63,7 @@ import ./host_exec
 import ./addon_secrets
 import ./ledger
 import ./nft_tables
+from ./reassert import guardStateDirs
 import ./mutations
 import ./static_tree
 import ./store_custody
@@ -1815,6 +1817,32 @@ proc completeDiscardBeforeKeys*(r: var UninstallResult; l: Ledger;
   discard keepStateWhenIncomplete(r, l, stateDir)
   true
 
+proc pendingSwitchRefusal*(stateDir: string;
+                           pointer = AddonStateDirPointer;
+                           pointerOwner = 0): string =
+  ## Why uninstall must not start, or "": a pending marker of any switch,
+  ## network or not, in any place an apply looks for one (spec §6.4 step
+  ## 0, §7.7; ``reassert.guardStateDirs``). The caller holds the host apply
+  ## lock, so a marker is never one a running switch is still writing
+  ## past: a live owner holds that lock, and the uninstall would not have
+  ## got it (``ELockTimeout``).
+  for dir in guardStateDirs(stateDir, pointer, pointerOwner):
+    if not hasPendingMarker(dir): continue
+    var what = ""
+    try:
+      let m = readPendingMarker(dir)
+      what = " (attempt " & (if m.attempt.len > 0: m.attempt else: "unnamed") &
+        ", " & (if m.purpose.len > 0: m.purpose else: "apply") &
+        " from generation " &
+        (if m.fromGeneration.len > 0: m.fromGeneration else: "none") &
+        ", step " & $m.step & ", owner pid " & $m.ownerPid & ")"
+    except CatchableError as e:
+      what = " (unreadable: " & e.msg & ")"
+    return "a switch is pending: " & pendingMarkerPath(dir) & what &
+      "; finish it or run `repro system addon recover`, then uninstall. " &
+      "Nothing was changed"
+  ""
+
 proc runAddonUninstall*(opts: UninstallOptions): UninstallResult =
   let stateDir = if opts.stateDir.len > 0: opts.stateDir else: DefaultStateDir
   # The host-wide apply lock for the whole uninstall: it removes the store,
@@ -1822,6 +1850,15 @@ proc runAddonUninstall*(opts: UninstallOptions): UninstallResult =
   # writing at the same moment (``repro_core/host_apply_lock``).
   var hostLock = acquireHostApplyLock("repro system addon uninstall")
   defer: hostLock.release()
+  # 0. Refuse while a switch is pending (spec §6.4 step 0): the first act
+  #    under the host apply lock, before the evidence gate, the capture of
+  #    the pre-bootstrap inputs and any stop. A marker is the only record
+  #    of what an interrupted switch changed; uninstalling over it would
+  #    remove objects by a ledger the host no longer matches.
+  when not mutated("uninstall-skips-pending-check"):
+    let pending = pendingSwitchRefusal(stateDir)
+    if pending.len > 0:
+      raise newAddOnError(adSwitchPending, pending)
   # §13 decisions 161 and 165: an earlier run removed the ledger copy
   # and could not rmdir one of the add-on's own directories; its token says
   # which. Finish that. Without the token nothing is touched here.

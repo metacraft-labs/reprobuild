@@ -46,9 +46,10 @@ proc dash*(): string =
     "'): the boot-hold script must be run under the shell Debian and " &
     "Ubuntu boot it with"
 
-proc run*(s: Sandbox; reloadFails = false): string =
+proc run*(s: Sandbox; reloadFails = false; limitSec = 0): string =
   ## The unit's own script with its paths moved under the sandbox; its
-  ## output and the stand-ins' lines.
+  ## output and the stand-ins' lines. ``limitSec`` bounds a case whose
+  ## falsifying build can read without end (a list on ``/dev/full``).
   let script = bootHoldScript()
     .replace(BootHoldRecordPath, bootHoldRecordPath(s.state))
     .replace(BootHoldsWrittenList, s.written)
@@ -58,7 +59,8 @@ proc run*(s: Sandbox; reloadFails = false): string =
     .replace("/usr/bin/", "")
   writeFile(s.tmp / "script.sh", script)
   discard execShellCmd("env PATH=" & s.bin & ":" & getEnv("PATH") &
-    " A9_RELOAD=" & (if reloadFails: "1" else: "0") & " " & dash() & " " &
+    " A9_RELOAD=" & (if reloadFails: "1" else: "0") & " " &
+    (if limitSec > 0: "timeout -k 2 " & $limitSec & " " else: "") & dash() & " " &
     s.tmp / "script.sh" & " >> " & s.log & " 2>&1")
   readFile(s.log)
 
