@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 36,
-    "nimTestBinaries": 3256,
+    "nimTestBinaries": 3257,
     "pureUnitConsolidationGroups": 96,
     "pureUnitTests": 852,
     "staticallyDetectedRuntimeCompilerFlowTests": 164,
-    "testEntries": 3315
+    "testEntries": 3316
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1859,7 +1859,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 29,
-      "integration": 1833,
+      "integration": 1834,
       "platform/destructive": 206,
       "pure unit": 852,
       "unclassified": 395
@@ -2082,9 +2082,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 3256,
+    "nimTestBinaryCount": 3257,
     "pythonTestFileCount": 59,
-    "testEntryCount": 3315
+    "testEntryCount": 3316
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -6183,7 +6183,7 @@
             "workRoot",
             "wrapped"
           ],
-          "line": 1445,
+          "line": 1448,
           "path": "tests/integration/t_every_launch_path_is_monitored.nim",
           "patterns": [
             "cc"
@@ -43957,6 +43957,27 @@
       "owner": "tests/integration",
       "requiresReproBinary": true,
       "source": "tests/integration/t_a_gate_refusal_over_an_unpublished_sibling_names_the_push_first.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_a_grant_behind_a_denial_in_one_batch_is_not_dropped",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_build_engine",
+        "repro_core",
+        "repro_depfile",
+        "repro_runquota",
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_a_grant_behind_a_denial_in_one_batch_is_not_dropped.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
       "staticallyDetectedRuntimeCompilerFlow": false,
