@@ -73,11 +73,11 @@ proc namespaceReason(): string =
 proc reproSeenAt(fx: WorkspaceCertifyFixture; mounts, seen: string;
                  args: openArray[string]): tuple[code: int; output: string] =
   ## The built `repro <args>` run in `seen`, after `mounts` (run as root of a
-  ## fresh user and mount namespace) made `app` visible there, with the tool
-  ## on `PATH` and the daemon key handed to issuance.
+  ## fresh user and mount namespace) made `app` visible there, in the
+  ## fixture's `reproEnv`: off the caller's daemon, the tool on `PATH` and the
+  ## daemon key handed to issuance.
   when defined(posix):
-    var env = daemonKeyEnv(fx.cf.daemonKey, certifyKeyId)
-    env.add((name: "PATH", value: fx.binDir & $PathSep & getEnv("PATH")))
+    let env = fx.reproEnv
     let cacheRoot = createTempDir("rp", "", getTempDir())
     defer: removeDir(cacheRoot)
     var command = "cd " & quoteShell(seen) & " &&"

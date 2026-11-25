@@ -31126,7 +31126,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g13",
+    group: "t_group_tests_integration_g12",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_rename_old_reader_parses_fragment.nim",
@@ -31798,7 +31798,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g14",
+    group: "t_group_tests_integration_g13",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_reproos_uki_through_the_cvm_path.nim",
@@ -32578,7 +32578,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g15",
+    group: "t_group_tests_integration_g14",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_shell_non_tty_refusal_and_inline_command.nim",
@@ -33502,7 +33502,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g16",
+    group: "t_group_tests_integration_g15",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_targets_are_sorted_and_deduplicated_in_the_signed_payload.nim",
@@ -34270,7 +34270,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g17",
+    group: "t_group_tests_integration_g16",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_ux_m1_reprobuild_module_hierarchy_and_lsp.nim",
@@ -34491,6 +34491,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/integration/t_workspace_branch_roles_query.nim",
     binary: "build/test-bin/t_workspace_branch_roles_query",
+    defines: @[],
+    requiresReproBinary: true,
+    requiresMonitorShim: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_tests_integration_g17",
+    singleReason: ""),
+  TestSpec(
+    source: "tests/integration/t_workspace_certify_fixture_builds_off_the_callers_daemon.nim",
+    binary: "build/test-bin/t_workspace_certify_fixture_builds_off_the_callers_daemon",
     defines: @[],
     requiresReproBinary: true,
     requiresMonitorShim: false,
