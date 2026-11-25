@@ -7333,6 +7333,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_libs_repro_elevation_tests_g01",
     singleReason: ""),
   TestSpec(
+    source: "libs/repro_elevation/tests/t_fs_system_file_writes_never_follow_links.nim",
+    binary: "build/test-bin/t_fs_system_file_writes_never_follow_links",
+    defines: @[],
+    requiresReproBinary: false,
+    requiresMonitorShim: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: const"),
+  TestSpec(
     source: "libs/repro_elevation/tests/t_inline_exec_deadline_and_output.nim",
     binary: "build/test-bin/t_inline_exec_deadline_and_output",
     defines: @[],
