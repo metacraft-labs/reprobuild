@@ -1213,17 +1213,17 @@
     "io-mon-src": {
       "flake": false,
       "locked": {
-        "lastModified": 1795474122,
-        "narHash": "sha256-aiIUljMFLYTTGeuXbBDSNunqBgB5u/siGdgwjf3fnfU=",
+        "lastModified": 1795564975,
+        "narHash": "sha256-rmvg5vre73K5rYhqbe2rCXgpqoyvuG2AIpV88f8sUIA=",
         "owner": "metacraft-labs",
         "repo": "io-mon",
-        "rev": "1365943692eedfb0699ce90e59c4602d90317561",
+        "rev": "0220662775e1c79028522d2d1787fa4d9ce7479a",
         "type": "github"
       },
       "original": {
         "owner": "metacraft-labs",
         "repo": "io-mon",
-        "rev": "1365943692eedfb0699ce90e59c4602d90317561",
+        "rev": "0220662775e1c79028522d2d1787fa4d9ce7479a",
         "type": "github"
       }
     },
