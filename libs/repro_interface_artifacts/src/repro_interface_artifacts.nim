@@ -10644,10 +10644,10 @@ proc extractInterfaceFromModuleBody(modulePath, artifactPath,
   # a nimble root (`mangleModuleName`), and no root lay near this directory:
   # the shim was named after its path from the runner, which carries the whole
   # action-cache root and the 64-character identity, so a long root made a
-  # file name over NAME_MAX (283 bytes at a 120-character root, reprobuild-pm
-  # issues/2026-10-20-..., "A newer compiler does not fix the sibling shim
-  # either"). Relative to its own directory the name is `@prepro_sib_<selector>
-  # .nim.c`, whatever the root.
+  # file name over NAME_MAX (283 bytes at a 120-character root on macOS; a
+  # newer compiler does not change that, because the name depends on which
+  # roots the compile passes). Relative to its own directory the name is
+  # `@prepro_sib_<selector>.nim.c`, whatever the root.
   var shimPathFlag = ""
   if shimDirOverride:
     let shimDir = absolutePath(buildScratchRoot(workDir, scratchDir)) /

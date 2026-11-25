@@ -1,7 +1,6 @@
 ## Interface extraction succeeds for a recipe at a very deep path.
 ##
-## The first form of reprobuild-pm
-## `issues/2026-10-20-interface-extraction-nimcache-name-exceeds-name-max-for-deep-recipe-paths.md`:
+## The first form of the "generated C file name exceeds NAME_MAX" defect:
 ## Nim 2.2.4 named the generated C file of a recipe after its path relative
 ## to the project only, so a recipe about 300 characters deep got a file name
 ## over NAME_MAX (255) and the extraction died with `cannot open`. Recipe

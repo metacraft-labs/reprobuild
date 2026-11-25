@@ -7,9 +7,10 @@
 # releases do not.
 #
 # Operator decision of 2026-11-24: recipe compilation REQUIRES Nim 2.2.10
-# (reprobuild-pm issues/2026-10-20-interface-extraction-nimcache-name-exceeds-
-# name-max-for-deep-recipe-paths.md), so Nim 2.2.4 is no longer a supported
-# compiler and the lowest one this repository supports is the floor, 2.2.10.
+# (Nim 2.2.4 names a generated C file after its path relative to the project
+# only, so a deep recipe path makes a name over the filesystem's limit), so
+# Nim 2.2.4 is no longer a supported compiler and the lowest one this
+# repository supports is the floor, 2.2.10.
 # The lane therefore builds the same suites with 2.2.10 (the nixpkgs snapshot
 # the engine's own Linux bootstrap uses, `BootstrapNimNixpkgsRev`; a unit test
 # holds the two equal). It still earns its keep as the one place the

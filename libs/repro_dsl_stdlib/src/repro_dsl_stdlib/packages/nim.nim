@@ -57,10 +57,9 @@ var reproConfigNimsFile {.threadvar.}: string
 package nim:
   provisioning:
     # NOT the canonical pin. Recipe compilation requires Nim 2.2.10 (operator
-    # decision of 2026-11-24; reprobuild-pm issues/2026-10-20-interface-
-    # extraction-nimcache-name-exceeds-name-max-for-deep-recipe-paths.md), and
-    # the canonical snapshot (addf7cf...) carries Nim 2.2.4, whose generated C
-    # file names grow with the recipe's depth. This is the snapshot the engine's
+    # decision of 2026-11-24), and the canonical snapshot (addf7cf...) carries
+    # Nim 2.2.4, whose generated C file names grow with the recipe's depth
+    # until the compile dies with `cannot open`. This is the snapshot the engine's
     # own Linux bootstrap already uses for its Nim
     # (`repro_tool_profiles.BootstrapNimNixpkgsRev`), which carries 2.2.10;
     # `t_catalog_nim_nix_arm_is_the_recipe_compiler_release` holds the two

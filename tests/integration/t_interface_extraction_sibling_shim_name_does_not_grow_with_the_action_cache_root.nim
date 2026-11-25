@@ -1,11 +1,10 @@
 ## The C file Nim generates for a sibling-import shim has a short name under a
 ## LONG action-cache root.
 ##
-## The second form of reprobuild-pm
-## `issues/2026-10-20-interface-extraction-nimcache-name-exceeds-name-max-for-deep-recipe-paths.md`
-## ("A newer compiler does not fix the sibling shim either", 2026-11-15): a
-## recipe-relative interface extraction writes a recipe's sibling-import shims
-## under its identity's scratch directory,
+## The second form of the "generated C file name exceeds NAME_MAX" defect
+## (a newer compiler does not fix it, 2026-11-15): a recipe-relative
+## interface extraction writes a recipe's sibling-import shims under its
+## identity's scratch directory,
 ## `<action-cache root>/recipe-compiles/interface/<64-hex>/staging/work/sibling-shims/`.
 ## No project, `--path` or nimble root lay near it, so Nim named the shim's C
 ## file after the whole path from the runner: 283 bytes at a 120-character
