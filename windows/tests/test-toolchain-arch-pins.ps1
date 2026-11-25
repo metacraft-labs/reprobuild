@@ -384,3 +384,7 @@ if ($failures.Count -ne 0) {
   throw "test-toolchain-arch-pins: $($failures.Count) failure(s):`n  " + ($failures -join "`n  ")
 }
 Write-Host "test-toolchain-arch-pins: all checks passed"
+# The audit entry-point checks leave $LASTEXITCODE at 1 (a refusal they
+# expected). Windows PowerShell 5.1 reports a -File script's last native exit
+# code as its own, so without this a passing run would exit 1.
+exit 0
