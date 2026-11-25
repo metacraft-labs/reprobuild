@@ -109,7 +109,8 @@ proc git(fx: WorkspaceCertifyFixture; args: varargs[string]):
   var argv = @[fx.cf.sib.gitBin, "-C", fx.app]
   for a in args: argv.add(a)
   let res = runShell(shellCommand(argv,
-    @[(name: "REPROBUILD_REPRO", value: fx.cf.sib.repro)]), fx.app)
+    ownDaemonEnv() & @[(name: "REPROBUILD_REPRO", value: fx.cf.sib.repro)]),
+    fx.app)
   (res.code, res.output)
 
 proc mustGit(fx: WorkspaceCertifyFixture; args: varargs[string]): string =

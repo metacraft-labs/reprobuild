@@ -212,6 +212,19 @@ proc providerCompileFailure*(run: BuildRunResult): string =
       return describeFailedAction(item)
   "provider compile failed"
 
+proc providerCompileEdgeRunOf*(run: BuildRunResult): ProviderCompileEdgeRun =
+  ## How a run of the provider-compile edge arrived at its outputs, for
+  ## ``verifyProviderCompileEdge``: whether the ``__repro_provider_compile``
+  ## action launched, and its engine status, cache decision and reason.
+  for item in run.results:
+    if item.id == "__repro_provider_compile":
+      result.compiled = item.launched
+      result.provenance = "status=" & $item.status & " cache=" &
+        $item.cacheDecision &
+        (if item.reason.len > 0: " reason=" & item.reason else: "")
+      return
+  result.provenance = "the run has no __repro_provider_compile action"
+
 proc providerCompileFailureWithLog*(run: BuildRunResult;
                                     artifactPath: string): string =
   ## `providerCompileFailure` for a caller that has the provider artifact
@@ -1043,12 +1056,36 @@ proc computeDevEnvEdge*(config: DevEnvEdgeConfig): DevEnvEdgeResult =
         providerAction.inputs.add(receipt)
 
     var compileConfig = active.engineConfig()
-    result.providerCompileResult = runBuild(graph(@[providerAction] & provisioningActions),
-      compileConfig)
-    result.providerCompileAction = result.providerCompileResult.actionById(
-      "__repro_provider_compile")
-    result.stats.providerBuildLaunched =
-      result.providerCompileAction.launched
+    # The FIRST run carries the provisioning actions; a recompile
+    # (`verifyProviderCompileEdge`) re-runs the compile alone, over the
+    # receipts the first run left.
+    let compileGraph = graph(@[providerAction] & provisioningActions)
+    var edgeRuns = 0
+    let edgeStats = addr result.stats
+    let edgeResult = addr result.providerCompileResult
+    let edgeAction = addr result.providerCompileAction
+    let artifactPath = result.providerArtifactPath
+    let outDir = active.outDir
+    let runEdge = proc (forceRebuild: bool): ProviderCompileEdgeRun =
+      var config = compileConfig
+      config.forceRebuild = config.forceRebuild or forceRebuild
+      let run = runBuild(
+        (if edgeRuns == 0: compileGraph else: graph(@[providerAction])),
+        config)
+      inc edgeRuns
+      edgeResult[] = run
+      edgeAction[] = run.actionById("__repro_provider_compile")
+      edgeStats[].providerBuildLaunched =
+        edgeStats[].providerBuildLaunched or edgeAction[].launched
+      if run.hasFailedActions():
+        raiseDevEnvEdge(recordEdgeFailure(outDir,
+          "provider-compile-failure", providerCompileFailure(run)))
+      if not fileExists(extendedPath(artifactPath)):
+        raiseDevEnvEdge("provider compile edge did not write artifact: " &
+          artifactPath)
+      providerCompileEdgeRunOf(run)
+    let providerConsistency = verifyProviderCompileEdge(providerPlan,
+      result.providerArtifactPath, runEdge)
     # ``asCacheHit`` and ``asUpToDate`` BOTH mean the cache satisfied this edge
     # and no compile ran; they differ only in whether the outputs had to be
     # restored from the CAS or were already on disk. A consumer reading
@@ -1068,16 +1105,7 @@ proc computeDevEnvEdge*(config: DevEnvEdgeConfig): DevEnvEdgeResult =
     # a hit into when the outputs are still on disk).
     result.stats.providerBuildSkippedFresh =
       result.providerCompileAction.status in {asCacheHit, asUpToDate}
-    if result.providerCompileResult.hasFailedActions():
-      raiseDevEnvEdge(recordEdgeFailure(active.outDir,
-        "provider-compile-failure",
-        providerCompileFailure(result.providerCompileResult)))
-    if not fileExists(extendedPath(result.providerArtifactPath)):
-      raiseDevEnvEdge("provider compile edge did not write artifact: " &
-        result.providerArtifactPath)
     provider = readProviderCompileArtifact(result.providerArtifactPath)
-    let providerConsistency = providerCompileConsistencyAfterExecution(
-      providerPlan, result.providerArtifactPath)
     if not providerConsistency.fresh:
       raiseDevEnvEdge("provider compile artifact is stale after edge " &
         "execution: " & result.providerArtifactPath & "\n" &

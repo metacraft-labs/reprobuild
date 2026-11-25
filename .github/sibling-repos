@@ -274,7 +274,10 @@ reprobuild-packages
 # flake.nix and flake.lock: every compile of the Linux shim links only the C
 # runtime (`--as-needed` and `-static-libgcc` from `linux_preload.nim.cfg`,
 # e40577a). b1c32599 is an ancestor.
-io-mon=1365943692eedfb0699ce90e59c4602d90317561
+# Moved to 02206627 (2026-11-25), io-mon's `agents` tip, with `io-mon-src` in
+# flake.nix and flake.lock: on macOS `gcc` and `g++` get a toolchain drop-in
+# like `cc` and `clang`. 13659436 is an ancestor.
+io-mon=0220662775e1c79028522d2d1787fa4d9ce7479a
 # `release-pipeline.yml` overrides `nim-stackable-hooks-src` to THIS clone, so the
 # clone must be the revision the flake pins, or the release compiles the
 # monitor shim from different sources than every other build. Cloned at

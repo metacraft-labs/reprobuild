@@ -75,7 +75,7 @@ suite "TC-8d — issuance needs one tested state":
         "--check-set-command=echo reformatted >> " & q(app / "README.md"),
         "--workspace-root=" & fx.sib.ws,
         "--current-repo=" & app],
-        daemonKeyEnv(fx.daemonKey, certifyKeyId)), app)
+        ownDaemonEnv() & daemonKeyEnv(fx.daemonKey, certifyKeyId)), app)
       checkpoint(autofix.output)
       check autofix.code == 2
       check not fx.anyCertificateIssued()
@@ -88,7 +88,7 @@ suite "TC-8d — issuance needs one tested state":
         "--check-set-command=true",
         "--workspace-root=" & fx.sib.ws,
         "--current-repo=" & app],
-        daemonKeyEnv(fx.daemonKey, certifyKeyId)), app)
+        ownDaemonEnv() & daemonKeyEnv(fx.daemonKey, certifyKeyId)), app)
       checkpoint(steady.output)
       check steady.code == 0
       let checkSet = fx.issuedFor(before)
