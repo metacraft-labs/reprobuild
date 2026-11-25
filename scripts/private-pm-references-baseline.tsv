@@ -30,7 +30,7 @@ docs/workspace-bundles.md	1
 env.ps1	1
 flake.nix	8
 libs/ct_test_nim_unittest/tests/t_nim_unittest_execute_edge_launches_declared_output.nim	1
-libs/repro_addon/src/repro_addon/egress_observer.nim	5
+libs/repro_addon/src/repro_addon/egress_observer.nim	4
 libs/repro_addon/src/repro_addon/generation0.nim	1
 libs/repro_addon/src/repro_addon/image_boot.nim	1
 libs/repro_addon/src/repro_addon/key_material.nim	1

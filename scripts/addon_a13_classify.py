@@ -327,6 +327,10 @@ EXPECT.update({
     # essential trigger's failure is dropped and the apply passes.
     "mutlateess": ("e2e_addon_to_reproos_conversion_keeps_state", "red",
                    "engine build late-essential-report-dropped"),
+    # A13 review round 15: the refusal of a drop-in that re-points triggers
+    # is not called before writes.
+    "mutprefixcall": ("e2e_addon_to_reproos_conversion_keeps_state", "red",
+                      "engine build dropin-refusal-before-writes-skipped"),
 })
 TARGET.update({
     "mutliveset": "a switch that changes only a service's credential judges it",
@@ -348,6 +352,7 @@ TARGET.update({
     "mutbootblock": "M4: at boot the re-assertion queues the start",
     "mutdeadactive": "M-B: a judged service a dead full apply held while it ran",
     "mutlateess": "decision 177(c): an essential trigger systemd links to a judged",
+    "mutprefixcall": "round 15: a drop-in on a dashed prefix keeping an instance",
 })
 
 ROUND4_PROBES = ["account", "timer", "pathfloored", "path", "host"]
@@ -482,12 +487,19 @@ def on_target_rec(kind, rec):
                 u.get("staged") not in (None, "active") and
                 u.get("active") not in (None, "active") and
                 u.get("recordLeft") == "")
+    if kind == "mutprefixcall":
+        # Red because the drop-in was written and the apply passed, not for
+        # another reason.
+        u = rec.get("prefixDropInRefused", {})
+        return (on_target(kind, steps) and u.get("exit") == 0 and
+                u.get("written") is True and u.get("refused") is False)
     if kind == "mutlateess":
         # Red because the apply passed with the late essential trigger
         # linked, not for another reason: the probe could be staged (no
         # sshd.socket on the base) and nothing held it.
         u = rec.get("lateEssentialTrigger", {})
         return (on_target(kind, steps) and u.get("sshdSocketBefore") == "not-found" and
+                u.get("activeBefore") == "active" and
                 u.get("exit") == 0 and u.get("held") == "" and
                 u.get("named") is False)
     if kind == "mutdeadactive":
@@ -677,6 +689,8 @@ def on_target_rec(kind, rec):
                 dead_hold_order(rec.get("deadJudgedActive", {})) == "after-release" and
                 rec.get("essentialHostTrigger", {}).get("ok") is True and
                 rec.get("lateEssentialTrigger", {}).get("ok") is True and
+                rec.get("lateEssentialTrigger", {}).get("active") == "active" and
+                rec.get("prefixDropInRefused", {}).get("ok") is True and
                 rec.get("decisionEssential", {}).get("exit", 0) != 0 and
                 rec.get("decisionEssential", {}).get("refused") is True and
                 rec.get("decisionEssential", {}).get("dropInWritten") is False)

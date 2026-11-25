@@ -93,6 +93,9 @@ const
     # add-on's tick, egress check and apt hook records): a fixed word, or
     # ``missed: <why>``.
     "control",
+    # What the egress check found reset in its table (§13 decision 186):
+    # a description of the counts that went down, never packet data.
+    "counterReset",
     # The Nimble catalog's captured refusals (``repro_nimble_generator/
     # capture``): the package, and where the refused bytes came from (a
     # URL, a mirror location or an edge's name; never the bytes).

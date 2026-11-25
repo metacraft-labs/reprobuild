@@ -39,6 +39,7 @@ import repro_cli_support/stdin_terminal
 # The content identity of a producer's channel directories, folded into the
 # keys of consumer actions whose reads nothing observes (§4.3 rule 2).
 import repro_cli_support/producer_channel_content
+import repro_cli_support/producer_gitlink_sources
 # repro's own command line: the generated parser, help and completion.
 import repro_cli_support/cli_program
 # The role processes whose command lines test binaries also serve.
@@ -5863,6 +5864,21 @@ var producerMaterializedSourceRoots: Table[string, string] =
   ## Provenance of the cached channels. A later consumer must validate the
   ## source actually reused, which may differ from its freshly discovered root.
 
+var producerComposedSourceRequirements: Table[string, seq[string]] =
+  initTable[string, seq[string]]()
+  ## Cross-Repo-Source-Consumption §4.2a.2a: selector -> the
+  ## ``<library>:<gitlink path>`` requirements whose composed source artifact
+  ## replaced the producer's exported root on ``nimPathDirs``. Its presence
+  ## puts the composition semantics into ``producerChannelIdentity``, and
+  ## stops ``canReuseMaterializedProducer`` from serving a cached projection:
+  ## the artifact is a snapshot, so every build recomposes (cheaply, when the
+  ## descriptor still matches) to see the producer's current source.
+
+var producerComposedSourceLog: Table[string, seq[string]] =
+  initTable[string, seq[string]]()
+  ## Status lines of the composition, printed by the build's summary log
+  ## once the producer is spliced (the log template is the build's own).
+
 var producerActionHashes*: Table[string, string] =
   initTable[string, string]()
   ## SC-2 fingerprint fold sink: consumer selector -> the producer edge's
@@ -6472,6 +6488,14 @@ proc producerChannelIdentity*(selector: string): string =
   ## thing that distinguishes the new content from the old, which is still on
   ## disk unchanged.
   var payload = "cross-repo-producer-channel.v1\x00" & selector & "\x00"
+  if producerComposedSourceRequirements.hasKey(selector):
+    # §4.2a.2a: the Nim root is a composed source artifact. Its semantics
+    # (and which gitlinks it composes) are part of what the action is
+    # handed; its CONTENT is not, for the same reason as every channel's.
+    payload.add(GitlinkSourceCompositionChannelTag & "\x00")
+    for requirement in producerComposedSourceRequirements[selector]:
+      payload.add(requirement)
+      payload.add('\x00')
   var nimProjectionTagged = false
   for dir in producerChannelDirs(selector):
     if dir.channel == "nimpath" and not nimProjectionTagged and
@@ -12039,6 +12063,10 @@ proc canReuseMaterializedProducer(selector: string; binding: ProducerBinding;
                                   consumerRoot: string): bool =
   result = producerMaterializedBinDirs.hasKey(selector) or
     producerMaterializedAuxPaths.hasKey(selector)
+  if result and producerComposedSourceRequirements.hasKey(selector):
+    # A composed gitlink source artifact (§4.2a.2a) is a snapshot of the
+    # producer's source, not a view of it: recompose it for this build.
+    return false
   if not result or binding.kind != pbkLockPinned:
     return
   let cachedRoot = producerMaterializedSourceRoots.getOrDefault(selector)
@@ -12069,10 +12097,53 @@ proc producerNativeLibraryNeedsBuild(lib: InterfaceLibrary;
     if lib.exportedPath.len > 0: lib.exportedPath else: "src"
   not dirExists(extendedPath(producerRootAbs / exported))
 
+proc gitlinkSourceArtifactDir(consumerRoot, selector, library: string):
+    string =
+  ## Where the composed gitlink source artifact of ``library`` from producer
+  ## ``selector`` lives: beside the consumer's fetched pinned producers, in
+  ## its workspace ``.repro`` tree, under a name made of the selector and
+  ## the library alone. The name is deliberately NOT content- or
+  ## revision-dependent (§4.2a.2a "Identity and invalidation"): the
+  ## directory is on every consumer compile's ``--path:``, so a name that
+  ## moved with the source would miss every compile on any edit. Its content
+  ## reaches keys through the reads compiles make there, and through the
+  ## channel-content fold for actions nothing observes.
+  lockPinnedProducerCacheRoot(consumerRoot) / ".source-artifacts" /
+    selectorFilesystemKey(selector) / selectorFilesystemKey(library)
+
+proc composeProducerGitlinkSource(selector, producerRootAbs: string;
+                                  lib: InterfaceLibrary;
+                                  consumerRoot: string): ComposedLibrarySource =
+  ## §4.2a.2a: compose ``lib``'s required gitlink source artifact. An
+  ## uninitialized gitlink is acquired through the same pinned-revision Git
+  ## fetch a lock-pinned producer uses (``fetchLockPinnedProducer``),
+  ## exactly at the commit the selected source's committed gitlink names.
+  if consumerRoot.len == 0:
+    raise newException(GitlinkSourceError,
+      "cross-repo producer \"" & selector & "\" library \"" & lib.name &
+      "\" sourceGitlinks: no consumer workspace to compose the source " &
+      "artifact in")
+  let acquire = proc (name, url, commit: string): string =
+    fetchLockPinnedProducer(LockedDep(name: name,
+      coordinates: Coordinates(kind: ckVcs, url: url, revision: commit)),
+      consumerRoot)
+  result = composeGitlinkSourceArtifact(selector, lib.name, producerRootAbs,
+    (if lib.exportedPath.len > 0: lib.exportedPath else: "src"),
+    lib.sourceGitlinks,
+    gitlinkSourceArtifactDir(consumerRoot, selector, lib.name), acquire)
+  var lines = producerComposedSourceLog.getOrDefault(selector)
+  lines.add("library \"" & lib.name & "\" composed with its required " &
+    "gitlinks at " & result.exportedRoot &
+    (if result.reused: " (reused)" else: ""))
+  for note in result.notes:
+    lines.add(note)
+  producerComposedSourceLog[selector] = lines
+
 proc recordProducerMaterialization(selector, producerRootAbs: string;
                                    producerArtifact: ProjectInterfaceArtifact;
                                    producerRuntimeIdentity: PathOnlyBuildIdentity;
                                    binding: ProducerBinding;
+                                   consumerRoot: string;
                                    includeCompiledOutputs = true): bool =
   ## Discover a producer's already-materialized public outputs and project
   ## them onto the consumer's executable/library channels. The build path
@@ -12139,14 +12210,30 @@ proc recordProducerMaterialization(selector, producerRootAbs: string;
           pkgConfigOutDir notin aux.pkgConfigDirs:
         aux.pkgConfigDirs.add(pkgConfigOutDir)
 
+  var composedRequirements: seq[string] = @[]
   for lib in producerArtifact.projectInterface.publicLibraries:
     if lib.name.len == 0:
       continue
     let exported =
       if lib.exportedPath.len > 0: lib.exportedPath else: "src"
-    let nimSrcDir = producerRootAbs / exported
+    var nimSrcDir = producerRootAbs / exported
+    if lib.sourceGitlinks.len > 0 and dirExists(extendedPath(nimSrcDir)):
+      # §4.2a.2a: the exported tree is incomplete without its required Git
+      # trees. Project an owned composed artifact instead of the producer's
+      # own directory; the producer checkout and its submodules are only
+      # read. A refusal raises here, before any consumer compile.
+      let composed = composeProducerGitlinkSource(selector, producerRootAbs,
+        lib, consumerRoot)
+      nimSrcDir = composed.exportedRoot
+      for req in lib.sourceGitlinks:
+        composedRequirements.add(lib.name & ":" & req.relativePath)
     if dirExists(extendedPath(nimSrcDir)) and nimSrcDir notin aux.nimPathDirs:
       aux.nimPathDirs.add(nimSrcDir)
+  if composedRequirements.len > 0:
+    composedRequirements.sort()
+    producerComposedSourceRequirements[selector] = composedRequirements
+  else:
+    producerComposedSourceRequirements.del(selector)
 
   let haveLibChannel = aux.libDirs.len > 0 or aux.includeDirs.len > 0 or
     aux.pkgConfigDirs.len > 0 or aux.cmakePrefixDirs.len > 0 or
@@ -15092,11 +15179,15 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
             "(no compiled artifact; src threaded via nimPathDirs).")
         if not recordProducerMaterialization(selector, producerRootAbs,
             producerArtifact, producerRuntimeIdentity, producer,
+            result.projectRoot,
             includeCompiledOutputs = not sourceChannelOnly):
           raise newException(OSError,
             "cross-repo producer \"" & selector & "\" at " & producerRootAbs &
             " declares no materialized executable, library, or Nim source " &
             "output to splice onto the consumer's tool channels.")
+        for line in producerComposedSourceLog.getOrDefault(selector):
+          logSummary("cross-repo producer: \"" & selector & "\" " & line)
+        producerComposedSourceLog.del(selector)
         if producerMaterializedBinDirs.hasKey(selector):
           logSummary("cross-repo producer: spliced \"" & selector &
             "\" bin dir(s) into tool identities: " &
@@ -34427,7 +34518,7 @@ proc recordMaterializedProducersForInspection(
         selections = activeToolModeSelections(runtimeArtifact, mode),
         storeRootFor = overriddenToolStoreRoot(""))
     if not recordProducerMaterialization(selector, sourceRootAbs,
-        producerArtifact, runtimeIdentity, binding):
+        producerArtifact, runtimeIdentity, binding, projectRoot):
       raise newException(IOError,
         "cross-repo producer \"" & selector & "\" at " & sourceRootAbs &
         " is not materialized; run `repro build` for the consuming target " &
