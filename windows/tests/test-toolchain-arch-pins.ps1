@@ -8,6 +8,14 @@ $ErrorActionPreference = "Stop"
 # Pure logic over the real pin file and in-memory tables: no download, no
 # install, no host state, so it runs on any PowerShell 5.1+ or 7 host,
 # including Linux pwsh. No mocks.
+#
+# The release closure audit is also tested here, on any host, against PE
+# images this file writes (New-TestPeImage). They are fixtures, not mocks:
+# real files in the PE/COFF layout, read by the same readers the release uses.
+# They exist because the cases the audit must refuse (a delay-loaded DLL the
+# archive does not carry, a DLL of the wrong machine) cannot be produced from
+# a host's own system images, and because Linux pwsh has no system images at
+# all. The Windows-only block below still runs the audit on real images.
 
 $windowsDir = Split-Path -Parent $PSScriptRoot
 . (Join-Path $windowsDir "toolchain-utils.ps1")
@@ -135,8 +143,191 @@ Check "a missing shared version key is a violation" {
   if (-not ($v -match 'NIM_VERSION is missing')) { throw "not reported: $($v -join '; ')" }
 }
 
+Write-Host "PE readers and the release closure audit (synthetic images, any host)"
+
+function New-TestPeImage {
+  ## Write a minimal PE32+ image: the DOS stub pointer, the COFF header for
+  ## $Machine, an optional header with 16 data directories, and one section
+  ## holding an import directory (data directory 1) for $Imports and a
+  ## delay-load import directory (data directory 13) for $DelayImports.
+  ## Layout per https://learn.microsoft.com/windows/win32/debug/pe-format
+  ## ("Optional Header Data Directories", "The .idata Section", "Delay-Load
+  ## Import Tables"). Delay descriptors use the RVA form (Attributes = 1)
+  ## unless $DelayVaForm, which writes the old VA form (Attributes = 0).
+  param(
+    [Parameter(Mandatory = $true)][string]$Path,
+    [Parameter(Mandatory = $true)][int]$Machine,
+    [string[]]$Imports = @(),
+    [string[]]$DelayImports = @(),
+    [switch]$DelayVaForm
+  )
+  $imageBase = [uint64]0x140000000
+  $sectionRva = 0x1000
+  $sectionRaw = 0x200
+  $importDir = 0
+  $importSize = 20 * ($Imports.Count + 1)
+  $delayDir = $importSize
+  $delaySize = 32 * ($DelayImports.Count + 1)
+  $namesAt = $delayDir + $delaySize
+  $data = New-Object System.Collections.Generic.List[byte]
+  $data.AddRange([byte[]]::new($namesAt))
+  $nameRvas = @{}
+  foreach ($n in @($Imports + $DelayImports)) {
+    if ($nameRvas.ContainsKey($n)) { continue }
+    $nameRvas[$n] = $sectionRva + $data.Count
+    $data.AddRange([Text.Encoding]::ASCII.GetBytes($n))
+    $data.Add(0)
+  }
+  $buf = $data.ToArray()
+  for ($i = 0; $i -lt $Imports.Count; $i++) {
+    [BitConverter]::GetBytes([uint32]$nameRvas[$Imports[$i]]).CopyTo($buf, $importDir + 20 * $i + 12)
+  }
+  for ($i = 0; $i -lt $DelayImports.Count; $i++) {
+    $at = $delayDir + 32 * $i
+    $rva = [uint32]$nameRvas[$DelayImports[$i]]
+    if ($DelayVaForm) {
+      [BitConverter]::GetBytes([uint32]0).CopyTo($buf, $at)
+      # The VA form is 32 bits wide, so it can only name a 32-bit address.
+      [BitConverter]::GetBytes([uint32]($rva + 0x400000)).CopyTo($buf, $at + 4)
+    } else {
+      [BitConverter]::GetBytes([uint32]1).CopyTo($buf, $at)
+      [BitConverter]::GetBytes($rva).CopyTo($buf, $at + 4)
+    }
+  }
+  $rawSize = [int]([Math]::Ceiling($buf.Length / 512.0) * 512)
+  $file = [byte[]]::new($sectionRaw + $rawSize)
+  $file[0] = 0x4d; $file[1] = 0x5a
+  [BitConverter]::GetBytes([uint32]0x40).CopyTo($file, 0x3c)
+  $pe = 0x40
+  [BitConverter]::GetBytes([uint32]0x4550).CopyTo($file, $pe)
+  [BitConverter]::GetBytes([uint16]$Machine).CopyTo($file, $pe + 4)
+  [BitConverter]::GetBytes([uint16]1).CopyTo($file, $pe + 6)
+  [BitConverter]::GetBytes([uint16]240).CopyTo($file, $pe + 20)
+  [BitConverter]::GetBytes([uint16]0x22).CopyTo($file, $pe + 22)
+  $opt = $pe + 24
+  [BitConverter]::GetBytes([uint16]0x20b).CopyTo($file, $opt)
+  $base = if ($DelayVaForm) { [uint64]0x400000 } else { $imageBase }
+  [BitConverter]::GetBytes($base).CopyTo($file, $opt + 24)
+  [BitConverter]::GetBytes([uint32]16).CopyTo($file, $opt + 108)
+  $dirs = $opt + 112
+  if ($Imports.Count -gt 0) {
+    [BitConverter]::GetBytes([uint32]($sectionRva + $importDir)).CopyTo($file, $dirs + 8 * 1)
+    [BitConverter]::GetBytes([uint32]$importSize).CopyTo($file, $dirs + 8 * 1 + 4)
+  }
+  if ($DelayImports.Count -gt 0) {
+    [BitConverter]::GetBytes([uint32]($sectionRva + $delayDir)).CopyTo($file, $dirs + 8 * 13)
+    [BitConverter]::GetBytes([uint32]$delaySize).CopyTo($file, $dirs + 8 * 13 + 4)
+  }
+  $sec = $opt + 240
+  [Text.Encoding]::ASCII.GetBytes(".idata").CopyTo($file, $sec)
+  [BitConverter]::GetBytes([uint32]$buf.Length).CopyTo($file, $sec + 8)
+  [BitConverter]::GetBytes([uint32]$sectionRva).CopyTo($file, $sec + 12)
+  [BitConverter]::GetBytes([uint32]$rawSize).CopyTo($file, $sec + 16)
+  [BitConverter]::GetBytes([uint32]$sectionRaw).CopyTo($file, $sec + 20)
+  $buf.CopyTo($file, $sectionRaw)
+  [IO.File]::WriteAllBytes($Path, $file)
+}
+
+$arm64 = 0xAA64
+$x64 = 0x8664
+$synth = Join-Path ([IO.Path]::GetTempPath()) ("closure-synth-" + [Guid]::NewGuid().ToString("N"))
+$synthSys = Join-Path $synth "system"
+$synthBin = Join-Path $synth "bin"
+New-Item -ItemType Directory -Path $synthSys, $synthBin | Out-Null
+try {
+  # The stand-in system directory holds the OS DLLs the fixtures import.
+  foreach ($n in @("KERNEL32.dll", "ADVAPI32.dll", "bcrypt.dll")) {
+    New-TestPeImage -Path (Join-Path $synthSys $n) -Machine $arm64
+  }
+  $tool = Join-Path $synth "tool.exe"
+  New-TestPeImage -Path $tool -Machine $arm64 -Imports @("KERNEL32.dll", "libfoo.dll") -DelayImports @("bcrypt.dll", "libbar.dll")
+  Check "the import directory is read" {
+    $names = @(Get-PeImportNames -Path $tool)
+    if (($names -join ",") -ne "KERNEL32.dll,libfoo.dll") { throw "got '$($names -join ",")'" }
+  }
+  Check "the delay-load import directory is read" {
+    $names = @(Get-PeDelayImportNames -Path $tool)
+    if (($names -join ",") -ne "bcrypt.dll,libbar.dll") { throw "got '$($names -join ",")'" }
+  }
+  Check "a delay-load descriptor in the old VA form is read" {
+    $old = Join-Path $synth "old.exe"
+    New-TestPeImage -Path $old -Machine $arm64 -DelayImports @("libold.dll") -DelayVaForm
+    $names = @(Get-PeDelayImportNames -Path $old)
+    if (($names -join ",") -ne "libold.dll") { throw "got '$($names -join ",")'" }
+  }
+  Check "an image without a delay-load directory has no delay imports" {
+    $plain = Join-Path $synth "plain.exe"
+    New-TestPeImage -Path $plain -Machine $arm64 -Imports @("KERNEL32.dll")
+    $names = @(Get-PeDelayImportNames -Path $plain)
+    if ($names.Count -ne 0) { throw "got '$($names -join ",")'" }
+  }
+
+  Copy-Item -LiteralPath $tool -Destination (Join-Path $synthBin "tool.exe")
+  New-TestPeImage -Path (Join-Path $synthBin "libfoo.dll") -Machine $arm64 -Imports @("KERNEL32.dll", "api-ms-win-crt-runtime-l1-1-0.dll")
+  Check "a delay-loaded DLL the bin/ does not carry fails the audit" {
+    Assert-Throws { Assert-WindowsDllClosure -BinDir $synthBin -Arch arm64 -SystemDir $synthSys } `
+      'tool\.exe delay-loads libbar\.dll, which is neither in bin/ nor an operating-system DLL'
+  }
+  New-TestPeImage -Path (Join-Path $synthBin "libbar.dll") -Machine $arm64 -Imports @("ADVAPI32.dll")
+  Check "a closed bin/ passes the audit, delay-loads included" {
+    Assert-WindowsDllClosure -BinDir $synthBin -Arch arm64 -SystemDir $synthSys
+  }
+  Check "a DLL in bin/ is itself audited: its own missing import fails" {
+    New-TestPeImage -Path (Join-Path $synthBin "libbar.dll") -Machine $arm64 -Imports @("libbaz.dll")
+    try {
+      Assert-Throws { Assert-WindowsDllClosure -BinDir $synthBin -Arch arm64 -SystemDir $synthSys } `
+        'libbar\.dll imports libbaz\.dll, which is neither in bin/ nor an operating-system DLL'
+    } finally {
+      New-TestPeImage -Path (Join-Path $synthBin "libbar.dll") -Machine $arm64 -Imports @("ADVAPI32.dll")
+    }
+  }
+  Check "an x64 DLL staged in an arm64 bin/ fails the audit" {
+    New-TestPeImage -Path (Join-Path $synthBin "libfoo.dll") -Machine $x64 -Imports @("KERNEL32.dll")
+    try {
+      Assert-Throws { Assert-WindowsDllClosure -BinDir $synthBin -Arch arm64 -SystemDir $synthSys } `
+        'libfoo\.dll is a PE image for machine 0x8664, not the arm64 machine 0xAA64'
+    } finally {
+      New-TestPeImage -Path (Join-Path $synthBin "libfoo.dll") -Machine $arm64 -Imports @("KERNEL32.dll")
+    }
+  }
+
+  # The entry point verify_release.sh runs over an extracted archive. It runs
+  # in a child process, as the release runs it, and answers by exit code.
+  $auditScript = Join-Path $windowsDir "audit-release-dll-closure.ps1"
+  $shell = (Get-Process -Id $PID).Path
+  function Invoke-AuditScript {
+    ## Run the entry point in a child shell; return its output as strings.
+    ## The child reports a refusal on stderr. Windows PowerShell 5.1 turns
+    ## each redirected stderr line into an error record, which this file's
+    ## "Stop" preference would raise before the exit code could be checked.
+    param([string]$Bin)
+    $ErrorActionPreference = "Continue"
+    $out = & $shell -NoProfile -NonInteractive -File $auditScript -BinDir $Bin -Arch arm64 -SystemDir $synthSys 2>&1
+    return @($out | ForEach-Object { "$_" })
+  }
+  Check "the archive audit entry point accepts a closed bin/" {
+    $out = Invoke-AuditScript -Bin $synthBin
+    if ($LASTEXITCODE -ne 0) { throw "exit $LASTEXITCODE`n$($out -join "`n")" }
+    if (-not (($out -join "`n") -match 'closure audit: 3 image\(s\)')) { throw "no audit summary in:`n$($out -join "`n")" }
+  }
+  Check "the archive audit entry point refuses an open bin/ with exit 1" {
+    Remove-Item -LiteralPath (Join-Path $synthBin "libbar.dll")
+    $out = Invoke-AuditScript -Bin $synthBin
+    if ($LASTEXITCODE -ne 1) { throw "exit $LASTEXITCODE, expected 1`n$($out -join "`n")" }
+    if (-not (($out -join "`n") -match 'delay-loads libbar\.dll')) { throw "violation not named in:`n$($out -join "`n")" }
+  }
+  Check "the archive audit entry point refuses a bin/ with no images" {
+    $empty = Join-Path $synth "empty"
+    New-Item -ItemType Directory -Path $empty | Out-Null
+    $out = Invoke-AuditScript -Bin $empty
+    if ($LASTEXITCODE -ne 1) { throw "exit $LASTEXITCODE, expected 1`n$($out -join "`n")" }
+  }
+} finally {
+  Remove-Item -LiteralPath $synth -Recurse -Force -ErrorAction SilentlyContinue
+}
+
 Write-Host "PE readers and the release closure audit"
-$onWindows = [Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT
+$onWindows =[Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT
 if ($onWindows) {
   # Real images: the host's own cmd.exe, which imports only system DLLs.
   $cmdExe = Join-Path $env:SystemRoot "System32\cmd.exe"
@@ -193,3 +384,7 @@ if ($failures.Count -ne 0) {
   throw "test-toolchain-arch-pins: $($failures.Count) failure(s):`n  " + ($failures -join "`n  ")
 }
 Write-Host "test-toolchain-arch-pins: all checks passed"
+# The audit entry-point checks leave $LASTEXITCODE at 1 (a refusal they
+# expected). Windows PowerShell 5.1 reports a -File script's last native exit
+# code as its own, so without this a passing run would exit 1.
+exit 0
