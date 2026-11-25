@@ -426,7 +426,15 @@
       # monitored edge whose bare `gcc` resolves to the SIP-protected
       # `/usr/bin/gcc` shim (the C conventions' link edge on a Nix host) is
       # observed and can be cached instead of re-running on every build.
-      url = "github:metacraft-labs/io-mon/0220662775e1c79028522d2d1787fa4d9ce7479a";
+      # Bumped 02206627 -> 02ec1410 (2026-11-25, io-mon `agents`): io-mon
+      # builds against nim-stackable-hooks 0ada76e, the revision this flake
+      # now pins, so its ARM64 Windows shim has the ARM64 inline hook and
+      # entry park it injects and audits with.
+      # Bumped 02ec1410 -> 1c1aa67 (2026-11-25, io-mon `agents`): the shim's
+      # spawn hook leaves a hybrid ARM64X grandchild (cmd.exe started in x64
+      # mode on Windows on Arm) uninjected through the shared machine gate in
+      # nim-stackable-hooks ec6b02d, instead of timing out its park.
+      url = "github:metacraft-labs/io-mon/1c1aa6783ff56eb46161b5c30ebc91b430e17200";
       flake = false;
     };
     nim-shm-gset-src = {
@@ -652,7 +660,18 @@
       # Bumped d715806 -> c34e325 (2026-11-16) with io-mon-src: io-mon
       # 73572696 is built against it; it makes the raw syscall entries safe
       # for CLONE_VM clones.
-      url = "github:metacraft-labs/nim-stackable-hooks/c34e3252d413361a0f250d8921e00c119d30e114";
+      # Bumped c34e325 -> 0ada76e (2026-11-25) with io-mon-src: the Windows on
+      # Arm64 backend (ARM64 inline hook, entry park, borrowed calls) and the
+      # root injector's machine gate. A root no shim of the engine can serve
+      # (a native ARM64 action under the x64 engine on Windows on Arm, or an
+      # ARM64X image started in x64 mode) now runs uninjected and is
+      # reported as an unmonitored-subtree loss instead of failing the action
+      # with CreateRemoteThread err=6.
+      # Bumped 0ada76e -> ec6b02d (2026-11-25) with io-mon-src: grandchild
+      # propagation applies the same machine gate, so an ARM64X system
+      # program started in x64 mode by a monitored x64 process is left
+      # uninjected instead of timing out the park.
+      url = "github:metacraft-labs/nim-stackable-hooks/ec6b02d45180735d08611c5cece842d57f941966";
       flake = false;
     };
     reprobuild-ct-test-runner-src = {
@@ -1835,17 +1854,17 @@
                 NIMCRYPTO_SRC|${nimcrypto-src}
                 BEARSSL_SRC|${bearssl-src}
                 STACKABLE_HOOKS_SRC|${nim-stackable-hooks-src}/src
-                CODETRACER_TRACE_FORMAT_NIM_SRC|${codeTracerTraceFormatNimSrc}
-                IO_MON_SRC|${io-mon-src}/src
-                SHM_GSET_SRC|${nim-shm-gset-src}/src
-                SHM_QUEUE_SRC|${nim-shm-queue-src}/src
+                REPRO_ENGINE_CODETRACER_TRACE_FORMAT_NIM_SRC|${codeTracerTraceFormatNimSrc}
+                REPRO_ENGINE_IO_MON_SRC|${io-mon-src}/src
+                REPRO_ENGINE_SHM_GSET_SRC|${nim-shm-gset-src}/src
+                REPRO_ENGINE_SHM_QUEUE_SRC|${nim-shm-queue-src}/src
                 CLI_SPEC_SRC|${nim-cli-spec-src}/src
                 ENTRYPOINTS_SRC|${nim-entrypoints-src}/src
                 CONFUTILS_SRC|${nim-confutils-src}
                 CODETRACER_PINNED_SRC|${codetracerSrc}/src
                 REPRO_CT_TEST_RUNNER_SRC|${reprobuild-ct-test-runner-src}
                 REPRO_TEST_ADAPTERS_SRC|${reprobuild-test-adapters-src}/src
-                TEST_CERTIFICATES_TOOLS_SRC|${test-certificates-tools-src}/src
+                REPRO_ENGINE_TEST_CERTIFICATES_TOOLS_SRC|${test-certificates-tools-src}/src
                 REPROBUILD_USE_SYSTEM_HASH_LIBS|1
                 RUNQUOTA_SRC|${runquota-src}
                 RUNQUOTAD_BIN|${runquotaTools}/bin/runquotad

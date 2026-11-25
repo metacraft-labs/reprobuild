@@ -638,6 +638,16 @@
 ##                                           hold (decisions 171 and 177)
 ## ``restart-success-by-exit-code``        a restart's exit code is taken as
 ##                                           its outcome (round 11, H1)
+## ``secret-put-unjudged``
+##     a secret put restarts its consumers on what systemd loaded, unjudged (round 15, decision 190)
+## ``restore-holds-sysinit``
+##     the restore unit is ordered Before=sysinit.target again (round 15, decision 191)
+## ``restore-removes-filled-placeholder``
+##     the restore removes its target recursively before the rename (round 15, decision 191)
+## ``restore-unbounded``
+##     the restore unit has no TimeoutStartSec= (round 15, decision 191)
+## ``essential-restore-requirement-allowed``
+##     an apply that gives an essential unit the restore requirement is not refused (round 15, decision 192)
 ## ``dropin-refusal-before-writes-skipped``
 ##     the refusal of a prefix or template drop-in that re-points triggers is not called before writes (round 15)
 ## ``interrupted-apply-unrecorded``
@@ -1460,6 +1470,9 @@
 ##                                            however old it is
 ##                                            (``repro_test_support/
 ##                                            fresh_binary``; round 4)
+## ``uninstall-skips-pending-check``          uninstall does not refuse over
+##                                            a pending switch marker (spec
+##                                            §6.4 step 0)
 ## ``egress-control-not-sent``                the fetch sends no DET-AO-3
 ##                                            control datagram (DET-4)
 ## ``manifest-control-skipped``               the tick never runs DET-AO-1's
@@ -2114,6 +2127,10 @@ const
                           # the conservative branch ignores a failed
                           # ``ls`` and holds nothing.
                           "boot-hold-ls-failure-ignored",
+                          # A9 review round 22: a line of the conservative
+                          # list that cannot be written is hidden by the
+                          # loop's last status.
+                          "boot-hold-list-write-failure-ignored",
                           # the fetch unit drops MemoryDenyWriteExecute=.
                           "fetch-unit-without-mdwe",
                           # the record of none is written in two steps,
@@ -2267,6 +2284,11 @@ const
                           "restart-success-by-exit-code",
                           # A13 review round 15.
                           "dropin-refusal-before-writes-skipped",
+                          "secret-put-unjudged",
+                          "restore-holds-sysinit",
+                          "restore-removes-filled-placeholder",
+                          "restore-unbounded",
+                          "essential-restore-requirement-allowed",
                           # A13 review round 14.
                           "interrupted-apply-unrecorded",
                           "trigger-targets-by-name",
@@ -2554,6 +2576,9 @@ const
                           "discard-completion-failure-discards-key",
                           "discard-completion-sync-error-swallowed",
                           "fresh-ignores-listings",
+                          # Uninstall's step 0 (spec §6.4; §13 decision
+                          # 122): no uninstall over a pending marker.
+                          "uninstall-skips-pending-check",
                           "fresh-accepts-user-config",
                           "fresh-accepts-nimble-path",
                           # An agent apply may weaken a unit's confinement

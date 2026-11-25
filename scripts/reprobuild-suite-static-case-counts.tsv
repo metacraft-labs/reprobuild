@@ -40,7 +40,7 @@ libs/repro_addon/tests/t_addon_agent_split.nim	nim	25
 libs/repro_addon/tests/t_addon_agent_staging_copy_streams.nim	nim	4
 libs/repro_addon/tests/t_addon_apt_hook_and_base_identity.nim	nim	21
 libs/repro_addon/tests/t_addon_boot_hold_and_gen0_upgrade.nim	nim	23
-libs/repro_addon/tests/t_addon_carried_state_fails_closed.nim	nim	192
+libs/repro_addon/tests/t_addon_carried_state_fails_closed.nim	nim	201
 libs/repro_addon/tests/t_addon_collision.nim	nim	38
 libs/repro_addon/tests/t_addon_confinement_probe_never_ships.nim	nim	5
 libs/repro_addon/tests/t_addon_contain_quiesces_before_record.nim	nim	7
@@ -79,7 +79,8 @@ libs/repro_addon/tests/t_addon_floor_round17.nim	nim	28
 libs/repro_addon/tests/t_addon_floor_round18.nim	nim	8
 libs/repro_addon/tests/t_addon_floor_round19.nim	nim	20
 libs/repro_addon/tests/t_addon_floor_round20.nim	nim	15
-libs/repro_addon/tests/t_addon_floor_round21.nim	nim	19
+libs/repro_addon/tests/t_addon_floor_round21.nim	nim	22
+libs/repro_addon/tests/t_addon_floor_round22.nim	nim	2
 libs/repro_addon/tests/t_addon_floor_round3.nim	nim	16
 libs/repro_addon/tests/t_addon_floor_round4.nim	nim	16
 libs/repro_addon/tests/t_addon_floor_round5.nim	nim	17
@@ -125,6 +126,7 @@ libs/repro_addon/tests/t_addon_system_file_with_mode_or_group_is_a_private_copy.
 libs/repro_addon/tests/t_addon_tmpfiles_scope.nim	nim	7
 libs/repro_addon/tests/t_addon_trace_attribution.nim	nim	6
 libs/repro_addon/tests/t_addon_uninstall_keeps_pre_bootstrap_inputs.nim	nim	73
+libs/repro_addon/tests/t_addon_uninstall_refuses_pending_switch.nim	nim	5
 libs/repro_addon/tests/t_addon_uninstall_rerun_removes_ship_state.nim	nim	5
 libs/repro_addon/tests/t_addon_units_meet_confinement_floor.nim	nim	3
 libs/repro_addon/tests/t_full_host_secrets_materialise_from_the_latest_envelope.nim	nim	9
@@ -584,6 +586,7 @@ libs/repro_dsl_stdlib/tests/t_packaging_shipped_payload.nim	nim	21
 libs/repro_dsl_stdlib/tests/t_packaging_source_root_stagers.nim	nim	3
 libs/repro_dsl_stdlib/tests/t_packaging_third_party_producer.nim	nim	6
 libs/repro_dsl_stdlib/tests/t_packaging_windows_loader_closure.nim	nim	8
+libs/repro_dsl_stdlib/tests/t_packaging_wrapper_keeps_project_source_roots_private.nim	nim	3
 libs/repro_dsl_stdlib/tests/t_pinned_fetch.nim	nim	5
 libs/repro_dsl_stdlib/tests/t_playwright_windows_realization.nim	nim	4
 libs/repro_dsl_stdlib/tests/t_prefix_layout.nim	nim	7
@@ -595,7 +598,7 @@ libs/repro_dsl_stdlib/tests/t_rust_nix_arm_realizes_release_archive.nim	nim	7
 libs/repro_dsl_stdlib/tests/t_rust_windows_arm64_tarball_arms.nim	nim	8
 libs/repro_dsl_stdlib/tests/t_s7_nim_c_declares_its_nimcache_as_derived.nim	nim	5
 libs/repro_dsl_stdlib/tests/t_sevenzip_bootstrap_matches_stdlib_catalog.nim	nim	2
-libs/repro_dsl_stdlib/tests/t_shared_library_is_written_under_its_soname.nim	nim	18
+libs/repro_dsl_stdlib/tests/t_shared_library_is_written_under_its_soname.nim	nim	21
 libs/repro_dsl_stdlib/tests/t_shell_entropy_is_not_blessed.nim	nim	5
 libs/repro_dsl_stdlib/tests/t_shell_extra_env.nim	nim	4
 libs/repro_dsl_stdlib/tests/t_sized_typed_tools.nim	nim	12
@@ -1256,7 +1259,7 @@ libs/repro_tool_profiles/tests/t_a_symlinked_declared_executable_is_not_reported
 libs/repro_tool_profiles/tests/t_a_tool_probe_writes_no_state_outside_its_scratch.nim	nim	3
 libs/repro_tool_profiles/tests/t_bootstrap_cc_override_is_honoured_and_scoped.nim	nim	5
 libs/repro_tool_profiles/tests/t_bootstrap_provisioning_failure_is_a_hard_failure.nim	nim	8
-libs/repro_tool_profiles/tests/t_bootstrap_toolchain_provisioned_in_every_mode.nim	nim	4
+libs/repro_tool_profiles/tests/t_bootstrap_toolchain_provisioned_in_every_mode.nim	nim	5
 libs/repro_tool_profiles/tests/t_elf_relocation_points_programs_at_the_archive_loader.nim	nim	6
 libs/repro_tool_profiles/tests/t_environment_prefix_provisioning.nim	nim	14
 libs/repro_tool_profiles/tests/t_installed_prefix_nim_route.nim	nim	12
@@ -1483,7 +1486,7 @@ recipes/packages/source/zlib/test_zlib_source.nim	nim	8
 recipes/sandbox-tools/test_sandbox_tools.nim	nim	12
 tests/bundles/bundle_repro_core_dep_scanners_pure_unit.nim	nim	35
 tests/bundles/bundle_repro_core_pure_unit.nim	nim	69
-tests/bundles/bundle_repro_dsl_stdlib_catalogs_pure_unit.nim	nim	112
+tests/bundles/bundle_repro_dsl_stdlib_catalogs_pure_unit.nim	nim	113
 tests/bundles/bundle_repro_lock_files_cli_pure_unit.nim	nim	24
 tests/bundles/bundle_repro_lock_files_pure_unit.nim	nim	42
 tests/bundles/bundle_repro_peer_cache_pure_unit.nim	nim	29
@@ -1569,6 +1572,7 @@ tests/e2e/addon/t_e2e_addon_tick_observes_a_fresh_cycle.nim	nim	1
 tests/e2e/addon/t_e2e_addon_to_reproos_conversion_keeps_state.nim	nim	1
 tests/e2e/addon/t_e2e_addon_ubuntu_24_04_to_26_04_release_upgrade.nim	nim	1
 tests/e2e/addon/t_e2e_addon_unattended_upgrades_week.nim	nim	1
+tests/e2e/addon/t_e2e_addon_uninstall_refuses_pending_switch.nim	nim	1
 tests/e2e/addon/t_e2e_addon_uninstall_removes_revert_holds.nim	nim	3
 tests/e2e/addon/t_e2e_addon_unit_syscall_filters_cover_their_traces.nim	nim	1
 tests/e2e/addon/t_e2e_addon_validator_never_double_signs.nim	nim	1
@@ -2935,7 +2939,7 @@ tests/integration/t_workspace_metadata_resolves_at_a_git_revision.nim	nim	4
 tests/integration/t_workspace_migrate_reconciles_local_state.nim	nim	3
 tests/integration/t_workspace_migrate_refuses_to_endanger_work.nim	nim	2
 tests/integration/t_workspace_override_shadows_upstream_in_resolver.nim	nim	5
-tests/integration/t_workspace_post_commit_lock_refresh_is_best_effort.nim	nim	14
+tests/integration/t_workspace_post_commit_lock_refresh_is_best_effort.nim	nim	15
 tests/integration/t_workspace_pre_push_blocks_lock_with_private_only_refs.nim	nim	4
 tests/integration/t_workspace_pre_push_blocks_on_develop_override_cleanliness.nim	nim	5
 tests/integration/t_workspace_pre_push_blocks_when_head_unpublished.nim	nim	1
@@ -3092,7 +3096,7 @@ tests/unit/t_libclang_package.nim	nim	2
 tests/unit/t_library_stage_alias.nim	nim	4
 tests/unit/t_local_file_cannot_declare_policy.nim	nim	1
 tests/unit/t_local_name_without_shared_layer_is_an_error.nim	nim	1
-tests/unit/t_lock_writer_trace_reader_classifies_refusal_runs.nim	nim	14
+tests/unit/t_lock_writer_trace_reader_classifies_refusal_runs.nim	nim	15
 tests/unit/t_locked_catalog_is_declared_not_read.nim	nim	3
 tests/unit/t_m21_history_fed_scheduling.nim	nim	22
 tests/unit/t_m23_gate_refusal_names_cache_decision.nim	nim	7

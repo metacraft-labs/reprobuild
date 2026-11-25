@@ -34,6 +34,8 @@ import repro_dsl_stdlib/nixpkgs_pin
 import repro_dsl_stdlib/packages/[zig, elixir, llvm_objdump, llvm_strip, ldd,
   llvm_mingw]
 import repro_home_apply/package_catalog
+from repro_tool_profiles import windowsBootstrapNimTarballProvisioning,
+  BootstrapNimVersion
 
 proc isHex64(s: string): bool =
   if s.len != 64: return false
@@ -156,3 +158,23 @@ suite "launcher toolchain catalog entries":
       check p.record.detail.extractPath == "llvm-mingw-" & release & "-ucrt-aarch64"
       check "bin/gcc.exe" in p.record.detail.extraExecutables
 
+
+  test "nim's windows rows are the engine's bootstrap Nim, per cpu":
+    # The catalog's Windows rows and the engine's hard-coded bootstrap
+    # records (repro_tool_profiles, kept free of any recipe) name one
+    # archive per cpu, so a recipe's `uses: nim` and the provider compile
+    # cannot drift apart on either leg.
+    for (nimCpu, cpu) in [("amd64", pcX86_64), ("arm64", pcAArch64)]:
+      checkpoint nimCpu
+      let boot = windowsBootstrapNimTarballProvisioning(nimCpu)
+      check boot.len == 1
+      let p = pick("nim", BootstrapNimVersion, cpu, poWindows)
+      check p.ok
+      if p.ok and boot.len == 1:
+        check p.record.url == boot[0].url
+        check p.record.sha256 == boot[0].sha256
+        check p.record.lockIdentity == boot[0].lockIdentity
+        check p.record.executablePath == "bin/nim.exe"
+        # `vccexe` is what makes it the maintenance prefix the provider
+        # compile needs (`--compilerArgsFile`).
+        check "bin\\vccexe.exe" in p.record.detail.extraExecutables
