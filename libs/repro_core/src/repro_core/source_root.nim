@@ -29,7 +29,7 @@
 ## The layout used to be defined there alone, which the profile compile could
 ## not import (Gradual-Nix-To-Reprobuild-Migration GM1w).
 
-import std/os
+import std/[os, strutils]
 from ./paths import extendedPath
 
 const
@@ -104,6 +104,81 @@ const
     ("TEST_CERTIFICATES_TOOLS_SRC", "test-certificates-tools/src"),
     ("RUNQUOTA_SRC", "runquota"),
   ]
+
+# ---------------------------------------------------------------------------
+# The engine's own source roots, kept out of the projects it builds.
+# ---------------------------------------------------------------------------
+
+const
+  EngineSourceRootPrefix* = "REPRO_ENGINE_"
+    ## Prefix of the names a packaged ``repro``'s wrapper uses for the source
+    ## trees reprobuild was built against.
+
+  ProjectVisibleSourceRootNames* = [
+    ## Source roots reprobuild needs for its OWN nested compiles that are
+    ## ALSO read by projects reprobuild builds (codetracer's ``config.nims``
+    ## takes each of them, when set, AHEAD of the workspace sibling).
+    ##
+    ## A packaged ``repro``'s wrapper used to ``--set-default`` them to the
+    ## copies reprobuild was built against. The actions of a ``repro build``
+    ## inherit the wrapper's environment, so a project that left one unset
+    ## compiled against reprobuild's snapshot instead of its own pinned
+    ## sibling. Measured 2026-11-25 with repro 0.2.31: codetracer's
+    ## ``ct-binary`` compiled against reprobuild's
+    ## ``codetracer-trace-format-nim`` and failed on a routine the pinned
+    ## sibling had (reprobuild-specs issue 2026-11-25-a-daemon-hosted-
+    ## codetracer-build-compiles-print-trace-against-a-trace-format-copy-
+    ## without-formarkerevent). The wrapper now sets the
+    ## ``EngineSourceRootPrefix`` spelling (``engineSourceRootName``), and
+    ## the engine seeds the public name from it into its own process only
+    ## (``engineSourceRootSeeds``), where the seeding is recorded and the
+    ## build engine withholds it from actions (``seededSourceRootNames``).
+    "CODETRACER_TRACE_FORMAT_NIM_SRC",
+    "IO_MON_SRC",
+    "SHM_GSET_SRC",
+    "SHM_QUEUE_SRC",
+    "TEST_CERTIFICATES_TOOLS_SRC",
+  ]
+
+  SeededSourceEnvironmentVar* = "REPRO_BOOTSTRAP_SOURCE_ENV"
+    ## Private provenance for compiler source roots injected by this CLI. It
+    ## travels with child compiler environments, but is removed before a
+    ## provider captures the user's development environment. Values are hex
+    ## encoded so every valid filesystem path survives this environment-only
+    ## transport. Written by ``repro_interface_artifacts``'
+    ## ``seedSourcePackageEnvironment``.
+
+proc engineSourceRootName*(publicName: string): string =
+  ## The wrapper's private spelling of ``publicName``.
+  EngineSourceRootPrefix & publicName
+
+proc engineSourceRootSeeds*(): seq[(string, string)] =
+  ## ``(publicName, root)`` for every ``ProjectVisibleSourceRootNames`` entry
+  ## the wrapper supplied under its private name. The caller seeds them, so
+  ## an explicit caller value of the public name still wins.
+  for name in ProjectVisibleSourceRootNames:
+    let root = getEnv(engineSourceRootName(name))
+    if root.len > 0:
+      result.add((name, root))
+
+proc seededSourceRootNames*(): seq[string] =
+  ## The names this process seeded that still hold the seeded value, followed
+  ## by ``SeededSourceEnvironmentVar`` itself when it is set: the engine's own
+  ## roots, as opposed to a caller's. A caller value is never listed, because
+  ## seeding only ever fills an unset name.
+  for line in getEnv(SeededSourceEnvironmentVar).splitLines():
+    let split = line.find('=')
+    if split <= 0:
+      continue
+    let name = line[0 ..< split]
+    try:
+      let value = parseHexStr(line[split + 1 .. ^1])
+      if existsEnv(name) and getEnv(name) == value and name notin result:
+        result.add(name)
+    except ValueError:
+      discard
+  if existsEnv(SeededSourceEnvironmentVar):
+    result.add(SeededSourceEnvironmentVar)
 
 proc installedLayoutSourceRoot*(prefix: string): string =
   ## ``<prefix>/share/repro/source`` when it holds reprobuild's libs, else "".
