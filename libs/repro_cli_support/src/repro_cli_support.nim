@@ -32126,6 +32126,121 @@ proc committedLockRepoFacts(repoRoot: string):
   result.branch = run(["-C", repoRoot, "symbolic-ref", "--short", "-q", "HEAD"])
   result.originUrl = resolveFetchUrl()
 
+const MaxLocalRemoteHops = 8
+  ## How many local clones ``lockFetchUrlOfCheckout`` follows before it gives
+  ## up. A workspace mirror of a mirror is two; eight is generous and bounds a
+  ## chain that loops through a directory spelled two ways.
+
+proc localRemoteDir(fromDir, url: string): string =
+  ## The directory a LOCAL remote spelling names, resolved the way ``git``
+  ## resolves it for a clone at ``fromDir``; empty when it is not a directory.
+  var path = url.strip()
+  if path.toLowerAscii.startsWith("file://"):
+    path = path.substr("file://".len)
+  elif path.toLowerAscii.startsWith("file:"):
+    path = path.substr("file:".len)
+  if path.startsWith("~"):
+    path = expandTilde(path)
+  if not isAbsolute(path):
+    path = absolutePath(path, fromDir)
+  if dirExists(extendedPath(path)): path else: ""
+
+proc fetchUrlOfLocalClone(dir: string): string =
+  ## ``origin``, else ``upstream``, of the repository at ``dir`` — a worktree
+  ## or a bare repository, which ``committedLockRepoFacts`` does not read.
+  let gitBin = findExe("git")
+  if gitBin.len == 0:
+    return ""
+  for remote in ["origin", "upstream"]:
+    let r = execCmdEx(quoteShellCommand([gitBin, "-C", dir, "remote",
+      "get-url", remote]), options = {poUsePath},
+      env = scrubbedGitRepositoryEnv())
+    if r.exitCode == 0 and r.output.strip().len > 0:
+      return r.output.strip()
+  ""
+
+proc lockFetchUrlOfCheckout*(repoRoot, remoteUrl: string): string =
+  ## The URL a committed ``repro.lock`` records for the checkout at
+  ## ``repoRoot`` whose remote is spelled ``remoteUrl``.
+  ##
+  ## A network remote is ``canonicalLockFetchUrl(remoteUrl)``. A LOCAL remote
+  ## names a directory on the writing machine, which no other machine can
+  ## fetch, and it is common: a sibling cloned from the workspace (``git clone
+  ## ../m/<repo>``) has the workspace checkout as its ``origin``. Measured
+  ## 2026-11-26: codetracer ``a9d16e2b4b`` committed a lock naming 19 siblings
+  ## at ``/home/…/codetracer-gui/<repo>``, written by the managed pre-commit
+  ## hook from such clones (reprobuild-pm issue
+  ## 2026-11-26-repro-lock-records-a-siblings-local-origin-as-its-fetch-url).
+  ## So a local remote is FOLLOWED: the clone it names is asked for its own
+  ## remote, up to ``MaxLocalRemoteHops`` times, and the first network URL
+  ## found is the answer. That is the repository the local clone was made
+  ## from, at the same commits, which is what a reader of the lock fetches.
+  ##
+  ## When the chain ends without a network URL (a test fixture's bare remote,
+  ## a repository never published) the local spelling is returned unchanged;
+  ## ``guardLocalLockUrls`` decides whether a committed lock may carry it.
+  result = canonicalLockFetchUrl(remoteUrl)
+  var dir = repoRoot
+  var seen: seq[string] = @[]
+  var url = result
+  for _ in 0 ..< MaxLocalRemoteHops:
+    if url.len == 0 or not isLocalRemoteSpelling(url):
+      break
+    let next = localRemoteDir(dir, url)
+    if next.len == 0 or next in seen:
+      break
+    seen.add(next)
+    let nextUrl = canonicalLockFetchUrl(fetchUrlOfLocalClone(next))
+    if nextUrl.len == 0:
+      break
+    if not isLocalRemoteSpelling(nextUrl):
+      return nextUrl
+    dir = next
+    url = nextUrl
+
+type LocalLockUrlError* = object of CatchableError
+  ## A committed lock would name a sibling by a directory on this machine.
+
+proc isLocalLockUrl*(url: string): bool =
+  url.strip().len > 0 and isLocalRemoteSpelling(url.strip())
+
+proc guardLocalLockUrls*(deps: var seq[LockedDep];
+                         existing: openArray[LockedDep]; rootUrl: string) =
+  ## Keep a local filesystem path out of a committed lock's ``deps``.
+  ##
+  ## An entry whose URL is local (after ``lockFetchUrlOfCheckout`` followed
+  ## it as far as it goes) takes the network URL the EXISTING lock records
+  ## for the same name, when it records one: the commit is pinned by its
+  ## revision, and that URL is where it is published. Otherwise the write is
+  ## refused, naming the entry and the path.
+  ##
+  ## The one exception is a workspace whose ROOT is itself known only by a
+  ## local path (``rootUrl`` local or empty): a test fixture or an unpublished
+  ## repository, where a local sibling is the only URL there is and the lock
+  ## leaves the machine with nothing else either.
+  let rootIsLocal = rootUrl.strip().len == 0 or isLocalLockUrl(rootUrl)
+  for d in deps.mitems:
+    if d.coordinates.kind != ckVcs or isSelfLockedDep(d) or
+        not isLocalLockUrl(d.coordinates.url):
+      continue
+    var carried = ""
+    for e in existing:
+      if e.name == d.name and e.coordinates.kind == ckVcs and
+          e.coordinates.url.strip().len > 0 and
+          not isLocalLockUrl(e.coordinates.url):
+        carried = canonicalLockFetchUrl(e.coordinates.url)
+        break
+    if carried.len > 0:
+      d.coordinates.url = carried
+    elif not rootIsLocal:
+      raise newException(LocalLockUrlError,
+        "refusing to write a local path as the fetch url of '" & d.name &
+        "' in repro.lock: its remote is " & d.coordinates.url &
+        ", a directory on this machine, and neither that clone's own " &
+        "remotes nor the existing lock name a published URL for it. Point " &
+        "the checkout's `origin` at the repository it was published to " &
+        "(`git -C <checkout> remote set-url origin <url>`) and retry")
+
 const nestedDevelopDirs* = ["deps", "vendor", "third-party", "develop"]
   ## Workspace-Manifest-Optional MO-7 — the conventional project-local
   ## subdirectories that may hold NESTED develop-mode dependency checkouts
@@ -32391,7 +32506,7 @@ proc usesProducerLockedDep(selector, root, pathBase: string;
     return some(LockedDep(
       name: selector, path: rel,
       coordinates: Coordinates(kind: ckVcs,
-        url: canonicalLockFetchUrl(facts.originUrl),
+        url: lockFetchUrlOfCheckout(depAbs, facts.originUrl),
         revision: facts.headSha),
       integrity: computeDepIntegrity(depAbs, facts.headSha),
       version: "", visibility: "public", participation: "",
@@ -32441,7 +32556,7 @@ proc lockedDepFromCheckout(name, depAbs, pathBase: string): LockedDep =
   LockedDep(
     name: name, path: relativePath(depAbs, pathBase).replace('\\', '/'),
     coordinates: Coordinates(kind: ckVcs,
-      url: canonicalLockFetchUrl(facts.originUrl),
+      url: lockFetchUrlOfCheckout(depAbs, facts.originUrl),
       revision: facts.headSha),
     integrity: computeDepIntegrity(depAbs, facts.headSha),
     version: "", visibility: "public", participation: "",
@@ -32549,7 +32664,7 @@ proc catalogLockedDep*(catalogRoot, root: string;
       name: depName,
       path: depPath,
       coordinates: Coordinates(kind: ckVcs,
-        url: canonicalLockFetchUrl(facts.originUrl),
+        url: lockFetchUrlOfCheckout(depAbs, facts.originUrl),
         revision: facts.headSha),
       integrity: computeDepIntegrity(depAbs, facts.headSha),
       version: "", visibility: "public", participation: "",
@@ -33022,7 +33137,7 @@ proc lockedDepsForWorkspace*(workspaceRoot: string;
     siblingDeps.add(LockedDep(
       name: d.name, path: rel,
       coordinates: Coordinates(kind: ckVcs,
-        url: canonicalLockFetchUrl(facts.originUrl),
+        url: lockFetchUrlOfCheckout(depAbs, facts.originUrl),
         revision: facts.headSha),
       integrity: computeDepIntegrity(depAbs, facts.headSha),
       version: "", visibility: "public", participation: "",
@@ -33148,7 +33263,7 @@ proc lockedDepsForWorkspace*(workspaceRoot: string;
     siblingDeps.add(LockedDep(
       name: depName, path: rel,
       coordinates: Coordinates(kind: ckVcs,
-        url: canonicalLockFetchUrl(facts.originUrl),
+        url: lockFetchUrlOfCheckout(depAbs, facts.originUrl),
         revision: facts.headSha),
       integrity: computeDepIntegrity(depAbs, facts.headSha),
       version: "", visibility: "public", participation: "",
@@ -33236,7 +33351,7 @@ proc lockedDepsForWorkspace*(workspaceRoot: string;
   result.add(LockedDep(
     name: rootName, path: SelfLockedDepPath,
     coordinates: Coordinates(kind: ckVcs,
-      url: canonicalLockFetchUrl(rootFacts.originUrl),
+      url: lockFetchUrlOfCheckout(root, rootFacts.originUrl),
       revision: rootFacts.headSha),
     integrity: computeDepIntegrity(root, rootFacts.headSha),
     version: "", visibility: "public", participation: "",
@@ -33252,6 +33367,10 @@ proc lockedDepsForWorkspace*(workspaceRoot: string;
     if entry.coordinates.kind == ckVcs:
       entry.coordinates.url = canonicalLockFetchUrl(entry.coordinates.url)
     result.add(entry)
+  # No sibling is recorded by a directory on this machine: an observed local
+  # remote that ``lockFetchUrlOfCheckout`` could not follow to a published
+  # URL takes the existing lock's URL, or the write is refused.
+  guardLocalLockUrls(result, existingDeps, result[0].coordinates.url)
 
 proc checkoutTrunk(facts: tuple[headSha, branch, originUrl: string]): string =
   ## The default workspace branch of a committed-lock-only workspace: the
@@ -65972,6 +66091,11 @@ proc planCommittedLockRepin(repoRoot: string;
   # Resolved once: the lookup costs a subprocess, and every observation below
   # shares the same base.
   let pathBase = committedLockPathBase(root)
+  var rootUrlIsLocal = true
+  for dep in ld.deps:
+    if isSelfLockedDep(dep):
+      rootUrlIsLocal = dep.coordinates.url.strip().len == 0 or
+        isLocalLockUrl(dep.coordinates.url)
   for o in obs.observations:
     if o.name notin result.examined: result.examined.add(o.name)
     if o.observed.len == 0: continue
@@ -65981,7 +66105,7 @@ proc planCommittedLockRepin(repoRoot: string;
         ", which does not describe the working tree this commit was built " &
         "against")
     let depAbs = absolutePath(pathBase / o.path)
-    let fresh = lockedDepFromCheckout(o.name, depAbs, pathBase)
+    var fresh = lockedDepFromCheckout(o.name, depAbs, pathBase)
     # Every observation is of an entry the lock already carries
     # (``observeCommittedLockSiblings``); it is matched back to that entry by
     # NAME, the identity the entry records.
@@ -65990,6 +66114,22 @@ proc planCommittedLockRepin(repoRoot: string;
         continue
       if ld.deps[i].name == o.name:
         var d = ld.deps[i]
+        # A sibling cloned from a local directory whose chain reaches no
+        # published URL (``lockFetchUrlOfCheckout``) never replaces the URL
+        # the lock records, and is never recorded where the lock had none
+        # unless the root itself is known only locally (``guardLocalLockUrls``).
+        # This is the path that committed codetracer ``a9d16e2b4b``'s 19 local
+        # paths as "refreshed sibling coordinates".
+        if isLocalLockUrl(fresh.coordinates.url) and
+            (d.coordinates.url.strip().len > 0 or not rootUrlIsLocal):
+          if not rootUrlIsLocal and (d.coordinates.url.strip().len == 0 or
+              isLocalLockUrl(d.coordinates.url)):
+            result.warnings.add("sibling '" & o.name & "' (" & o.path &
+              ") has the local remote " & fresh.coordinates.url & " and no " &
+              "published URL, so repro.lock cannot record where it is " &
+              "published; point its `origin` at the repository it was " &
+              "published to")
+          fresh.coordinates.url = ""
         let pinned = d.coordinates.revision
         if pinned.len > 0 and pinned != fresh.coordinates.revision and
             o.relation != sprAhead:
@@ -100275,7 +100415,8 @@ proc buildLockGenerationRequest(projectDir, inputsOverride,
       lockedDepsForWorkspace(projectDir, resolved.usesSelectors,
         resolved.sourceRecipeRoots, resolved.catalogRoots, resolved.usesEdges,
         resolved.pinnedSiblings)
-    except PinnedSiblingError as e:
+    except PinnedSiblingError, LocalLockUrlError:
+      let e = getCurrentException()
       stderr.writeLine("repro lock " & verb & ": " & e.msg)
       return 1
   # MO-11 — overlay each package's DECLARED source provenance (the

@@ -234,6 +234,7 @@ libs/repro_build_engine/tests/t_named_pipe_evidence.nim	nim	3
 libs/repro_build_engine/tests/t_nim_producer_stdlib_collisions.nim	nim	5
 libs/repro_build_engine/tests/t_nix_daemon_search_roots.nim	nim	15
 libs/repro_build_engine/tests/t_nix_gc_roots_cover_working_tree_outputs.nim	nim	3
+libs/repro_build_engine/tests/t_nix_shell_session_dir_is_not_an_action_input.nim	nim	6
 libs/repro_build_engine/tests/t_nlf_stat4_baseline_fingerprints.nim	nim	2
 libs/repro_build_engine/tests/t_output_directory_an_action_creates_is_not_an_input.nim	nim	8
 libs/repro_build_engine/tests/t_output_removal_check_folds_case.nim	nim	29
@@ -1907,6 +1908,7 @@ tests/integration/t_a_bundle_says_when_a_project_pins_an_upstream_nim.nim	nim	1
 tests/integration/t_a_changed_library_source_or_flag_is_never_a_hit.nim	nim	2
 tests/integration/t_a_clean_workspace_pushes_without_a_diagnostic.nim	nim	1
 tests/integration/t_a_commit_that_moves_no_sibling_does_not_touch_the_lock.nim	nim	1
+tests/integration/t_a_committed_lock_never_records_a_local_path_as_a_url.nim	nim	1
 tests/integration/t_a_compiler_environment_difference_is_a_miss_not_a_wrong_hit.nim	nim	2
 tests/integration/t_a_contract_refusal_is_distinguishable_from_a_successful_dispatch.nim	nim	1
 tests/integration/t_a_dirty_sibling_leaves_the_lock_alone.nim	nim	1
@@ -1970,6 +1972,7 @@ tests/integration/t_an_ahead_sibling_is_still_recorded.nim	nim	1
 tests/integration/t_an_archive_rebuilt_in_another_checkout_is_byte_identical.nim	nim	1
 tests/integration/t_an_engine_older_than_a_sibling_recipe_names_the_skew.nim	nim	3
 tests/integration/t_an_input_develop_mode_does_not_substitute_is_not_compared.nim	nim	1
+tests/integration/t_an_unchanged_project_does_not_compile_its_provider_twice.nim	nim	1
 tests/integration/t_an_unfetchable_flake_revision_is_withheld.nim	nim	1
 tests/integration/t_an_unobservable_sibling_is_not_substituted.nim	nim	1
 tests/integration/t_an_unpushed_sibling_revision_is_not_recorded.nim	nim	2

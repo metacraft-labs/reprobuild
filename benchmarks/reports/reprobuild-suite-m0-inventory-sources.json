@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 36,
-    "nimTestBinaries": 3303,
+    "nimTestBinaries": 3306,
     "pureUnitConsolidationGroups": 96,
     "pureUnitTests": 855,
     "staticallyDetectedRuntimeCompilerFlowTests": 164,
-    "testEntries": 3362
+    "testEntries": 3365
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1860,7 +1860,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 29,
-      "integration": 1875,
+      "integration": 1878,
       "platform/destructive": 206,
       "pure unit": 855,
       "unclassified": 397
@@ -2083,9 +2083,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 3303,
+    "nimTestBinaryCount": 3306,
     "pythonTestFileCount": 59,
-    "testEntryCount": 3362
+    "testEntryCount": 3365
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -13734,6 +13734,26 @@
       "source": "libs/repro_build_engine/tests/t_nix_gc_roots_cover_working_tree_outputs.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 3,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_nix_shell_session_dir_is_not_an_action_input",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "io_mon",
+        "repro_build_engine",
+        "repro_core",
+        "repro_local_store"
+      ],
+      "owner": "libs/repro_build_engine",
+      "requiresReproBinary": true,
+      "source": "libs/repro_build_engine/tests/t_nix_shell_session_dir_is_not_an_action_input.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 6,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -44491,6 +44511,21 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_a_committed_lock_never_records_a_local_path_as_a_url",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_a_committed_lock_never_records_a_local_path_as_a_url.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_a_compiler_environment_difference_is_a_miss_not_a_wrong_hit",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -45592,6 +45627,24 @@
       "owner": "tests/integration",
       "requiresReproBinary": true,
       "source": "tests/integration/t_an_input_develop_mode_does_not_substitute_is_not_compared.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_an_unchanged_project_does_not_compile_its_provider_twice",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_dsl_stdlib",
+        "repro_project_dsl"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_an_unchanged_project_does_not_compile_its_provider_twice.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
       "staticallyDetectedRuntimeCompilerFlow": false,
