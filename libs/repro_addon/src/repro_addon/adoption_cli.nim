@@ -124,7 +124,7 @@ proc installRestoreUnit*(dir, repro: string; root = "/"): seq[string] =
 
 const RetiredRecordName* = "carried.retired"
   ## Beside the marker: ``retireCarriedState`` writes it before the commit
-  ## point and completes it after the cleanup (§13 decision 194).
+  ## point and completes it after the cleanup (§13 decision 195).
 
 proc retiredRecordPath*(dir: string): string =
   ## ``carried.retired`` beside the carried directory ``dir``.
@@ -152,7 +152,7 @@ proc writeDurably(path, text: string) =
 
 proc retireRefusal*(dir, root, stateDir: string): string =
   ## Why carried state at ``dir`` may not be retired now (§13 decision
-  ## 194), or "": it must be installed (marker and manifest), every
+  ## 195), or "": it must be installed (marker and manifest), every
   ## carried entry restored and identified by the receipt -- a restore has
   ## succeeded since the conversion -- and no add-on switch nor full apply
   ## be pending.
@@ -205,7 +205,7 @@ proc retireCarriedState*(dir, root, stateDir: string;
                          reload: proc () {.closure.} = nil;
                          crashAt: proc (point: string) {.closure.} = nil):
     seq[string] =
-  ## ``repro system state retire`` (§13 decision 194): end the carried-state
+  ## ``repro system state retire`` (§13 decision 195): end the carried-state
   ## protection once a restore has succeeded. Returns what it removed.
   ## Order: the record that the retire began (durable), the marker (the
   ## commit point: before it the host keeps every protection), then every
@@ -410,7 +410,7 @@ proc runStateCommand*(c: StateCommand): int =
       0
     of "retire":
       # The carried directory of the system under --root, as install-unit
-      # and restore read it (§13 decision 194).
+      # and restore read it (§13 decision 195).
       if fromDir.len > 0:
         raise newException(ValueError, "retire reads " & CarriedStateDir &
           ", the directory install-unit installed; it takes no --from")
