@@ -325,7 +325,7 @@ class CoverageTests(unittest.TestCase):
                               f"{job}/{item.name} drives nix without keeping builder logs")
         # The scan must actually find the steps it exists for.
         for expected in ("lint/Suite case-count baseline and inventory entry set",
-                         "lint/just lint", "lint/Nim 2.2.4 lane",
+                         "lint/just lint", "lint/Nim floor lane",
                          "test/Bootstrap Reprobuild",
                          "test/List the repositories CodeTracer's lock clones",
                          "test/Reconcile CodeTracer source dependencies",

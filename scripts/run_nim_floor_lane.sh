@@ -1,25 +1,37 @@
 #!/usr/bin/env bash
-# The Nim 2.2.4 lane (owner decision 2026-11-07, A11 code review round 4):
-# build and run, with the lowest Nim the `uses: "nim >=2.2 <3.0"` range of
-# repro.nim admits, the suites of the async code that once awaited inside
-# a `finally` -- a construct Nim 2.2.4's async transform compiles into an
-# AssertionDefect ("yielded nil") that later releases do not. The dev
-# shell's Nim compiles it right, so without this lane nothing would notice
-# it coming back.
+# The Nim floor lane. It began as the "Nim 2.2.4 lane" (owner decision
+# 2026-11-07, A11 code review round 4): build and run, with the lowest Nim the
+# `uses: "nim >=2.2 <3.0"` range of repro.nim admitted, the suites of the
+# async code that once awaited inside a `finally` -- a construct Nim 2.2.4's
+# async transform compiles into an AssertionDefect ("yielded nil") that later
+# releases do not.
 #
-# Nim 2.2.4 is the flake's own nixpkgs `nim` (pinned by flake.lock). Run
-# inside the dev shell (`just test-nim224`), which provides the C toolchain
-# and the libraries the tests link.
+# Operator decision of 2026-11-24: recipe compilation REQUIRES Nim 2.2.10
+# (Nim 2.2.4 names a generated C file after its path relative to the project
+# only, so a deep recipe path makes a name over the filesystem's limit), so
+# Nim 2.2.4 is no longer a supported compiler and the lowest one this
+# repository supports is the floor, 2.2.10.
+# The lane therefore builds the same suites with 2.2.10 (the nixpkgs snapshot
+# the engine's own Linux bootstrap uses, `BootstrapNimNixpkgsRev`; a unit test
+# holds the two equal). It still earns its keep as the one place the
+# repository's own code is compiled by the lowest supported Nim while the dev
+# shell compiles it with a newer fork. What it no longer does is catch the
+# 2.2.4-only async-transform defect: that construct is green under 2.2.10, so
+# the falsifying builds named in the suites ("red under Nim 2.2.4 only") are no
+# longer red here.
 #
-#   scripts/run_nim224_lane.sh            # every lane suite
-#   scripts/run_nim224_lane.sh <test>...  # some of them
+# Run inside the dev shell (`just test-nim-floor`), which provides the C
+# toolchain and the libraries the tests link.
 #
-# NIM224_FLAGS adds compiler flags to the suites' builds (not the sink's):
+#   scripts/run_nim_floor_lane.sh            # every lane suite
+#   scripts/run_nim_floor_lane.sh <test>...  # some of them
+#
+# NIM_FLOOR_FLAGS adds compiler flags to the suites' builds (not the sink's):
 # a falsifying build, e.g.
-#   NIM224_FLAGS=-d:reproAddonMutation=signer-close-in-finally \
-#     scripts/run_nim224_lane.sh t_signer_closes_after_its_early_returns
+#   NIM_FLOOR_FLAGS=-d:reproAddonMutation=signer-close-in-finally \
+#     scripts/run_nim_floor_lane.sh t_signer_closes_after_its_early_returns
 #
-# NIM224_LANE_MUTATION=unknown-suite-runs-nothing is the falsifier of the
+# NIM_FLOOR_LANE_MUTATION=unknown-suite-runs-nothing is the falsifier of the
 # selection check (a name that matches nothing is then dropped silently, as
 # before round 5).
 #
@@ -54,7 +66,7 @@ suites=(
 if [ "$#" -gt 0 ]; then
   selected=()
   for t in "$@"; do
-    # An empty argument (an unset variable, `just test-nim224 ''`) names no
+    # An empty argument (an unset variable, `just test-nim-floor ''`) names no
     # suite; if every argument is empty the selection is empty and refused
     # below.
     [ -z "$t" ] && continue
@@ -64,41 +76,44 @@ if [ "$#" -gt 0 ]; then
         selected+=("$s"); found=1
       fi
     done
-    if [ "$found" -eq 0 ] && [ "${NIM224_LANE_MUTATION:-}" != "unknown-suite-runs-nothing" ]; then
-      echo "run_nim224_lane: '${t}' is not a lane suite; the lane's suites are:" >&2
+    if [ "$found" -eq 0 ] && [ "${NIM_FLOOR_LANE_MUTATION:-}" != "unknown-suite-runs-nothing" ]; then
+      echo "run_nim_floor_lane: '${t}' is not a lane suite; the lane's suites are:" >&2
       for s in "${suites[@]}"; do echo "  $(basename "$s" .nim)" >&2; done
       exit 2
     fi
   done
   suites=(${selected[@]+"${selected[@]}"})
 fi
-if [ "${#suites[@]}" -eq 0 ] && [ "${NIM224_LANE_MUTATION:-}" != "unknown-suite-runs-nothing" ]; then
-  echo "run_nim224_lane: no suite selected; nothing would run" >&2
+if [ "${#suites[@]}" -eq 0 ] && [ "${NIM_FLOOR_LANE_MUTATION:-}" != "unknown-suite-runs-nothing" ]; then
+  echo "run_nim_floor_lane: no suite selected; nothing would run" >&2
   exit 2
 fi
-if [ -n "${NIM224_LANE_SELECT_ONLY:-}" ]; then
-  # For the lane's own test (tests/unit/test_nim224_lane_selection.py):
+if [ -n "${NIM_FLOOR_LANE_SELECT_ONLY:-}" ]; then
+  # For the lane's own test (tests/unit/test_nim_floor_lane_selection.py):
   # print the selection and stop before resolving Nim or building.
   for s in ${suites[@]+"${suites[@]}"}; do echo "selected: $(basename "$s" .nim)"; done
-  echo "run_nim224_lane: every lane suite green under Nim 2.2.4 (selection only)"
+  echo "run_nim_floor_lane: every lane suite green under the Nim floor (selection only)"
   exit 0
 fi
 
-expected="2.2.4"
-nimdir="$(nix build --no-link --print-out-paths --inputs-from . nixpkgs#nim)/bin"
+expected="2.2.10"
+# The snapshot `repro_tool_profiles.BootstrapNimNixpkgsRev` names; held equal
+# by tests/unit/test_nim_floor_lane_selection.py.
+floor_nixpkgs="github:NixOS/nixpkgs/eec3e392d1862d49969beb75dd07a729002b6800"
+nimdir="$(nix build --no-link --print-out-paths "${floor_nixpkgs}#nim")/bin"
 version="$("$nimdir/nim" --version | head -1)"
 case "$version" in
   *"Version ${expected} "*) ;;
-  *) echo "run_nim224_lane: nixpkgs#nim is '${version}', not ${expected}" >&2; exit 2 ;;
+  *) echo "run_nim_floor_lane: ${floor_nixpkgs}#nim is '${version}', not ${expected}" >&2; exit 2 ;;
 esac
-echo "run_nim224_lane: Nim ${expected} is $(readlink -f "$nimdir/nim")"
+echo "run_nim_floor_lane: Nim ${expected} is $(readlink -f "$nimdir/nim")"
 export PATH="$nimdir:$PATH"
 
 # The sink the evidence suites spawn, built by the same Nim, with its
 # dependency list, where repro_test_support/fresh_binary looks for them
 # (REPRO_TEST_BUILD_DIR). With the flags scripts/build_apps.sh gives a
 # guarded helper, which fresh_binary requires the list to record.
-lane=build/nim224
+lane=build/nim-floor
 mkdir -p "$lane/bin" "$lane/nimcache" "$lane/test-bin"
 export REPRO_TEST_BUILD_DIR="$PWD/$lane"
 nim c --hints:off --warnings:off --skipUserCfg --noNimblePath \
@@ -122,9 +137,9 @@ esac
 failed=()
 for src in "${suites[@]}"; do
   name="$(basename "$src" .nim)"
-  echo "nim224: ${name}"
-  # shellcheck disable=SC2086  # NIM224_FLAGS is a list of flags
-  if ! nim c --hints:off --warnings:off ${NIM224_FLAGS:-} \
+  echo "nim-floor: ${name}"
+  # shellcheck disable=SC2086  # NIM_FLOOR_FLAGS is a list of flags
+  if ! nim c --hints:off --warnings:off ${NIM_FLOOR_FLAGS:-} \
       --nimcache:"$lane/nimcache/${name}" \
       --out:"$lane/test-bin/${name}" "$src"; then
     failed+=("${name} (build)")
@@ -133,7 +148,7 @@ for src in "${suites[@]}"; do
   "$lane/test-bin/${name}" || failed+=("${name}")
 done
 if [ "${#failed[@]}" -gt 0 ]; then
-  echo "run_nim224_lane: red under Nim ${expected}: ${failed[*]}" >&2
+  echo "run_nim_floor_lane: red under Nim ${expected}: ${failed[*]}" >&2
   exit 1
 fi
-echo "run_nim224_lane: every lane suite green under Nim ${expected}"
+echo "run_nim_floor_lane: every lane suite green under Nim ${expected}"

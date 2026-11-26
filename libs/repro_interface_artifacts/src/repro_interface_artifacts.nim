@@ -118,6 +118,7 @@ import repro_core/relocation
 import repro_core/source_root
 import repro_core/c_compiler
 import repro_core/c_compiler_probe
+import repro_core/recipe_compiler_requirement
 export c_compiler_probe.CCompilerProbe, c_compiler_probe.cCompilerUnusableMessage
 import repro_core/nix_store_roots
 import repro_core/portable_release_launch
@@ -5223,6 +5224,44 @@ proc runCommand*(command: openArray[string];
   if raiseOnFailure and result.exitCode != 0:
     raise commandFailure(command, result, "")
 
+var checkedRecipeCompilers = initTable[string, bool]()
+  ## Compiler identities (path, size, mtime) already judged against the recipe
+  ## compiler floor, so the `--version` probe runs once per compiler binary.
+
+proc recipeCompilerFloorRefusal(path, origin: string): string =
+  ## "" when `path` may compile a recipe, otherwise the refusal text for a
+  ## compiler older than `RecipeCompilerMinimumVersion` (the operator
+  ## decision of 2026-11-24, `repro_core/recipe_compiler_requirement`), with
+  ## the requirement and its source named. Only a compiler that PRINTS a
+  ## version below the floor is refused: a path that is not a Nim compiler
+  ## (a test stub) says nothing to judge, and the compile that runs it fails
+  ## on its own terms. Judged once per compiler binary and process, and only
+  ## an accepted verdict is remembered.
+  if path.len == 0:
+    return ""
+  var identity = path
+  try:
+    let info = getFileInfo(extendedPath(path))
+    identity.add("|" & $info.size & "|" & $info.lastWriteTime.toUnix())
+  except CatchableError, OSError:
+    return ""
+  if identity in checkedRecipeCompilers:
+    return ""
+  var version = ""
+  try:
+    version = parseNimCompilerVersionOutput(
+      runCommand(@[path, "--version"]).output)
+  except CatchableError:
+    return ""
+  result = recipeCompilerRefusal(version, origin & " " & path & ", which is")
+  if result.len == 0:
+    checkedRecipeCompilers[identity] = true
+
+proc requireRecipeCompilerFloor(path, origin: string) =
+  let refusal = recipeCompilerFloorRefusal(path, origin)
+  if refusal.len > 0:
+    raise newException(RecipeCompilerTooOldError, refusal)
+
 proc nimCompilerPath(): string =
   ## The Nim compiler for a recipe compile.
   ##
@@ -5243,6 +5282,7 @@ proc nimCompilerPath(): string =
   # PATH search below, which costs a probe per candidate, is cached.
   let overridePath = getEnv("REPRO_NIM_COMPILER")
   if overridePath.len > 0:
+    requireRecipeCompilerFloor(overridePath, "$REPRO_NIM_COMPILER names")
     return overridePath
   if cachedNimCompilerPath.len > 0:
     return cachedNimCompilerPath
@@ -5268,13 +5308,22 @@ proc nimCompilerPath(): string =
     if fileExists(extendedPath(candidate)):
       candidates.addUnique(candidate)
   candidates.addUnique("nim")
+  # A `nim` below the recipe-compiler floor is SKIPPED, not fatal: a newer one
+  # later on PATH is used. Only when no candidate is acceptable is the first
+  # refusal raised, so the message names what was found.
+  var firstRefusal = ""
   for candidate in candidates:
-    if candidate.startsWith("/nix/store/"):
+    if candidate.startsWith("/nix/store/") or looksLikeNimCompiler(candidate):
+      let refusal = recipeCompilerFloorRefusal(candidate,
+        "the `nim` found on PATH is")
+      if refusal.len > 0:
+        if firstRefusal.len == 0:
+          firstRefusal = refusal
+        continue
       cachedNimCompilerPath = candidate
       return candidate
-    if looksLikeNimCompiler(candidate):
-      cachedNimCompilerPath = candidate
-      return candidate
+  if firstRefusal.len > 0:
+    raise newException(RecipeCompilerTooOldError, firstRefusal)
   cachedNimCompilerPath = "nim"
   cachedNimCompilerPath
 
@@ -9950,9 +9999,13 @@ proc recipeConfigSearchPathFlags*(modulePath: string; cwd = ""): seq[string] =
   ## They are withdrawn from the child's environment only
   ## (``runCommand``'s ``withoutEnv``), never from this process's.
   requireTrustedRecipeConfiguration(modulePath)
+  # Resolved BEFORE the `try`: a compiler below the recipe-compiler floor
+  # raises `RecipeCompilerTooOldError`, which the `except` below would turn
+  # into an empty answer with no message.
+  let dumpCompiler = nimCompilerPath()
   let execution =
     try:
-      runCommand(@[nimCompilerPath(), "dump", "--dump.format:json",
+      runCommand(@[dumpCompiler, "dump", "--dump.format:json",
         "--hints:off", "--warnings:off", absolutePath(modulePath)],
         cwd = cwd, raiseOnFailure = false,
         withoutEnv = seededSourcePackageEnvironmentNames())
@@ -10686,6 +10739,17 @@ proc extractInterfaceFromModuleBody(modulePath, artifactPath,
   let shimDirOverride = recipeRelative
   let priorShimDir = getEnv(SiblingShimDirEnv)
   let hadPriorShimDir = existsEnv(SiblingShimDirEnv)
+  # The owned shim directory is also handed to the compiler as a `--path`
+  # root (below, after the nimcache key is computed). Nim names a module's C
+  # file after its SHORTEST path relative to the project, a `--path` root or
+  # a nimble root (`mangleModuleName`), and no root lay near this directory:
+  # the shim was named after its path from the runner, which carries the whole
+  # action-cache root and the 64-character identity, so a long root made a
+  # file name over NAME_MAX (283 bytes at a 120-character root on macOS; a
+  # newer compiler does not change that, because the name depends on which
+  # roots the compile passes). Relative to its own directory the name is
+  # `@prepro_sib_<selector>.nim.c`, whatever the root.
+  var shimPathFlag = ""
   if shimDirOverride:
     let shimDir = absolutePath(buildScratchRoot(workDir, scratchDir)) /
       "sibling-shims"
@@ -10693,6 +10757,7 @@ proc extractInterfaceFromModuleBody(modulePath, artifactPath,
       removeDir(extendedPath(shimDir))
     createDir(extendedPath(shimDir))
     putEnv(SiblingShimDirEnv, shimDir)
+    shimPathFlag = "--path:" & shimDir
   defer:
     if shimDirOverride:
       if hadPriorShimDir: putEnv(SiblingShimDirEnv, priorShimDir)
@@ -10719,6 +10784,12 @@ proc extractInterfaceFromModuleBody(modulePath, artifactPath,
         launchCommand[i] = "--nimcache:" & nimcache
       elif launchCommand[i] == runnerPlaceholder:
         launchCommand[i] = runnerPath
+    if shimPathFlag.len > 0:
+      # Added to the command that RUNS, after the nimcache key was derived
+      # from `launch.argv`: the directory sits under the identity's scratch,
+      # so a key that folded it in would give every identity its own cold
+      # nimcache pool slot.
+      launchCommand.insert(shimPathFlag, 2)
     # `workDir` is the reprobuild library lookup/fingerprint root. Installed
     # Nix packages deliberately point it at their immutable source closure, so
     # it is not a valid compiler working directory: Nim writes relative linker

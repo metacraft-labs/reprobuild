@@ -102,7 +102,7 @@
 # a build-host tool, declared in repro.nim's `nativeBuildDeps:`: in
 # `repro build .#apps` the edge's PATH carries the strace that declaration
 # resolved, and the flake's dev shell (where scripts/build_apps.sh and the
-# Nim 2.2.4 lane run) carries its pinned strace. Path mode resolves a
+# Nim floor lane run) carries its pinned strace. Path mode resolves a
 # nativeBuildDeps tool from the invoking PATH, so a build outside the dev
 # shell uses the host's strace (as it does the host's gcc and python3).
 # Without one nothing is written. strace is Linux only, so on other hosts

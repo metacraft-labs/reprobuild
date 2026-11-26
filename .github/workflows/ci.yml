@@ -250,15 +250,16 @@ jobs:
       - name: just lint
         if: ${{ !cancelled() && steps.suite_baseline.outcome != 'skipped' }}
         run: bash scripts/ci_nix_builder_logs.sh run test-logs lint -- dev-exec just lint
-      # The Nim 2.2.4 lane (owner decision 2026-11-07): the async suites that
-      # once awaited inside a `finally`, built and run with the lowest Nim
-      # repro.nim's `uses:` range admits. The dev shell's Nim compiles that
-      # construct correctly, so only this step would see it come back. Here,
-      # beside lint, rather than in the Test job, which is routinely consumed
-      # by its build phase before it reaches a verdict.
-      - name: Nim 2.2.4 lane
+      # The Nim floor lane (owner decision 2026-11-07, moved from Nim 2.2.4 to
+      # the floor, 2.2.10, by the operator decision of 2026-11-24): the async
+      # suites that once awaited inside a `finally`, built and run with the
+      # lowest Nim this repository supports. The dev shell compiles with a
+      # newer fork, so only this step compiles the repository's own code with
+      # the floor. Here, beside lint, rather than in the Test job, which is
+      # routinely consumed by its build phase before it reaches a verdict.
+      - name: Nim floor lane
         if: ${{ !cancelled() && steps.suite_baseline.outcome != 'skipped' }}
-        run: bash scripts/ci_nix_builder_logs.sh run test-logs nim224 -- dev-exec just test-nim224
+        run: bash scripts/ci_nix_builder_logs.sh run test-logs nim-floor -- dev-exec just test-nim-floor
       - name: Upload logs
         if: always()
         uses: actions/upload-artifact@v4
