@@ -17,6 +17,7 @@
 ## POSIX only: the stub is a `sh` script.
 
 import std/[os, osproc, strtabs, strutils, unittest]
+import repro_test_support/reasoned_skip
 
 const Recipe = """
 import repro_project_dsl
@@ -45,7 +46,7 @@ proc runList(reproBin, recipe: string; compiler: string): tuple[output: string,
 when defined(windows):
   suite "recipe compile requires Nim 2.2.10":
     test "posix only":
-      skip()
+      skip("the stand-in compiler is a POSIX shell script; there is no Windows form of it")
 else:
   suite "recipe compile requires Nim 2.2.10":
     test "Nim 2.2.4 is refused with the requirement named":
