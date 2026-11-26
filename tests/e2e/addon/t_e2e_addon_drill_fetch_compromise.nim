@@ -54,6 +54,8 @@
 ## Falsifying builds (sink side): ``ack-by-sequence-only`` (the
 ## mistyped-kind acknowledgement handles the refusal),
 ## ``check-ignores-acks``, ``check-ignores-containment``.
+## Host side: ``apply-skips-egress-reload`` (the agent's apply in recovery
+## leaves the deleted table unloaded; §13 decision 187).
 ##
 ## Opt-in: ``REPRO_ADDON_VM_GATES=1``.
 ##
@@ -340,9 +342,20 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
   step("recovery: release succeeds and its record reached the sink",
        rl.exitCode == 0 and sink.waitFor(host, "addon-containment",
          "operator-released", 60, since = beforeRecovery), rl.stdout & rl.stderr)
+  # §13 decision 187 through the agent's own apply (A11 round 26): the
+  # add-on's table deleted by hand is loaded again by the next agent tick's
+  # switch, not only by an operator's apply.
+  discard g.exec("nft delete table inet repro_addon_egress")
+  step("recovery: the add-on's table is gone before the tick (decision 187)",
+       g.exec("nft list table inet repro_addon_egress").exitCode != 0, "")
   publish(3)
   step("recovery: sequence 3 applies through the honest compile, by the timer",
        sink.waitForApplied(host, 3, waitSec, since = beforeRecovery), "")
+  let tableBack = g.exec("nft list table inet repro_addon_egress")
+  record["tableAfterAgentApply"] = %(tableBack.stdout & tableBack.stderr)
+  step("recovery: the agent's apply loaded the table again (decision 187)",
+       tableBack.exitCode == 0, tableBack.stdout & tableBack.stderr &
+       g.exec("journalctl -q -o cat -u repro-agent-apply.service | tail -20").stdout)
   # A tick heartbeat after the apply, so the tick reads live.
   let afterApply = sink.headSeq()
   discard sink.waitFor(host, "addon-agent-tick", "", waitSec, since = afterApply)

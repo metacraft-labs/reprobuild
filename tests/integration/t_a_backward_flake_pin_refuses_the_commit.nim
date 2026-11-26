@@ -1,7 +1,7 @@
 ## The commit-time `flake.lock` refresh never moves a pin BACKWARD silently,
-## and a refusal by EITHER committed lock writes NEITHER
+## and it keeps such a pin rather than refusing the commit
 ## (Nix-Flake-Coexistence.md §3.2 "Rule, at commit" and §4 "Regressions";
-## Unified-Locking-And-Hooks.md §13.3).
+## Unified-Locking-And-Hooks.md §13.3, "What 'backward' is judged against").
 ##
 ## WHY. `flake.lock` is the second committed lock the managed `pre-commit`
 ## hook maintains, and it fails exactly like `repro.lock`: a substituted
@@ -9,35 +9,47 @@
 ## its HEAD would publish a downgrade nobody chose. The refresh therefore
 ## records an input whose sibling is behind, diverged, or missing the pinned
 ## commit only when the committer names that input in
-## `REPRO_ALLOW_PIN_REGRESSION`; otherwise the commit is refused. One variable
-## covers both locks in the commit, and only the names it lists.
+## `REPRO_ALLOW_PIN_REGRESSION`; otherwise it WITHHOLDS the input — its node
+## committed byte-identical, a notice naming the sibling, the distance, the
+## reconciling command and `REPRO_ALLOW_PIN_REGRESSION=<input> git commit
+## --amend --no-edit` —
+## and the commit proceeds. It used to refuse the commit, which made a
+## repository whose lock is ahead of a shared workspace root's checkouts
+## uncommittable from that root although the commit moved no pin. One
+## variable covers both locks in the commit, and only the names it lists.
 ##
-## Cases (the behind / unfetched refusals themselves are pinned by the NF-2
-## cases `t_a_behind_pin_sibling_is_not_recorded_as_the_new_pin`,
+## Cases (the behind / unfetched withholding of the operator verb is pinned by
+## the NF-2 cases `t_a_behind_pin_sibling_is_not_recorded_as_the_new_pin`,
 ## `t_a_behind_pin_skip_names_the_sibling_distance_and_remedy` and
 ## `t_a_sibling_whose_pin_is_not_fetched_is_not_recorded`):
 ##   * a behind input named in the variable commits the older pin, printed and
 ##     logged with both revisions;
-##   * the variable naming a different input still refuses, with a note;
+##   * the variable naming a different input keeps the behind input's pin
+##     (node byte-identical, notice naming the variable for this input) and
+##     the commit proceeds, with a note for the name that matched nothing;
 ##   * the variable naming an input that is not regressing passes, with a note;
-##   * a diverged input refuses (it used to be recorded), names
-##     `repro ws sync`, and is committed when named;
+##   * a diverged input keeps its pin (it used to be recorded, then refused
+##     the commit), names `repro ws sync`, and is committed when named;
 ##   * a commit made while a rebase is stopped stands down even with a behind
 ##     input;
-##   * with a committed `repro.lock` beside the flake: a `repro.lock` refusal
-##     leaves `flake.lock` unwritten, one variable naming the `repro.lock`
-##     sibling lets the commit carry both refreshed locks, a `flake.lock`
-##     refusal leaves `repro.lock` unwritten, and naming only one of two
-##     regressing siblings still refuses — for the other one alone, with
-##     nothing written and no "not regressing" note for the one named.
+##   * with a committed `repro.lock` beside the flake: a kept `repro.lock`
+##     pin holds back nothing else — a repository both locks resolve still
+##     advances in both in the same commit; one variable naming the
+##     `repro.lock` sibling records its older checkout; a kept `flake.lock`
+##     pin likewise leaves `repro.lock`'s advances in place; and naming only
+##     one of two regressing siblings records that one and keeps the other,
+##     with no "not regressing" note for the one named.
 ##
-## Falsifiability (observed at the base commit this change was written on):
-## the allowance, note, diverged and both-locks cases fail there — the refresh
-## withholds a behind input and lets the commit proceed, records a diverged
-## one, and prints nothing about the variable. The stopped-rebase case is a
-## guard; it was shown to go red with the stand-down disabled, and the
-## both-locks case's last step went red with the "named input that regressed
-## counts as used" rule removed.
+## Falsifiability: at the base commit the keep-instead-of-refuse change was
+## written on, the "another input", diverged and both-locks cases fail — the
+## hook refuses each of those commits ("would move N pinned sibling
+## revision(s) BACKWARD"). At the base commit the regression rule itself was
+## written on, the allowance, note, diverged and both-locks cases failed — the
+## refresh withheld a behind input, recorded a diverged one, and printed
+## nothing about the variable. The stopped-rebase case is a guard; it was
+## shown to go red with the stand-down disabled, and the both-locks case's
+## last step went red with the "named input that regressed counts as used"
+## rule removed.
 ##
 ## Test-double policy: NO mocks, doubles or fakes — real bare git origins,
 ## real clones, a real `flake.lock` in nix's on-disk shape, a real committed
@@ -129,9 +141,9 @@ suite "the commit-time flake.lock refresh never moves a pin backward silently":
       check ("from " & gamma.pinned & " to " & gamma.checkout) in logged
       check "REFUSED" notin c.output
 
-  test "t_the_variable_naming_another_input_still_refuses":
-    if not nf2Prerequisites("t_the_variable_naming_another_input_still_" &
-        "refuses"):
+  test "t_the_variable_naming_another_input_keeps_the_behind_pin":
+    if not nf2Prerequisites("t_the_variable_naming_another_input_keeps_the_" &
+        "behind_pin"):
       skip("needs git on PATH and a built ./build/bin/repro (named above)")
     else:
       let fx = setupNf2Fixture("flake-allow-other")
@@ -143,11 +155,29 @@ suite "the commit-time flake.lock refresh never moves a pin backward silently":
       let headBefore = headOf(fx, fx.app)
       let c = commitWith(fx, "allowing the wrong input", allow = "alpha-src")
       checkpoint(c.output)
-      check c.code != 0
-      check headOf(fx, fx.app) == headBefore
+      checkpoint("pre-commit log:\n" & preCommitLog(fx))
+      # The commit is made; the behind input's node is committed exactly as
+      # the parent carried it, and nothing is left modified.
+      check c.code == 0
+      check "REFUSED" notin c.output
+      check gitIn(fx, fx.app, "rev-parse HEAD~1").strip() == headBefore
+      check lockInCommit(fx) == before
       check readFile(lockPath(fx)) == before
-      check lineWith(c.output, "flake.lock input 'gamma-src'",
-        "behind by 2 commit(s)", gamma.pinned, gamma.checkout).len > 0
+      check lockedRev(lockInCommit(fx), "gamma-src") == gamma.pinned
+      # The withholding notice names the input, the distance, both revisions,
+      # the forward command and the variable for THIS input.
+      let notice = lineWith(c.output, "flake.lock NOT refreshed for input " &
+        "'gamma-src'", "2 commit(s) BEHIND")
+      checkpoint("notice: " & notice)
+      check notice.len > 0
+      check gamma.pinned[0 ..< 12] in notice
+      check gamma.checkout[0 ..< 12] in notice
+      let commands = backtickedCommands(notice)
+      checkpoint("commands: " & $commands)
+      check commands.len == 2
+      if commands.len == 2:
+        check "merge --ff-only" in commands[0]
+        check commands[1] == AllowEnv & "=gamma-src git commit --amend --no-edit"
       check lineWith(c.output, AllowEnv & " names 'alpha-src'",
         "does not move backward").len > 0
 
@@ -169,8 +199,8 @@ suite "the commit-time flake.lock refresh never moves a pin backward silently":
         "does not move backward", "Ignored").len > 0
       check "allowed pin regression" notin c.output
 
-  test "t_a_diverged_flake_input_refuses_the_commit":
-    if not nf2Prerequisites("t_a_diverged_flake_input_refuses_the_commit"):
+  test "t_a_diverged_flake_input_keeps_its_pin":
+    if not nf2Prerequisites("t_a_diverged_flake_input_keeps_its_pin"):
       skip("needs git on PATH and a built ./build/bin/repro (named above)")
     else:
       let fx = setupNf2Fixture("flake-diverged")
@@ -193,24 +223,26 @@ suite "the commit-time flake.lock refresh never moves a pin backward silently":
 
       let c = commitWith(fx, "work on a forked gamma")
       checkpoint(c.output)
-      check c.code != 0
-      check headOf(fx, fx.app) == headBefore
+      check c.code == 0
+      check "REFUSED" notin c.output
+      check gitIn(fx, fx.app, "rev-parse HEAD~1").strip() == headBefore
+      check lockInCommit(fx) == before
       check readFile(lockPath(fx)) == before
-      let headline = lineWith(c.output, "flake.lock input 'gamma-src'",
-        "diverged: 1 and 1 commits apart")
+      let headline = lineWith(c.output, "flake.lock NOT refreshed for input " &
+        "'gamma-src'", "DIVERGED", "1 commit(s) ahead and 1 behind")
       checkpoint("headline: " & headline)
       check headline.len > 0
-      check pinned in headline
-      check forked in headline
-      let forward = backtickedCommands(lineWith(c.output,
-        "bring the checkout forward"))
-      checkpoint("forward: " & $forward)
-      check forward.len == 1
-      if forward.len == 1:
+      check pinned[0 ..< 12] in headline
+      check forked[0 ..< 12] in headline
+      let forward = backtickedCommands(headline)
+      checkpoint("commands: " & $forward)
+      check forward.len >= 2
+      if forward.len >= 2:
         check forward[0].startsWith("repro ws sync")
+        check forward[^1] == AllowEnv & "=gamma-src git commit --amend --no-edit"
 
-      let allowed = run(AllowEnv & "=gamma-src " & q(fx.gitBin) & " -C " &
-        q(fx.app) & " commit -q -m " & q("track the forked gamma"))
+      let allowed = commitWith(fx, "track the forked gamma",
+        allow = "gamma-src")
       checkpoint(allowed.output)
       check allowed.code == 0
       check lockedRev(lockInCommit(fx), "gamma-src") == forked
@@ -255,8 +287,9 @@ suite "the commit-time flake.lock refresh never moves a pin backward silently":
         q(fx.app) & " rebase --continue")
       check readFile(lockPath(fx)) == before
 
-  test "t_a_refusal_in_either_lock_writes_neither":
-    if not nf2Prerequisites("t_a_refusal_in_either_lock_writes_neither"):
+  test "t_a_kept_pin_in_either_lock_holds_back_nothing_else":
+    if not nf2Prerequisites("t_a_kept_pin_in_either_lock_holds_back_nothing_" &
+        "else"):
       skip("needs git on PATH and a built ./build/bin/repro (named above)")
     else:
       let fx = setupNf2Fixture("both-locks", siblingRecipes = true)
@@ -286,36 +319,37 @@ suite "the commit-time flake.lock refresh never moves a pin backward silently":
       check commitWith(fx, "adopt epsilon revision 2").code == 0
       check epsilonPinned in readFile(reproLock)
       discard rewindSibling(fx, "epsilon", 1)
-      # alpha moves forward, so BOTH locks would advance it.
+      # alpha moves forward, so BOTH locks advance it.
       let alphaHead = moveAndPublishSibling(fx, "alpha", "revision 2")
-      let flakeBefore = readFile(lockPath(fx))
-      let reproBefore = readFile(reproLock)
 
-      # ---- a repro.lock refusal leaves flake.lock unwritten --------------
-      let refused = commitWith(fx, "work against a stale epsilon")
-      checkpoint(refused.output)
+      # ---- a kept repro.lock pin holds back nothing else -----------------
+      let kept = commitWith(fx, "work against a stale epsilon")
+      checkpoint(kept.output)
       checkpoint("pre-commit log:\n" & preCommitLog(fx))
-      check refused.code != 0
-      check readFile(lockPath(fx)) == flakeBefore
-      check readFile(reproLock) == reproBefore
-      check lineWith(refused.output, "repro.lock sibling 'epsilon'",
-        "behind by 1 commit(s)").len > 0
-      check lastFlakeLogLine(fx).contains("not-written-commit-refused")
-      check alphaHead notin readFile(lockPath(fx))
+      check kept.code == 0
+      check "REFUSED" notin kept.output
+      let keptRepro = gitIn(fx, fx.app, "show HEAD:repro.lock")
+      check epsilonPinned in keptRepro
+      check alphaHead in keptRepro
+      check lockedRev(lockInCommit(fx), "alpha-src") == alphaHead
+      check lineWith(kept.output, "repro.lock sibling 'epsilon'",
+        "behind by 1 commit(s)", "kept", AllowEnv & "=epsilon git commit --amend --no-edit").len >
+        0
+      check lineWith(preCommitLog(fx), "repro-lock kept-pin:",
+        "epsilon").len > 0
 
-      # ---- one variable naming the repro.lock sibling carries both -------
-      let allowed = run(AllowEnv & "=epsilon " & q(fx.gitBin) & " -C " &
-        q(fx.app) & " commit -q -m " & q("deliberately older epsilon"))
+      # ---- one variable naming the repro.lock sibling records it ---------
+      let allowed = commitWith(fx, "deliberately older epsilon",
+        allow = "epsilon")
       checkpoint(allowed.output)
       check allowed.code == 0
-      check lockedRev(lockInCommit(fx), "alpha-src") == alphaHead
       let committedRepro = gitIn(fx, fx.app, "show HEAD:repro.lock")
       check alphaHead in committedRepro
       check epsilonPinned notin committedRepro
       check lineWith(allowed.output, "allowed pin regression",
         "repro.lock sibling 'epsilon'").len > 0
 
-      # ---- a flake.lock refusal leaves repro.lock unwritten --------------
+      # ---- a kept flake.lock pin holds back nothing else -----------------
       # epsilon moves ahead again and is recorded, so that it can be made to
       # regress once more below. It first returns to the line its origin
       # carries, so the new revision publishes as a fast-forward.
@@ -323,40 +357,43 @@ suite "the commit-time flake.lock refresh never moves a pin backward silently":
         epsilonPinned)
       discard moveAndPublishSibling(fx, "epsilon", "revision 3")
       check commitWith(fx, "adopt epsilon revision 3").code == 0
-      let gammaPinned = moveSibling(fx, "gamma", "revision 2")
-      discard rewindSibling(fx, "gamma", 1)
+      # gamma's pin is published, so an allowed downgrade below can compare
+      # dependency locks against it.
+      let gammaPinned = moveAndPublishSibling(fx, "gamma", "revision 2")
+      let gammaCheckout = rewindSibling(fx, "gamma", 1)
       let flakeNow = readFile(lockPath(fx))
       writeFile(lockPath(fx), flakeNow.replace(nodeText(flakeNow, "gamma-src"),
         nodeText(flakeNow, "gamma-src").replace(fx.seedSha[2], gammaPinned)))
       commitLockAndPublish(fx, "pin gamma one ahead")
+      let gammaNode = nodeText(readFile(lockPath(fx)), "gamma-src")
       let alphaNext = moveAndPublishSibling(fx, "alpha", "revision 3")
-      let flakeHeld = readFile(lockPath(fx))
-      let reproHeld = readFile(reproLock)
       let second = commitWith(fx, "work against a stale gamma")
       checkpoint(second.output)
-      check second.code != 0
-      check readFile(lockPath(fx)) == flakeHeld
-      check readFile(reproLock) == reproHeld
-      check alphaNext notin readFile(reproLock)
-      check lineWith(second.output, "flake.lock input 'gamma-src'",
-        "behind by 1 commit(s)").len > 0
-      check lineWith(preCommitLog(fx), "repro-lock",
-        "not-written-commit-refused").len > 0
+      check second.code == 0
+      check "REFUSED" notin second.output
+      check nodeText(lockInCommit(fx), "gamma-src") == gammaNode
+      check lockedRev(lockInCommit(fx), "alpha-src") == alphaNext
+      check alphaNext in gitIn(fx, fx.app, "show HEAD:repro.lock")
+      check lineWith(second.output, "flake.lock NOT refreshed for input " &
+        "'gamma-src'", "1 commit(s) BEHIND",
+        AllowEnv & "=gamma-src git commit --amend --no-edit").len > 0
 
       # ---- naming one regression does not excuse the other ---------------
       # Both locks regress now; the variable names only the flake input. The
-      # commit is refused for epsilon alone, nothing is written, and the named
-      # input is not reported as "not moving backward" — it was, and it was
-      # allowed; it is only unwritten because the commit was refused.
+      # named input is recorded at its checkout, the other is kept, and the
+      # named input is not reported as "not moving backward" — it was, and it
+      # was allowed.
+      let epsilonNow = gitIn(fx, fx.app, "show HEAD:repro.lock")
       discard rewindSibling(fx, "epsilon", 1)
       let third = commitWith(fx, "allow gamma only", allow = "gamma-src")
       checkpoint(third.output)
-      check third.code != 0
-      check readFile(lockPath(fx)) == flakeHeld
-      check readFile(reproLock) == reproHeld
+      checkpoint("pre-commit log:\n" & preCommitLog(fx))
+      check third.code == 0
+      check "REFUSED" notin third.output
+      check gitIn(fx, fx.app, "show HEAD:repro.lock") == epsilonNow
+      check lockedRev(lockInCommit(fx), "gamma-src") == gammaCheckout
       check lineWith(third.output, "repro.lock sibling 'epsilon'",
-        "behind by 1 commit(s)").len > 0
-      check lineWith(third.output, "flake.lock input 'gamma-src'",
-        "behind by").len == 0
+        "behind by 1 commit(s)", "kept").len > 0
+      check lineWith(third.output, "allowed pin regression",
+        "flake.lock input 'gamma-src'").len > 0
       check lineWith(third.output, "names 'gamma-src'").len == 0
-      check "allowed pin regression" notin third.output

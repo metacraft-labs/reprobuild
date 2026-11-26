@@ -332,7 +332,16 @@ proc declareProducerTool*(site: ToolDependencySite; edgeId, selector: string) =
           packageSelector: selector,
           executableName: selector,
           depKind: DepKindNative)):
-      registerPackageDep(site.packageName, DepKindNative, selector)
+      # GENERATED, not authored: the producer, not the recipe, introduced
+      # this tool. Every reader of the native list still sees it; what the
+      # mark changes is that nothing infers a statement ABOUT THE RECIPE
+      # from it -- neither the build-system inference
+      # (``registeredAuthoredNativeBuildDeps``) nor the tool references a
+      # ``shell(...)`` edge takes from its package (``packageShellToolRefs``),
+      # which would otherwise depend on whether the shell call came before or
+      # after this producer in the build body. A selector the recipe also
+      # wrote in ``nativeBuildDeps:`` stays authored.
+      registerGeneratedToolDep(site.packageName, DepKindNative, selector)
       registerSolverDependency(site.packageName, selector, selector,
         depKind = DepKindNative)
 
