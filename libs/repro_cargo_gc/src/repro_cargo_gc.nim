@@ -9,6 +9,6 @@
 ##
 ## Design notes: docs/cargo-gc.md.
 
-import repro_cargo_gc/[types, layout, store, record, stream, gc, cargo_home,
+import repro_cargo_gc/[types, layout, store, record, stream, shim, gc, cargo_home,
                        config]
-export types, layout, store, record, stream, gc, cargo_home, config
+export types, layout, store, record, stream, shim, gc, cargo_home, config

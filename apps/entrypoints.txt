@@ -103,6 +103,14 @@ attestation-agent apps/attestation-agent/attestation_agent.nim
 # libs/repro_cargo_edge. --opt:size and the vendored hash backend (no libblake3
 # or libxxhash to load on every compile) keep its start-up cost down.
 repro-rustc-wrapper apps/repro-rustc-wrapper/repro_rustc_wrapper.nim --opt:size --define:reproVendoredHash
+# RunQuota-Everywhere CG2 D1: the cargo shim. Installed as a file named `cargo`
+# in a directory that comes first on PATH (`libexec/repro-cargo-shim/cargo`
+# beside `bin/` in the Nix package), it records a live set from every
+# compiling cargo invocation and is otherwise invisible (docs/cargo-gc.md,
+# "The cargo shim"). It runs once per cargo command, so it links repro_cargo_gc
+# and the standard library only; --opt:size and the vendored hash backend (no
+# shared library to load) keep its start-up cost down.
+repro-cargo-shim apps/repro-cargo-shim/repro_cargo_shim.nim --opt:size --define:reproVendoredHash
 # Distributed-Execution M7: the Evidence zone of the worker pool. Its own
 # binary, like the attestation agent, because it runs on a DIFFERENT host
 # from the workers whose detections and audit records it holds, and its

@@ -1830,9 +1830,15 @@
                                     wrapperCount=0
                                     test -x ${reprobuild}/bin/reprobuild-helper
                                     test ! -e ${reprobuild}/bin/.reprobuild-helper-wrapped
+                                    # The cargo shim is unwrapped too (package.nix says
+                                    # why) and is installed as libexec/repro-cargo-shim/cargo.
+                                    test -x ${reprobuild}/bin/repro-cargo-shim
+                                    test ! -e ${reprobuild}/bin/.repro-cargo-shim-wrapped
+                                    test -x ${reprobuild}/libexec/repro-cargo-shim/cargo
                                     for wrapper in ${reprobuild}/bin/*; do
                                       name=$(basename "$wrapper")
                                       test "$name" = reprobuild-helper && continue
+                                      test "$name" = repro-cargo-shim && continue
                                       hidden=${reprobuild}/bin/.$name-wrapped
                                       if test ! -x "$wrapper"; then
                                         echo "unexpected non-executable bin artifact: $wrapper" >&2

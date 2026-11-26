@@ -675,6 +675,9 @@ package reprobuild:
   executable reproRustcWrapper:
     name: "repro-rustc-wrapper"
 
+  executable reproCargoShim:
+    name: "repro-cargo-shim"
+
 
   # Bootstrap-And-Self-Build B2: test-helper executables.
   #
@@ -2485,6 +2488,19 @@ package reprobuild:
       nimcache = "build/nimcache/repro-rustc-wrapper",
       runInSourceDir = true,
       actionId = "reprobuild.apps.repro-rustc-wrapper"))
+
+    # The cargo shim (RunQuota-Everywhere CG2 D1): a row of
+    # ``apps/entrypoints.txt`` and therefore a member of ``.#apps`` too.
+    # Packaging installs it as ``libexec/repro-cargo-shim/cargo``.
+    reprobuildAppsActions.add(nim.c(
+      source = "apps/repro-cargo-shim/repro_cargo_shim.nim",
+      binary = "build/bin/repro-cargo-shim",
+      defines = @["release", "reproVendoredHash"],
+      paths = sourceOnlyNimPaths,
+      extraEnv = sourceOnlyEnv,
+      nimcache = "build/nimcache/repro-cargo-shim",
+      runInSourceDir = true,
+      actionId = "reprobuild.apps.repro-cargo-shim"))
 
     # Dependency-Attribution MAC-1 — the thin daemon client, and since the
     # thin-client-on-PATH rename the image that OWNS THE NAME ``repro``. This
