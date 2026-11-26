@@ -124,6 +124,8 @@ package prod:
 
   uses:
     "sh"
+    "mkdir"
+    "chmod"
 
   executable prod:
     name: "prod"

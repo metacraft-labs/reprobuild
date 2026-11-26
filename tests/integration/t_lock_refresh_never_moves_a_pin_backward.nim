@@ -8,9 +8,12 @@
 ## local branch names (`blocktracer`, `n3g`) into `ref`, which name nothing on
 ## any other machine. A pin now records no branch at all: which branch holds a
 ## commit is a fact about the writer's remote-tracking refs, not about the
-## commit. The commit hook already refuses a backward pin (covered by
+## commit. The commit hook never records a backward pin either — it keeps the
+## pin the lock carries and the commit proceeds (covered by
 ## `t_commit_refuses_a_backward_sibling_pin.nim`); this file holds the explicit
-## door to the same rule, and both doors to the no-branch rule.
+## door, which REFUSES (it records the checkouts, so keeping the pin would
+## record a state that does not match them), and both doors to the no-branch
+## rule.
 ##
 ## Fixture: `committed_lock_siblings_fixture.nim` — a real manifest workspace
 ## (app → lib-b → lib-c, lib-d unrelated) of real git repositories cloned from
@@ -34,8 +37,8 @@
 ##   * through the real `pre-commit` hook: a sibling on a local-only branch is
 ##     pinned with no branch; a `ref` an older writer committed over an
 ##     unmoved revision is left alone (nothing moved), and dropped when the
-##     pin next moves; a sibling switched to a stale local branch refuses the
-##     commit.
+##     pin next moves; a sibling switched to a stale local branch keeps the
+##     committed pin, byte-identical, and never records the local name.
 ##
 ## NO MOCKS. The hook file is written by hand rather than by
 ## `repro hooks ensure --vcs` so that it names the built binary by absolute
@@ -386,13 +389,16 @@ suite "a committed lock names no branch":
       check "\"blocktracer\"" notin body
 
       # The incident through the hook: the checkout switched to a stale
-      # local branch refuses the commit and writes nothing.
+      # local branch keeps the committed pin — the commit proceeds and the
+      # lock it carries is byte-identical — and the notice says so.
       let pinnedLock = readFile(lockPath)
       discard fx.git(s.libB, "checkout -q -b blocktracer " & s.seed)
       let headBefore = fx.headOf(fx.app)
       c = fx.tryCommit("work-against-a-stale-branch")
       checkpoint(c.output)
-      check c.code != 0
-      check fx.headOf(fx.app) == headBefore
+      check c.code == 0
+      check fx.git(fx.app, "rev-parse HEAD~1").strip() == headBefore
       check readFile(lockPath) == pinnedLock
-      check lineWith(c.output, "lib-b", "behind by 4").len > 0
+      check fx.git(fx.app, "show HEAD:repro.lock") == pinnedLock
+      check "\"blocktracer\"" notin fx.git(fx.app, "show HEAD:repro.lock")
+      check lineWith(c.output, "lib-b", "behind by 4", "kept").len > 0

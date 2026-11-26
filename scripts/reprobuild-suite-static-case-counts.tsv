@@ -395,6 +395,7 @@ libs/repro_cli_support/tests/t_revocation_takes_effect_on_the_next_frame.nim	nim
 libs/repro_cli_support/tests/t_run_edge_dev_env_merge_and_key.nim	nim	21
 libs/repro_cli_support/tests/t_runquota_auto_spawn_defers_to_host_config.nim	nim	8
 libs/repro_cli_support/tests/t_s7_build_paths_reach_the_restore_config.nim	nim	6
+libs/repro_cli_support/tests/t_shell_package_tool_refs_merge_into_edge_refs.nim	nim	4
 libs/repro_cli_support/tests/t_strategy_unknown_name_refused.nim	nim	8
 libs/repro_cli_support/tests/t_sub_tool_link_channels.nim	nim	5
 libs/repro_cli_support/tests/t_trust_profiles_and_pinned_host_keys.nim	nim	3
@@ -1138,6 +1139,7 @@ libs/repro_project_dsl/tests/t_m9r75_declared_outputs_codec.nim	nim	9
 libs/repro_project_dsl/tests/t_m9r79_registry_mutators.nim	nim	6
 libs/repro_project_dsl/tests/t_module_init_build_bodies_own_their_implicit_targets.nim	nim	3
 libs/repro_project_dsl/tests/t_multi_package_macro.nim	nim	5
+libs/repro_project_dsl/tests/t_package_tool_identity_refs_codec.nim	nim	6
 libs/repro_project_dsl/tests/t_preserve_tree_refuses_a_generated_source.nim	nim	5
 libs/repro_project_dsl/tests/t_service_config_is_a_cached_build_output.nim	nim	3
 libs/repro_project_dsl/tests/t_service_lowers_typed_edges_into_the_graph_fragment.nim	nim	11
@@ -1868,6 +1870,7 @@ tests/e2e/macos-phase5/t_e2e_macos_phase5_os_timezone.nim	nim	9
 tests/e2e/macos-phase5/t_e2e_macos_phase5_passwd_group.nim	nim	5
 tests/e2e/macos-phase5/t_e2e_macos_phase5_shell_integration.nim	nim	4
 tests/e2e/path-only/t_path_only_tool_interfaces.nim	nim	2
+tests/e2e/path-only/t_shell_action_runs_its_package_uses_tools.nim	nim	1
 tests/e2e/scoop/t_e2e_scoop_adapter_diagnostics.nim	nim	0
 tests/e2e/scoop/t_e2e_scoop_adapter_realize_and_launch.nim	nim	0
 tests/e2e/scoop/t_e2e_scoop_practical_hardening.nim	nim	0
@@ -2063,6 +2066,7 @@ tests/integration/t_cloud_attestation_launch_manifest_identity.nim	nim	28
 tests/integration/t_cmake_fresh_configure.nim	nim	1
 tests/integration/t_cmake_install_mirror_tools.nim	nim	1
 tests/integration/t_commit_gate_defaults_to_gate_mode.nim	nim	1
+tests/integration/t_commit_keeps_a_lock_ahead_of_the_shared_siblings.nim	nim	4
 tests/integration/t_commit_records_the_sibling_revision_the_shell_actually_used.nim	nim	3
 tests/integration/t_commit_refuses_a_backward_sibling_pin.nim	nim	10
 tests/integration/t_commit_repin_plans_both_locks.nim	nim	7
@@ -2759,7 +2763,7 @@ tests/integration/t_shorthand_equals_to.nim	nim	1
 tests/integration/t_sibling_exact_pin_guidance.nim	nim	4
 tests/integration/t_signer_roster_rotation_and_revocation.nim	nim	22
 tests/integration/t_single_platform_entries_declare_platforms.nim	nim	8
-tests/integration/t_skip_lock_refresh_leaves_the_flake_lock_alone.nim	nim	1
+tests/integration/t_skip_lock_refresh_leaves_the_flake_lock_alone.nim	nim	2
 tests/integration/t_skip_lock_refresh_leaves_the_repro_lock_alone.nim	nim	1
 tests/integration/t_snp_agent_backend.nim	nim	42
 tests/integration/t_snp_chain_requires_amd_root.nim	nim	27

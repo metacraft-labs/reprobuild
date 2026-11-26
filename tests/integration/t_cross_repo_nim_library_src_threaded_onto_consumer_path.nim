@@ -109,6 +109,7 @@ package greetlib:
 
   uses:
     "sh"
+    "mkdir"
 
   library greetlib:
     kind: static
@@ -167,6 +168,7 @@ package consumer:
     "nim"
     "clang"
     "sh"
+    "mkdir"
     "greetlib"
 
   build:

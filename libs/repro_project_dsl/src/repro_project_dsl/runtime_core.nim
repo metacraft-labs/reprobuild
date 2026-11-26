@@ -295,7 +295,13 @@ when defined(reproProviderMode):
 const
   BuildActionPayloadMagic = [byte(ord('R')), byte(ord('B')), byte(ord('A')),
     byte(ord('P'))]
-  BuildActionPayloadVersion* = 38'u16
+  BuildActionPayloadVersion* = 39'u16
+    ## v39: ``packageToolIdentityRefs`` and its parallel
+    ## ``packageToolIdentityRefKinds`` -- the tool references a ``shell``
+    ## edge takes from its package's declaration, a string list and one
+    ## strict enum byte per entry, appended after ``relocatable``.
+    ## v38-and-earlier payloads decode with both empty, which is what every
+    ## action declared before it carried.
     ## v38: ``relocatable`` -- one strict sentinel byte appended after
     ## ``canonicalWorkKey``. v37-and-earlier payloads decode as not
     ## relocatable, which is what every action declared before it.
@@ -3337,6 +3343,27 @@ proc appendRegisteredActionToolIdentityRefs*(actionId: string;
           buildActionRegistry[i].toolIdentityRefs.add(refName)
       return
 
+proc setRegisteredActionPackageToolIdentityRefs*(
+    actionId: string;
+    refs: openArray[string];
+    kinds: openArray[ToolIdentityRefKind]) {.dynOrStatic.} =
+  ## Record, on an already-registered action, the tool references it takes
+  ## from its package's declaration (``BuildActionDef.packageToolIdentityRefs``)
+  ## with their parallel platform roles. Replaces whatever was recorded:
+  ## the list is a function of the package declaration, so a second call
+  ## states the same thing again rather than adding to it. ``kinds`` must be
+  ## as long as ``refs``. No-op when the id is absent (same shape as
+  ## ``appendRegisteredActionToolIdentityRefs``).
+  if refs.len != kinds.len:
+    raise newException(ValueError,
+      "setRegisteredActionPackageToolIdentityRefs: " & $refs.len &
+      " refs but " & $kinds.len & " kinds for action " & actionId)
+  for i in 0 ..< buildActionRegistry.len:
+    if buildActionRegistry[i].id == actionId:
+      buildActionRegistry[i].packageToolIdentityRefs = @refs
+      buildActionRegistry[i].packageToolIdentityRefKinds = @kinds
+      return
+
 proc appendRegisteredActionRemoveBeforeRun*(actionId: string;
                                             call: PublicCliCall;
                                             flags: openArray[string]) {.dynOrStatic.} =
@@ -4802,6 +4829,12 @@ proc encodeBuildActionPayloadAtVersion*(action: BuildActionDef;
   # v38: the action is relocatable.
   if version >= 38'u16:
     payload.writeByte(if action.relocatable: 1'u8 else: 0'u8)
+  # v39: the tool references the edge takes from its package's declaration.
+  if version >= 39'u16:
+    payload.writeStringSeq(action.packageToolIdentityRefs)
+    payload.writeU32Le(uint32(action.packageToolIdentityRefKinds.len))
+    for kind in action.packageToolIdentityRefKinds:
+      payload.writeByte(byte(ord(kind)))
 
   result.add(BuildActionPayloadMagic)
   result.writeU16Le(version)
@@ -5113,6 +5146,23 @@ proc decodeBuildActionPayload*(bytes: openArray[byte]): BuildActionDef {.dynOrSt
     result.relocatable = relocatableByte == 1'u8
   else:
     result.relocatable = false
+  if version >= 39'u16:
+    result.packageToolIdentityRefs = readStringSeq(bytes, pos)
+    let packageRefKindCount = readElementCount(bytes, pos,
+      ToolIdentityRefKindMinBytes, "package tool identity ref kind")
+    result.packageToolIdentityRefKinds =
+      newSeq[ToolIdentityRefKind](packageRefKindCount)
+    for i in 0 ..< packageRefKindCount:
+      let rawKind = readByte(bytes, pos)
+      if rawKind > byte(ord(high(ToolIdentityRefKind))):
+        raisePayload("invalid packageToolIdentityRefKind ordinal in " &
+          "build action payload")
+      result.packageToolIdentityRefKinds[i] = ToolIdentityRefKind(rawKind)
+  else:
+    # An older payload carries no package-derived refs: the edge named
+    # everything it declared itself.
+    result.packageToolIdentityRefs = @[]
+    result.packageToolIdentityRefKinds = @[]
   if pos != bytes.len:
     raisePayload("trailing build action payload bytes")
 
