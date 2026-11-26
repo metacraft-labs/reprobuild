@@ -345,14 +345,20 @@ function Copy-WindowsImportClosure {
   ## than $KeepNames (DLLs the caller stages on purpose, such as the ones
   ## loaded by name rather than imported), is removed, so a copy left by an
   ## earlier build on a persistent runner cannot survive unless an image
-  ## imports it. Returns the names copied.
+  ## imports it.
+  ##
+  ## $ExtraImageDirs are directories of images that ship beside bin/ (the
+  ## archive's lib/, from build\lib): their imports are walked too, and what
+  ## they need is staged into bin/, where the archive audit requires it.
+  ## Returns the names copied.
   param(
     [Parameter(Mandatory = $true)][string]$BinDir,
     [Parameter(Mandatory = $true)][string[]]$SourceDirs,
     [Parameter(Mandatory = $true)][string]$Arch,
     [string]$SystemDir = "",
     [string[]]$OsDlls = $null,
-    [string[]]$KeepNames = @()
+    [string[]]$KeepNames = @(),
+    [string[]]$ExtraImageDirs = @()
   )
   $osDllNames = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
   if ($null -eq $OsDlls) { $OsDlls = @((Get-WindowsReleaseOsDlls).Keys) }
@@ -385,6 +391,12 @@ function Copy-WindowsImportClosure {
   $pending = New-Object 'System.Collections.Generic.Queue[string]'
   foreach ($f in @(Get-ChildItem -LiteralPath $BinDir -File | Where-Object { $_.Extension -in @('.exe', '.dll') })) {
     $pending.Enqueue($f.FullName)
+  }
+  foreach ($dir in $ExtraImageDirs) {
+    if (-not (Test-Path -LiteralPath $dir -PathType Container)) { continue }
+    foreach ($f in @(Get-ChildItem -LiteralPath $dir -File -Recurse | Where-Object { $_.Extension -in @('.exe', '.dll') })) {
+      $pending.Enqueue($f.FullName)
+    }
   }
   while ($pending.Count -gt 0) {
     $image = $pending.Dequeue()

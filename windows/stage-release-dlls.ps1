@@ -345,7 +345,9 @@ if (Test-Path -LiteralPath (Join-Path $binDir "cacert.pem")) {
 # bin/ nor part of Windows (windows/release-os-dlls.txt), is copied from the
 # pinned sources: the conda-forge vc14_runtime package (clingo.dll's C++
 # runtime) and the selected WinLibs compiler's bin/ (libgcc_s and
-# libwinpthread for the MSYS2 OpenSSL DLLs), transitively, and nothing else.
+# libwinpthread, which librepro_project_dsl_runtime.dll imports), transitively,
+# and nothing else. build\lib's images ship as the archive's lib/ and resolve
+# their imports from bin/, so they are walked too.
 # This replaces the best-effort lists that staged the whole VC++ set and five
 # WinLibs DLLs "in case". A DLL an earlier build
 # staged and no image imports any more is removed. An import that no source
@@ -357,7 +359,8 @@ $pkg = Expand-CondaPackage `
 $vcSrcDir = Join-Path $pkg "Library/bin"
 try {
     $staged = @(Copy-WindowsImportClosure -BinDir $binDir -SourceDirs @($vcSrcDir, $gccDir) -Arch $script:releaseArch `
-        -KeepNames @("libcrypto-3-x64.dll", "libssl-3-x64.dll", "clingo.dll", "libzstd.dll", "sqlite3_64.dll", "sqlite3.dll"))
+        -KeepNames @("libcrypto-3-x64.dll", "libssl-3-x64.dll", "clingo.dll", "libzstd.dll", "sqlite3_64.dll", "sqlite3.dll") `
+        -ExtraImageDirs @((Join-Path (Split-Path -Parent $binDir) "lib")))
     Write-Host "  import closure staged: $(if ($staged.Count) { $staged -join ', ' } else { '(nothing)' })"
 } finally {
     Remove-Item -LiteralPath (Split-Path -Parent $pkg) -Recurse -Force
