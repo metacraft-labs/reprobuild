@@ -42,6 +42,7 @@
 import std/[json, options, os, osproc, strutils, tempfiles, unittest]
 
 import repro_test_support
+import repro_test_support/reasoned_skip
 import repro_workspace_manifests
 
 # ---- shell helpers (same shape as the existing M18 tests) -----------------
@@ -421,3 +422,42 @@ suite "M23 — repro check --mode=pre-push (develop-override cleanliness)":
       check report["exitCode"].getInt() == 0
       check report["failures"].len == 0
       check report["lockUpdate"]["kind"].getStr() == "created"
+
+  test "test_npc_m9_pre_push_ignores_a_nimble_catalog_override":
+    # Nimble-Package-Catalog NPC-AREQ27: a develop override of a `nimble:`
+    # catalog package is ignored by the gate. The pushed lock pins the
+    # catalog's commit and tree, never the sibling, so a dirty sibling
+    # cannot change what a teammate builds from it. Positive control: the
+    # same dirty checkout recorded as the override of the pushed repo's own
+    # name refuses the push.
+    let gitBin = findExe("git")
+    if gitBin.len == 0:
+      skip("git not on PATH; this case needs repositories to push")
+    else:
+      let fx = setupFixture(gitBin, "nimble-override")
+      defer: removeDir(fx.scratch)
+      cloneAllSiblings(gitBin, fx)
+      seedMetadataBranch(fx, "main")
+
+      let clone = seedOverrideClone(gitBin, fx, "lib-a", fx.libA.origin)
+      writeFile(clone / "scratch.txt", "uncommitted sibling edit\n")
+      let refsFile = fx.scratch / "pushed-refs.txt"
+      writeRefsFile(refsFile, "refs/heads/main", fx.libA.sha)
+
+      let control = invokeCheckPrePush(fx,
+        currentRepo = fx.workspaceRoot / "lib-a", refsFile = refsFile)
+      checkpoint("control output: " & control.output)
+      check control.code == 2
+      var dirty = 0
+      for failure in readReport(fx)["failures"]:
+        if failure["property"].getStr() == "develop_override_dirty":
+          inc dirty
+      check dirty == 1
+
+      registerOverride(fx, "nimble:lib-a", clone)
+      let res = invokeCheckPrePush(fx,
+        currentRepo = fx.workspaceRoot / "lib-a", refsFile = refsFile)
+      checkpoint("output: " & res.output)
+      check res.code == 0
+      let report = readReport(fx)
+      check report["failures"].len == 0

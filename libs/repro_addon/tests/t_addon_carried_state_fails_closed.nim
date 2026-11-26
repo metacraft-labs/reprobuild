@@ -69,7 +69,7 @@ import repro_infra/start_holds
 from repro_test_support import testCaseScratchSlug
 import repro_elevation
 from repro_elevation/posix_system_parse import systemdUnitNameError
-import repro_addon/[addon_apply, adoption_cli, reassert, secrets_ops, state_sets, transitions]
+import repro_addon/[addon_apply, adoption_cli, reassert, secrets_ops, state_sets, static_tree, transitions]
 import repro_addon/agent_checks
 
 const
@@ -3408,3 +3408,110 @@ suite "a secret put is a switch for the carried-state check (§13 decision 190)"
     # Control: nothing to judge, nothing reloaded.
     check secretPutLiveProblems([], p, rootShow, proc () = inc reloads).len == 0
     check reloads == 1
+
+  test "decision 190: a put judges its consumers in the composed profile, own and user":
+    # Falsifier: secret-put-user-profile-only. A credential consumer
+    # starts repro-addon-secrets.service, which only the add-on's own
+    # profile defines: in the user profile alone it reaches everything and
+    # is never judged (the first measurement at a491dae2cc).
+    let (root, d) = installed15("r15-put-compose")
+    let user = "secrets.secretFile {\n  service = \"a13p\"\n  name = \"token\"\n}\n" &
+      unit("a13p.service", "[Service]\nDynamicUser=yes\nNoNewPrivileges=yes\n" &
+        "ExecStart=/bin/sleep infinity\n", "  credentials = [\"token\"]\n" &
+        "  floorExceptions = [\"serviceFloor: the decision-190 probe\"]\n")
+    let own = unit("repro-addon-secrets.service",
+      "[Service]\nType=oneshot\nExecStart=/bin/true\n")
+    let composed = composedLiveProfile(own, user)
+    checkpoint $liveReachUnits(composed, d, root)
+    check "a13p.service" in liveReachUnits(composed, d, root)
+    # Control: the user profile alone leaves the consumer unjudged.
+    check "a13p.service" notin liveReachUnits(composedLiveProfile("", user), d, root)
+
+suite "carried state is retired once a restore has succeeded (§13 decision 195)":
+  # A converted host as install-unit leaves it after a successful restore:
+  # the carried directory restored (its receipt), the marker, the restore
+  # unit and its link, install-unit's drop-ins, and a generation's.
+  proc retireHost(name: string; restored = true): tuple[root, d, state: string] =
+    let src = fresh(name & "-src")
+    createDir(src / "var/lib/ethereum/validator")
+    writeFile(src / "var/lib/ethereum/validator/validator.db", "history\n")
+    let d = src / "carried"
+    discard backupStateSet(parseSystemProfile(Validator), d, "h", stopped(),
+                           hold = false, root = src)
+    let root = fresh(name)
+    if restored: discard restoreStateSet(d, stopped(), root = root)
+    discard installRestoreUnit(d, "/usr/bin/repro", root)
+    hostFile(root, "/etc/systemd/system/gen.service.d/50-repro-state-restore.conf",
+             restoreRequirementText())
+    let state = root / "var/lib/repro/system"
+    createDir(state)
+    (root, d, state)
+
+  proc protection(root, d: string): tuple[marker, unit: bool; reqs: int] =
+    (fileExists(installedMarkerPath(d)),
+     fileExists(root / "etc/systemd/system" / RestoreUnitName),
+     requirementDropIns(root).len)
+
+  test "decision 195: a retire refuses without a confirmed restore":
+    # Falsifier: retire-without-confirmed-restore.
+    let h = retireHost("r15-ret-unconfirmed", restored = false)
+    expect StateSetError:
+      discard retireCarriedState(h.d, h.root, h.state)
+    check retireRefusal(h.d, h.root, h.state).startsWith("no confirmed restore of ")
+    check protection(h.root, h.d).marker
+
+  test "decision 195: a retire refuses while a switch or a dead full apply is pending":
+    let h = retireHost("r15-ret-pending")
+    createDir(parentDir(pendingMarkerPath(h.state)))
+    writeFile(pendingMarkerPath(h.state), "")
+    check "an add-on switch is pending" in retireRefusal(h.d, h.root, h.state)
+    removeFile(pendingMarkerPath(h.state))
+    writeFile(h.state / LiveCheckUnitsFile, "eth-validator.service\n")
+    check "a full apply died under its carried-state hold" in
+      retireRefusal(h.d, h.root, h.state)
+    removeFile(h.state / LiveCheckUnitsFile)
+    check retireRefusal(h.d, h.root, h.state) == ""
+
+  test "decision 195: a retire removes the marker, the restore unit and every requirement":
+    # Falsifier: retire-leaves-requirements (the generation's drop-in stays).
+    let h = retireHost("r15-ret-all")
+    check protection(h.root, h.d) == (true, true, 2)
+    var reloads = 0
+    let removed = retireCarriedState(h.d, h.root, h.state,
+                                     reload = proc () = inc reloads)
+    checkpoint $removed
+    check protection(h.root, h.d) == (false, false, 0)
+    check not symlinkExists(h.root / "etc/systemd/system/sysinit.target.wants" /
+                            RestoreUnitName)
+    check not fileExists(h.root / "etc/systemd/system/gen.service.d/" &
+                         "50-repro-state-restore.conf")
+    check reloads == 1
+    check readFile(retiredRecordPath(h.d)).startsWith("retired ")
+    # The archive and manifest stay.
+    check fileExists(h.d / ManifestFileName)
+    # And decision 192 no longer refuses.
+    check essentialRequirementRefusal(parseSystemProfile(
+      "systemd.systemDropIn {\n  unit = \"sshd.service\"\n  name = \"x\"\n" &
+      "  content = \"[Service]\nEnvironment=A=1\n\"\n}\n"), h.d, h.root,
+      LiveHost()).len == 0
+
+  test "decision 195: a crash at any step leaves the full protection or none":
+    # Falsifier: retire-requirements-first (a crash between its first two
+    # steps leaves the marker with no requirement: a boot then starts the
+    # carried units without waiting for a restore).
+    for point in ["record-written", "requirements-removed", "marker-removed",
+                  "unit-removed"]:
+      let h = retireHost("r15-ret-crash-" & point)
+      try:
+        discard retireCarriedState(h.d, h.root, h.state,
+          crashAt = proc (p: string) =
+            if p == point: raise newException(IOError, "crash at " & p))
+      except IOError: discard
+      let pr = protection(h.root, h.d)
+      checkpoint point & ": " & $pr
+      # Fail closed: while the marker stands, every requirement and the
+      # restore unit stand with it.
+      if pr.marker: check pr.unit and pr.reqs == 2
+      # A second run finishes from wherever the crash left it.
+      discard retireCarriedState(h.d, h.root, h.state)
+      check protection(h.root, h.d) == (false, false, 0)

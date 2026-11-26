@@ -2088,6 +2088,168 @@ proc cancelAndWait*(running: var ReproDirectRunningProcess):
   except CatchableError as err:
     raise newException(ReproRunQuotaError, err.msg)
 
+# ---------------------------------------------------------------------------
+# Why the engine has no RunQuota session, and what its bypass fallback may do.
+#
+# The engine falls back to running actions unleased when RunQuota cannot be
+# used and the build mode allows it. That is right when no daemon exists at
+# all, and wrong to do in SILENCE when an endpoint exists and refuses this
+# process: a process started before its user joined the rendezvous group is
+# refused by the socket's mode (`EACCES`), and its build then ran outside
+# every budget with nothing said but the generic bypass header. So the
+# failure is classified, and:
+#
+# * every kind but `refAbsent` is warned about, once per engine run, naming
+#   the endpoint, the error and what it usually means;
+# * `RUNQUOTA_STRICT` turns every kind, absence included, into a refusal of
+#   the build before any action launches unleased.
+#
+# This mirrors RunQuota's own client library (`unleasedFallback`), so `repro`
+# and `runquota run` say the same thing about the same endpoint. It is
+# written here rather than imported because the RunQuota revision this tree
+# builds against predates it.
+# ---------------------------------------------------------------------------
+
+const
+  RunQuotaStrictEnvVar* = "RUNQUOTA_STRICT"
+    ## Set to anything but empty or `0`: no action runs unleased because
+    ## RunQuota could not be used; the build fails instead.
+
+type
+  RunQuotaEndpointFailureKind* = enum
+    refNone          ## connected: there is no failure
+    refAbsent        ## no endpoint at the path (ENOENT, ENOTDIR)
+    refRefused       ## the endpoint exists and may not be used (EACCES, EPERM)
+    refNotListening  ## a socket file with nothing listening (ECONNREFUSED)
+    refUntrusted     ## the endpoint failed RunQuota's trust checks
+    refOther         ## anything else, including a refused Hello
+
+  RunQuotaEndpointFailure* = object
+    kind*: RunQuotaEndpointFailureKind
+    endpoint*: string
+    errorName*: string
+    detail*: string
+
+  ReproRunQuotaConnectError* = object of ReproRunQuotaError
+    ## ``openRunQuotaSession`` could not get a session; ``failure`` says why.
+    failure*: RunQuotaEndpointFailure
+
+proc runQuotaOsErrorName(code: int32): string =
+  when defined(windows):
+    case code
+    of 2: "ERROR_FILE_NOT_FOUND"
+    of 3: "ERROR_PATH_NOT_FOUND"
+    of 5: "ERROR_ACCESS_DENIED"
+    of 231: "ERROR_PIPE_BUSY"
+    else: "error " & $code
+  else:
+    if code == EACCES: "EACCES"
+    elif code == EPERM: "EPERM"
+    elif code == ECONNREFUSED: "ECONNREFUSED"
+    elif code == ENOENT: "ENOENT"
+    elif code == ENOTDIR: "ENOTDIR"
+    elif code == ETIMEDOUT: "ETIMEDOUT"
+    elif code == ECONNRESET: "ECONNRESET"
+    elif code == EPIPE: "EPIPE"
+    else: "errno " & $code
+
+proc runQuotaOsErrorKind(code: int32): RunQuotaEndpointFailureKind =
+  when defined(windows):
+    case code
+    of 2, 3: refAbsent
+    of 5: refRefused
+    else: refOther
+  else:
+    if code == ENOENT or code == ENOTDIR: refAbsent
+    elif code == EACCES or code == EPERM: refRefused
+    elif code == ECONNREFUSED: refNotListening
+    else: refOther
+
+proc singleLine(text: string): string =
+  text.replace('\n', ' ').replace('\r', ' ').strip()
+
+proc classifyRunQuotaFailure*(endpoint: string;
+                              error: ref CatchableError):
+    RunQuotaEndpointFailure =
+  ## The failure of a connect (or of the Hello and session registration
+  ## after it) to ``endpoint``, classified.
+  if error of EndpointTrustError:
+    return RunQuotaEndpointFailure(kind: refUntrusted, endpoint: endpoint,
+      errorName: "trust check", detail: singleLine(error.msg))
+  if error of OSError:
+    let code = (ref OSError)(error).errorCode
+    if code != 0:
+      var text = osErrorMsg(OSErrorCode(code)).singleLine()
+      if text.len == 0: text = singleLine(error.msg)
+      return RunQuotaEndpointFailure(kind: runQuotaOsErrorKind(code),
+        endpoint: endpoint, errorName: runQuotaOsErrorName(code),
+        detail: text)
+  RunQuotaEndpointFailure(kind: refOther, endpoint: endpoint,
+    errorName: "error", detail: singleLine(error.msg))
+
+proc resolvedRunQuotaEndpoint(): string =
+  try: defaultEndpoint().path
+  except CatchableError: ""
+
+proc probeRunQuotaEndpoint*(): RunQuotaEndpointFailure =
+  ## ``isRunQuotaDaemonReachable`` that says WHY not: ``refNone`` when a
+  ## Hello round trip succeeds, the classified failure otherwise.
+  let endpoint = resolvedRunQuotaEndpoint()
+  try:
+    var client = connect(defaultEndpoint())
+    client.close()
+    RunQuotaEndpointFailure(kind: refNone, endpoint: endpoint)
+  except CatchableError as error:
+    classifyRunQuotaFailure(endpoint, error)
+
+proc runQuotaStrictRequested*(): bool =
+  ## Any value but empty or `0`: a typo must not quietly mean "off".
+  let value = getEnv(RunQuotaStrictEnvVar).strip()
+  value.len > 0 and value != "0"
+
+proc runQuotaFailureHint(failure: RunQuotaEndpointFailure): string =
+  case failure.kind
+  of refRefused:
+    "This process does not carry the group that may connect to the " &
+      "socket (for example, its user was added to the group after the " &
+      "session started); start a new login session."
+  of refNotListening:
+    "No daemon is listening there: it is stopped, or exited and left its " &
+      "socket behind; start it (`runquota daemon start` or the host service)."
+  of refAbsent:
+    "No daemon is provisioned at that path."
+  of refUntrusted, refOther, refNone:
+    ""
+
+proc runQuotaFailureReason*(failure: RunQuotaEndpointFailure): string =
+  ## `cannot use the RunQuota daemon at <path>: <NAME> (<text>)`.
+  result = "cannot use the RunQuota daemon at " &
+    (if failure.endpoint.len > 0: failure.endpoint
+     else: "an endpoint that could not be resolved") &
+    ": " & failure.errorName
+  if failure.detail.len > 0:
+    result.add " (" & failure.detail & ")"
+
+proc withRunQuotaHint(text: string; failure: RunQuotaEndpointFailure): string =
+  let hint = runQuotaFailureHint(failure)
+  if hint.len > 0: text & " " & hint else: text
+
+proc runQuotaUnleasedFallback*(failure: RunQuotaEndpointFailure;
+                               strict = runQuotaStrictRequested()):
+    tuple[run: bool, message: string] =
+  ## Whether the engine may launch unleased after ``failure``, and the line
+  ## to print (a warning) or raise (a strict refusal) first; an empty line
+  ## when there is nothing to say (no daemon at all, not strict).
+  if strict:
+    return (false, withRunQuotaHint("repro: " & RunQuotaStrictEnvVar &
+      " is set and no lease can be had: " & runQuotaFailureReason(failure) &
+      "; not running the command.", failure))
+  if failure.kind in {refNone, refAbsent}:
+    return (true, "")
+  (true, withRunQuotaHint("repro: warning: " &
+    runQuotaFailureReason(failure) & "; running the command without a lease.",
+    failure) & " Set " & RunQuotaStrictEnvVar & "=1 to refuse instead.")
+
 proc openRunQuotaSession*(name = "reprobuild action";
                           version = "0.1.0"; project = "";
                           entryPoint = ""): ReproRunQuotaSession =
@@ -2095,7 +2257,11 @@ proc openRunQuotaSession*(name = "reprobuild action";
   ## library prefers `RUNQUOTA_PROJECT` / `RUNQUOTA_ENTRY_POINT` only when
   ## these are empty, so a caller that wants the variables to win reads
   ## them first (`buildSizingDeclaration`).
+  ##
+  ## Raises ``ReproRunQuotaConnectError`` carrying the classified failure,
+  ## so a caller that falls back can say why (``runQuotaUnleasedFallback``).
   result = ReproRunQuotaSession()
+  let endpoint = resolvedRunQuotaEndpoint()
   try:
     result.client = connectDefault()
     result.session = result.client.registerSession(name, version, project,
@@ -2104,7 +2270,9 @@ proc openRunQuotaSession*(name = "reprobuild action";
     result.active = true
   except CatchableError as err:
     result.client.close()
-    raise newException(ReproRunQuotaError, err.msg)
+    var raised = newException(ReproRunQuotaConnectError, err.msg)
+    raised.failure = classifyRunQuotaFailure(endpoint, err)
+    raise raised
 
 proc runQuotaEndpointText*(): string
   ## Defined below, with the queue diagnostics.

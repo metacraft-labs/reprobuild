@@ -146,7 +146,7 @@ suite "the egress check writes a root drop directory, without CAP_DAC_OVERRIDE (
     createSymlink(secret, drop / "0002-link.evr")
     writeFile(drop / "0003-big.evr", repeat('x', DropEntryMaxBytes + 1))
     writeFile(drop / "notes.txt", "not an entry")
-    check harvestDropEntries(drop, outbox) == 1
+    check harvestDropEntries(drop, outbox).moved == 1
     check readFile(outbox / "0001-egress.evr") == "an entry"
     check not fileExists(outbox / "0002-link.evr")
     check not fileExists(outbox / "0003-big.evr")

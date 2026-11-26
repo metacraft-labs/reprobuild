@@ -279,6 +279,8 @@ import repro_cli_support/catalog_generate
 import repro_cli_support/nimble_verify
 import repro_cli_support/nimble_lock
 import repro_cli_support/nimble_native
+import repro_cli_support/nimble_develop
+import repro_cli_support/nimble_gitlink_audit
 import repro_core/nimble_path_env
 import repro_cli_support/home_catalog_imports
 import repro_domain_types/nimble_index/view
@@ -6018,9 +6020,23 @@ proc registerNimbleCatalogProducers*(report: NimbleSourcesReport) =
     let selector = NimbleCatalogSelectorPrefix & p.row.name
     producerMaterializedAuxPaths[selector] =
       ProducerAuxPaths(nimPathDirs: @[p.srcPath])
-    producerMaterializedSourceRoots[selector] = p.storePath
-    nimbleCatalogChannelKeys[selector] = "blake3:" & p.row.tree & "/" &
-      relativePath(p.srcPath, p.storePath, '/')
+    if p.developDir.len > 0:
+      # NPC-AREQ27: a develop sibling replaces the store tree. No digest
+      # names a working tree, so the key takes the content of the source
+      # directory the compile is handed (Cross-Repo-Source-Consumption §4.3
+      # rule 2): any edit under it moves every compile's key. A tree that
+      # cannot be read fails the build rather than key on a partial digest.
+      producerMaterializedSourceRoots[selector] = p.developDir
+      let content = producerChannelContent(selector,
+        [ProducerChannelDir(channel: "nimpath", path: p.srcPath)])
+      if not content.complete:
+        raise newException(NimbleDevelopError, "the develop sibling of " &
+          selector & " cannot be read (" & content.failure & ")")
+      nimbleCatalogChannelKeys[selector] = "develop:" & content.digest
+    else:
+      producerMaterializedSourceRoots[selector] = p.storePath
+      nimbleCatalogChannelKeys[selector] = "blake3:" & p.row.tree & "/" &
+        relativePath(p.srcPath, p.storePath, '/')
     nimbleCatalogSelectorOrder.add selector
 
 proc foldNimbleCatalogChannels*(actions: var seq[BuildAction]) =
@@ -6402,8 +6418,11 @@ proc fetchLockPinnedProducer*(dep: LockedDep; workspaceRoot: string): string =
   if step.code != 0:
     fail("fetch failed: could not initialize a checkout at " & checkoutRoot &
       ": " & step.output.strip())
-  step = git(["-C", checkoutRoot, "fetch", "--quiet", "--depth", "1", url,
-    revision])
+  # The url and the revision are the lock's, which a teammate's commit can
+  # carry: after `--end-of-options`, so neither can be read as an option
+  # (`--upload-pack=...` runs a command), and never over `ext::`.
+  step = git(["-C", checkoutRoot, "-c", "protocol.ext.allow=never", "fetch",
+    "--quiet", "--depth", "1", "--end-of-options", url, revision])
   if step.code != 0:
     # A remote that cannot serve a bare revision by SHA (some servers reject
     # ``fetch <sha>`` without ``uploadpack.allowReachableSHA1InWant``) — fall
@@ -6411,7 +6430,8 @@ proc fetchLockPinnedProducer*(dep: LockedDep; workspaceRoot: string): string =
     # revision. A bare ``fetch <url>`` takes only the remote's HEAD, which
     # misses a pin that only a non-default branch reaches.
     let byRevision = step.output.strip()
-    step = git(["-C", checkoutRoot, "fetch", "--quiet", url,
+    step = git(["-C", checkoutRoot, "-c", "protocol.ext.allow=never",
+      "fetch", "--quiet", "--end-of-options", url,
       "+refs/heads/*:refs/remotes/pinned-source/*",
       "+refs/tags/*:refs/tags/*"])
     if step.code != 0:
@@ -6427,7 +6447,8 @@ proc fetchLockPinnedProducer*(dep: LockedDep; workspaceRoot: string): string =
       revision & ": no branch or tag of the remote reaches it. Push the " &
       "commit to the remote, or update the consumer lock to a revision the " &
       "remote has.")
-  step = git(["-C", checkoutRoot, "checkout", "--quiet", "--detach", revision])
+  step = git(["-C", checkoutRoot, "checkout", "--quiet", "--detach",
+    "--end-of-options", revision])
   if step.code != 0:
     fail("fetch succeeded but could not check out the pinned revision " &
       revision & " at " & checkoutRoot & ": " & step.output.strip())
@@ -6436,6 +6457,89 @@ proc fetchLockPinnedProducer*(dep: LockedDep; workspaceRoot: string): string =
   # unreachable revision fails the fetch loudly (§5.2 "verifies integrity").
   verifyRevisionIntegrity()
   checkoutRoot
+
+var lockedRevisionNoticesAnnounced = initHashSet[string]()
+  ## The producers whose `--locked` notice this process has printed.
+
+proc materializeLockedRevision*(dep: LockedDep;
+                                workspaceRoot, placedCheckout: string): string =
+  ## Workspace-And-Develop-Mode.md §"A locked build sets aside every develop
+  ## override": the tree of ``dep``'s locked revision, checked out detached
+  ## in the revision-keyed cache ``fetchLockPinnedProducer`` uses, from a
+  ## clone that holds the commit -- ``placedCheckout``'s own object store
+  ## first (a commit-time re-pin can name a commit only it holds), then the
+  ## locked remote. Never the working tree: a dirty checkout does not
+  ## change a locked build. Refuses, naming the revision, when no clone
+  ## holds it.
+  let revision = dep.coordinates.revision
+  let checkoutRoot =
+    lockPinnedProducerCacheRoot(workspaceRoot) / dep.name / revision
+  var fromClone = ""
+  var cloneWhy = ""
+  # The revision is the lock's, which a teammate's commit can carry: only an
+  # object id is handed to git, and after `--end-of-options`, so no lock
+  # value can be read as an option.
+  let isObjectId = revision.len in [40, 64] and
+    revision.allCharsInSet(HexDigits)
+  if not isObjectId:
+    cloneWhy = "the locked revision is not a commit id"
+  if placedCheckout.len > 0 and isObjectId and
+      not (dirExists(extendedPath(checkoutRoot / ".git"))):
+    let gitBin = findExe("git")
+    proc git(args: openArray[string]): tuple[code: int; output: string] =
+      var cmd = quoteShell(gitBin)
+      for a in args:
+        cmd.add(" ")
+        cmd.add(quoteShell(a))
+      let r = execCmdEx(cmd, options = {poStdErrToStdOut, poUsePath},
+        env = lockPinnedProducerGitEnv())
+      (code: r.exitCode, output: r.output)  # git-merged-text: only quoted in failures, never parsed
+    if gitBin.len > 0:
+      var lock = acquireExclusiveFileLock(checkoutRoot & ".materialize.lock")
+      try:
+        if dirExists(extendedPath(checkoutRoot)):
+          removeDir(extendedPath(checkoutRoot))
+        createDir(extendedPath(checkoutRoot))
+        var step = git(["-C", checkoutRoot, "init", "--quiet"])
+        if step.code == 0:
+          # The placed checkout's object store, asked for exactly the
+          # commit: a local upload-pack serves an unadvertised commit when
+          # this fetch allows it, so a commit no branch names is found too.
+          step = git(["-C", checkoutRoot, "-c", "protocol.ext.allow=never",
+            "-c", "uploadpack.allowAnySHA1InWant=true", "fetch", "--quiet",
+            "--no-tags", "--end-of-options", placedCheckout, revision])
+        if step.code == 0:
+          step = git(["-C", checkoutRoot, "checkout", "--quiet", "--detach",
+            "--end-of-options", revision])
+        if step.code == 0:
+          fromClone = placedCheckout
+        else:
+          cloneWhy = step.output.strip()
+          try: removeDir(extendedPath(checkoutRoot))
+          except OSError: discard
+      finally:
+        releaseExclusiveFileLock(lock)
+  if fromClone.len > 0:
+    verifyLockPinnedProducerSource(dep, checkoutRoot, workspaceRoot)
+    result = checkoutRoot
+  else:
+    try:
+      result = fetchLockPinnedProducer(dep, workspaceRoot)
+    except CatchableError as e:
+      raise newException(OSError, "--locked: the locked revision " &
+        revision & " of \"" & dep.name & "\" is held by no clone, so its " &
+        "tree cannot be built" &
+        (if placedCheckout.len > 0: ": the checkout " & placedCheckout &
+           " does not hold it (" & cloneWhy & ")" else: "") &
+        "; " & e.msg & ". A locked build never builds a working tree.")
+  {.cast(gcsafe).}:
+    let key = absolutePath(workspaceRoot) & "\0" & dep.name
+    if key notin lockedRevisionNoticesAnnounced:
+      lockedRevisionNoticesAnnounced.incl(key)
+      stderr.writeLine("repro build: --locked: " & dep.name & " is built " &
+        "from its locked revision " & revision &
+        (if placedCheckout.len > 0: ", not from the working tree of " &
+           placedCheckout else: ""))
 
 const NimProducerPathProjectionVersion = "nim-path-projection:restore-after-config.v2"
 
@@ -10033,6 +10137,13 @@ proc devEnvProducerEdgesPossible*(projectRoot: string): bool
   ## helpers, while its caller (``devEnvProducerActivation``) is far above
   ## them. See the body for why three ``fileExists`` calls decide it.
 
+var lockedBuildActive*: bool
+  ## The build in progress is `--locked` (Workspace-And-Develop-Mode.md §"A
+  ## locked build sets aside every develop override"): no develop override
+  ## binds a producer, and a lock-pinned producer is built from the tree of
+  ## its locked revision, never from a checkout's working tree. Set by the
+  ## build body for each build it runs.
+
 var lastResolvedProducerBinding*: ProducerBinding =
   ProducerBinding(selector: "", kind: pbkNotProducer)
   ## SC-1 observability sink. The ``mkToolIdentityResolver`` closure records
@@ -12050,7 +12161,13 @@ proc producerSourceRoot(binding: ProducerBinding; selector,
     result = binding.localPathAbsolute
   of pbkLockPinned:
     let sibling = findSiblingProjectFile(selector, workspaceRoot)
-    if sibling.len > 0:
+    if lockedBuildActive and binding.lockedDep.coordinates.kind == ckVcs:
+      # `--locked`: the tree of the locked revision, read from a clone that
+      # holds the commit (the placed checkout's own object store first),
+      # never from that checkout's working tree.
+      result = materializeLockedRevision(binding.lockedDep, workspaceRoot,
+        if sibling.len > 0: parentDir(sibling) else: "")
+    elif sibling.len > 0:
       result = parentDir(sibling)
       if verifyPlacedSibling:
         verifyLockPinnedProducerSource(binding.lockedDep, result, workspaceRoot)
@@ -30879,6 +30996,11 @@ proc resolveProducerBinding*(selector: string;
       parseWorkspaceLockedDeps(readFile(extendedPath(lockP)), lockP)
     else:
       LockedDependencies()
+  if lockedBuildActive:
+    # `--locked`: every develop override is set aside, so the producer
+    # resolves from the lock (the build body names each one set aside).
+    return resolveProducerBinding(selector, workspaceRoot, lock,
+      none(DevelopOverrides))
   var overrides =
     if workspaceRoot.len > 0:
       readDevelopOverridesFile(workspaceRoot)
@@ -32103,6 +32225,9 @@ proc manifestMembershipOf(repoRoot: string;
     workspaceRoot: string; repos: seq[ResolvedRepo]; selfName: string]
   ## Forward declaration; defined beside ``developSetClosure``.
 
+proc nimbleDeclaredRepos(projectDir, lockPath: string): seq[DeclaredRepo]
+  ## Forward declaration; defined beside ``declaredDevelopSet``.
+
 proc lockedDepFromCheckout(name, depAbs, pathBase: string): LockedDep =
   ## A locked VCS dependency observed from the checkout at ``depAbs``: its
   ## ``HEAD`` as the revision, its canonical fetch URL, and the VCS-native
@@ -32543,8 +32668,14 @@ proc localizeLockedDeps*(deps: var seq[LockedDep];
   ## default; nothing a lock document says about a location is consulted.
   for d in deps.mitems:
     if isSelfLockedDep(d): continue
+    # A `nimble:` row pins a catalog tree, not a checkout: it has no
+    # checkout location even when a develop override of that name exists
+    # (Nimble-Package-Catalog NPC-AREQ27). Placed, the commit-path re-pin
+    # would move the catalog pin to the sibling's HEAD.
     d.path =
-      if d.coordinates.kind == ckVcs: loc.lockedDepCheckoutPath(d.name)
+      if d.coordinates.kind == ckVcs and
+          not d.name.startsWith(NimbleCatalogSelectorPrefix):
+        loc.lockedDepCheckoutPath(d.name)
       else: ""
 
 proc localizeLockedDeps*(deps: var seq[LockedDep]; lockDir: string) {.gcsafe.} =
@@ -33173,6 +33304,10 @@ proc runBuildCommandBody(args: openArray[string]; publicCliPath: string;
   var buildTargetTriple = ""
   var buildStrategy = lsDefault
   var strategyGiven = false
+  # Nimble-Package-Catalog NPC-AREQ27 — `--locked`: build the trees the
+  # committed lock pins; a develop override of a `nimble:` package is not
+  # applied.
+  var lockedBuild = false
   var target = ""
   var positionalSelectors: seq[string] = @[]
   var mode = tpmUnspecified
@@ -33473,6 +33608,9 @@ proc runBuildCommandBody(args: openArray[string]; publicCliPath: string;
       return 2
     strategyGiven = true
   printSolvedGraph = c.printSolvedGraph
+  lockedBuild = c.locked
+  lockedBuildActive = lockedBuild
+  defer: lockedBuildActive = false
   if c.publish.isSome:
     # CLI/build.md §"Publishing for an appliance": publish this build's
     # target install mirror under a profile's substitute-only edge key.
@@ -33721,6 +33859,25 @@ proc runBuildCommandBody(args: openArray[string]; publicCliPath: string;
     registerNimbleCatalogProducers(lastNimbleSourcesReport)
     delEnv(NimblePathDirsEnvVar)
     let projDir = buildLockProjectDir(target)
+    # NPC-AREQ27: the develop overrides that are not catalog packages reach
+    # the provider's `repro.paths` edge, which reads each sibling's
+    # `.nimble`. A `--locked` build hands it none, and tells it to put no
+    # sibling's working tree there (Workspace-And-Develop-Mode.md §"A
+    # locked build sets aside every develop override").
+    let developSiblings =
+      if lockedBuild: newSeq[(string, string)]() else: nimDevelopSiblings(projDir)
+    if developSiblings.len > 0:
+      putEnv(NimDevelopSiblingsEnvVar,
+        encodeNimDevelopSiblings(developSiblings))
+    else:
+      delEnv(NimDevelopSiblingsEnvVar)
+    if lockedBuild:
+      putEnv(NimDevelopLockedEnvVar, "1")
+      for (name, dir) in nimDevelopSiblings(projDir):
+        stderr.writeLine("repro build: --locked: the develop override of " &
+          name & " (" & dir & ") is not applied")
+    else:
+      delEnv(NimDevelopLockedEnvVar)
     let effectiveLock =
       if lockOverride.len > 0: absolutePath(lockOverride)
       else: committedLockPath(projDir)
@@ -33750,6 +33907,34 @@ proc runBuildCommandBody(args: openArray[string]; publicCliPath: string;
       try:
         lastNimbleSourcesReport = prepareLockedNimbleSources(projDir,
           graph.lockPath, NimbleSourcesOptions())
+        # NPC-AREQ27: a develop override of a locked package -- recorded,
+        # or automatic for a repo the workspace declares with its origin
+        # identity -- puts its checkout's source directory in place of the
+        # store tree, unless the build is `--locked`. A checkout whose
+        # requirements differ from its record's is built from the develop
+        # overlay lock when that matches (§13.1).
+        let declared =
+          if lastNimbleSourcesReport.active:
+            nimbleDeclaredRepos(projDir, graph.lockPath)
+          else: newSeq[DeclaredRepo]()
+        let applied = applyNimbleDevelopOverrides(lastNimbleSourcesReport,
+          projDir, graph.lockPath, lockedBuild, declared,
+          proc (overlay: string): NimbleSourcesReport =
+            prepareLockedNimbleSources(projDir, overlay,
+              NimbleSourcesOptions()))
+        for line in applied.lines:
+          stderr.writeLine("repro build: " & line)
+        var withCatalog = developSiblings
+        var notes = newSeq[string](developSiblings.len)
+        for o in applied.overrides:
+          for p in lastNimbleSourcesReport.packages:
+            if p.row.name == o.package and p.developDir.len > 0:
+              withCatalog.add (NimbleCatalogSelectorPrefix & p.row.name,
+                p.developDir)
+              notes.add o.pathsNote(projDir)
+        if withCatalog.len > 0:
+          putEnv(NimDevelopSiblingsEnvVar,
+            encodeNimDevelopSiblings(withCatalog, notes))
         # NPC-AREQ21: every locked package becomes a Nim source producer
         # of this build (its `<store tree>/<srcDir>` on `nim c --path:`).
         registerNimbleCatalogProducers(lastNimbleSourcesReport)
@@ -44769,6 +44954,17 @@ proc parseCloneObjects(raw: string): string =
       raise newException(ValueError,
         "--clone-objects expects shared, private=<non-empty directory>, none or dissociate")
 
+proc cloneObjectsOf(given: Option[string]): string =
+  ## The policy a command line selects: "" (the default, `shared`) when
+  ## `--clone-objects` is absent, else its validated value. A flag given with
+  ## an empty value (`--clone-objects=`) is malformed, not a request for the
+  ## default, so it is refused here like any other bad value. Every verb calls
+  ## this while it converts its configuration, before it resolves a manifest
+  ## or touches the workspace, so the refusal is never hidden behind a later
+  ## one (issue 2026-11-24-workspace-init-refuses-on-the-missing-manifest-
+  ## before-validating-clone-objects).
+  if given.isNone: "" else: parseCloneObjects(given.get)
+
 proc cloneObjectsLabel(policy: string): string =
   if policy.len == 0: "shared" else: policy
 
@@ -45287,8 +45483,7 @@ proc workspaceInitArgsOf(c: ReproCommandLineWorkspaceInit;
   result.toolProvisioning =
     if c.toolProvisioning.len > 0: parseToolProvisioning(c.toolProvisioning)
     else: tpmPathOnly
-  if c.cloneObjects.len > 0:
-    result.cloneObjects = parseCloneObjects(c.cloneObjects)
+  result.cloneObjects = cloneObjectsOf(c.cloneObjects)
   # An opt-in flag. Public-only users pass this when a workspace lists a
   # private manifest layer they cannot fetch; the composer drops the
   # unreachable layer and the init proceeds with the public subset.
@@ -47201,8 +47396,7 @@ proc runWorkspaceInitFromUrl*(c: ReproCommandLineWorkspaceInit;
     toolProvisioning:
       (if c.toolProvisioning.len > 0: parseToolProvisioning(c.toolProvisioning)
        else: tpmPathOnly),
-    cloneObjects:
-      (if c.cloneObjects.len > 0: parseCloneObjects(c.cloneObjects) else: ""))
+    cloneObjects: cloneObjectsOf(c.cloneObjects))
   let resolution = resolveOrgRootRepoUrl(parsed.url, env)
 
   # ``--print-resolved-url``: resolution-only dry run (hermetic, no clone).
@@ -48014,8 +48208,7 @@ proc syncArgsOf[T](c: T): WorkspaceSyncArgs =
   ## ``workspace.toml``) keeps working; the full list drives the scoped-repo
   ## filter in ``resolveWorkspaceSyncProject``.
   result = defaultWorkspaceSyncArgs(c.workspaceRoot)
-  if c.cloneObjects.len > 0:
-    result.cloneObjects = parseCloneObjects(c.cloneObjects)
+  result.cloneObjects = cloneObjectsOf(c.cloneObjects)
   if c.toolProvisioning.len > 0:
     result.toolProvisioning = parseToolProvisioning(c.toolProvisioning)
   result.jobs = syncJobsOf(c.jobs, "--jobs")
@@ -56804,8 +56997,7 @@ proc pullArgsOf[T](c: T): WorkspacePullArgs =
   ## Mirrors ``sync``'s shape: an optional ``<project>`` positional
   ## (single-project mode) plus ``--workspace-root=PATH`` /
   ## ``--tool-provisioning=...``.
-  if c.cloneObjects.len > 0:
-    result.cloneObjects = parseCloneObjects(c.cloneObjects)
+  result.cloneObjects = cloneObjectsOf(c.cloneObjects)
   result.toolProvisioning =
     if c.toolProvisioning.len > 0: parseToolProvisioning(c.toolProvisioning)
     else: tpmPathOnly
@@ -76037,6 +76229,50 @@ proc absentLockedSiblingsOutsideWorkspace(repoRoot: string):
 proc manifestPublicationEnabled(workspaceRoot: string): bool
   ## Forward declaration; defined beside the gate's publication step.
 
+proc trackedDevelopOverlays*(gitBin, repoRoot, pushedRefsPath: string):
+    seq[tuple[sha, path: string]] =
+  ## Each pushed commit whose tree tracks a develop overlay lock
+  ## (`.repro/develop.lock`, at any depth; Nimble-Package-Catalog.md §13.1),
+  ## with the path it tracks: each local tip the pre-push stream names, and
+  ## each commit the push publishes that adds or changes such a file, so a
+  ## commit that adds it and a later one that removes it are refused too.
+  if pushedRefsPath.len == 0 or not fileExists(pushedRefsPath): return
+  proc isObjectId(s: string): bool =
+    s.len in [40, 64] and s.allCharsInSet(HexDigits)
+  proc git(args: openArray[string]): tuple[code: int; output: string] =
+    # The answer is parsed (object ids, paths): git's stderr stays out of it.
+    let r = gitRunSeparated(gitBin, @["-C", repoRoot] & @args,
+      scrubbedGitRepositoryEnv())
+    (r.code, r.output)
+  var tips: seq[string]
+  for line in readFile(pushedRefsPath).splitLines():
+    let f = line.splitWhitespace()
+    if f.len < 2: continue
+    let sha = f[1]
+    if not sha.isObjectId or sha.allCharsInSet({'0'}): continue
+    if sha notin tips: tips.add sha
+    # The commits this ref's push publishes (those the remote's old tip, or
+    # for a new ref every remote-tracking ref, does not reach) that touch
+    # an overlay path.
+    let remote = if f.len >= 4: f[3] else: ""
+    let exclude =
+      if remote.isObjectId and not remote.allCharsInSet({'0'}) and
+          git(["cat-file", "-e", remote & "^{commit}"]).code == 0: remote
+      else: "--remotes"
+    let touched = git(["rev-list", "--full-history", sha, "--not", exclude,
+      "--", ":(glob)**/.repro/" & DevelopOverlayFile])
+    if touched.code != 0: continue
+    for c in touched.output.splitLines():
+      let id = c.strip()
+      if id.isObjectId and id notin tips: tips.add id
+  for sha in tips:
+    let listed = git(["ls-tree", "-r", "--name-only", sha])
+    if listed.code != 0: continue
+    for p in listed.output.splitLines():
+      if p == ".repro/" & DevelopOverlayFile or
+          p.endsWith("/.repro/" & DevelopOverlayFile):
+        result.add (sha, p)
+
 proc executeCheckPrePush(parsed: CheckArgs;
     publicationMembers: seq[HookPublicationMember] = @[];
     publicationWorkspace = ""): CheckReport =
@@ -76243,6 +76479,21 @@ proc executeCheckPrePush(parsed: CheckArgs;
         outgoing.observationEvidence)))
     result.exitCode = 2
     return
+
+  # Nimble-Package-Catalog.md §13.1: the develop overlay lock is local state
+  # and never committed. A pushed commit whose tree tracks it is refused.
+  if parsed.pushedRefsPath.len > 0:
+    for (sha, path) in trackedDevelopOverlays(identity.binaryPath,
+        protocolRepoRoot, parsed.pushedRefsPath):
+      result.failures.add(CheckFailure(
+        repo: currentRepoPath,
+        property: "develop-overlay-lock-tracked",
+        remediation: "remove it from the commit (`git rm --cached " &
+          quoteShellPosix(path) & "`, then amend or add a commit) and " &
+          "keep it untracked: it is this machine's re-lock, never shared",
+        evidence: "pushed commit " & sha & " tracks " & path &
+          ", the develop overlay lock"))
+      result.exitCode = 1
 
   # RA-3: no branch-name enforcement. The pushed and active branch are
   # still observed and surfaced in the report (informational), but a
@@ -77221,6 +77472,13 @@ proc executeCheckPrePush(parsed: CheckArgs;
     false
   if overridesOpt.isSome:
     for entry in listOverrides(overridesOpt.get()):
+      # Nimble-Package-Catalog NPC-AREQ27: a develop override of a `nimble:`
+      # catalog package is ignored by the gate. The pushed lock pins the
+      # catalog's commit and tree, never the sibling, and a locked build
+      # does not apply the override, so the sibling's state cannot change
+      # what a teammate builds from the published lock.
+      if entry.isNimbleOverride:
+        continue
       let sourcePath =
         if isAbsolute(entry.local_path): entry.local_path
         else: absolutePath(parsed.workspaceRoot / entry.local_path)
@@ -87648,8 +87906,7 @@ proc branchArgsOf*[T](c: T; verb = "repro branch";
     if c.toolProvisioning.len > 0: parseToolProvisioning(c.toolProvisioning)
     else: tpmPathOnly
   result.workspaceRoot = c.workspaceRoot
-  if c.cloneObjects.len > 0:
-    result.cloneObjects = parseCloneObjects(c.cloneObjects)
+  result.cloneObjects = cloneObjectsOf(c.cloneObjects)
   let explicitBranch = c.branch
   result.existingBranch = c.existingBranch
   # ``--from=<role>`` or a shorthand.
@@ -99979,6 +100236,80 @@ proc declaredDevelopSet(projectDir, lockPath: string):
       continue
     result.addMember(d.name, pathBase / d.path, true)
 
+proc nimbleDeclaredRepos(projectDir, lockPath: string): seq[DeclaredRepo] =
+  ## The repos the workspace enclosing ``projectDir`` declares, each with its
+  ## checkout and fetch URL, for the automatic override of a `nimble:`
+  ## package (Nimble-Package-Catalog.md NPC-AREQ27 item 1): its resolved
+  ## membership, every ``repos/*.toml`` fragment (enabled or not; one no
+  ## enabled project resolves is resolved through every project manifest
+  ## that includes it, else through the workspace's URL prefixes), and the
+  ## develop set -- the committed lock's VCS dependencies at the checkouts
+  ## this machine places them at. Each name once, the first source winning.
+  ## A lock directory outside any workspace declares nothing; only recorded
+  ## overrides apply there. The project itself is never one.
+  let root = committedLockPathBase(absolutePath(projectDir))
+  let self = os.normalizedPath(absolutePath(projectDir))
+  let ws = enclosingWorkspaceRoot(root)
+  var seen = initHashSet[string]()
+  proc add(res: var seq[DeclaredRepo]; name, checkout, url, by: string) =
+    if name.len == 0 or name in seen: return
+    let at = os.normalizedPath(absolutePath(checkout))
+    if cmpPaths(at, self) == 0 or cmpPaths(at, root) == 0: return
+    seen.incl name
+    res.add DeclaredRepo(name: name, checkout: at, fetchUrl: url,
+      declaredBy: by)
+  if ws.len > 0 and cmpPaths(absolutePath(ws), root) != 0:
+    let wsAbs = absolutePath(ws)
+    try:
+      for r in resolveWorkspaceProjectShared(wsAbs, "", "build").resolved.repos:
+        result.add(r.name, wsAbs / (if r.path.len > 0: r.path else: r.name),
+          r.fetchUrl, "membership")
+    except CatchableError:
+      discard
+    let manifests = manifestsRoot(wsAbs)
+    var fragmentUrls = initTable[string, string]()
+    if dirExists(extendedPath(manifests / "projects")):
+      for file in walkFiles(manifests / "projects" / "*.toml"):
+        try:
+          for r in resolveProject(file).repos:
+            if r.name notin fragmentUrls: fragmentUrls[r.name] = r.fetchUrl
+        except CatchableError:
+          discard
+    var prefixes = initTable[string, string]()
+    try: prefixes = loadUrlPrefixes(manifests)
+    except CatchableError: discard
+    if dirExists(extendedPath(manifests / "repos")):
+      for file in walkFiles(manifests / "repos" / "*.toml"):
+        var fragment: RepoFragment
+        try: fragment = readRepoFragment(file)
+        except CatchableError: continue
+        let name = fragment.repo.name
+        let path = if fragment.repo.path.len > 0: fragment.repo.path else: name
+        var url = fragmentUrls.getOrDefault(name)
+        if url.len == 0:
+          let prefix =
+            if fragment.repo.url_prefix.isSome: fragment.repo.url_prefix.get()
+            elif fragment.repo.remote.isSome: fragment.repo.remote.get()
+            else: ""
+          if prefix in prefixes:
+            let suffix =
+              if fragment.repo.url_suffix.isSome: fragment.repo.url_suffix.get()
+              else: name
+            url = getFetchUrl(prefixes[prefix], suffix)
+        result.add(name, wsAbs / path, url, "fragment")
+  if lockPath.len == 0 or not fileExists(extendedPath(lockPath)): return
+  var deps: seq[LockedDep]
+  try:
+    deps = parseWorkspaceLockedDeps(readFile(extendedPath(lockPath)),
+      lockPath, lockDir = absolutePath(projectDir)).deps
+  except CatchableError:
+    return
+  for d in deps:
+    if isSelfLockedDep(d) or d.path.len == 0 or d.coordinates.kind != ckVcs or
+        d.name.startsWith(NimbleCatalogSelectorPrefix):
+      continue
+    result.add(d.name, root / d.path, d.coordinates.url, "develop set")
+
 proc unreachedDevelopSiblings(projectDir, lockPath: string;
     unreached: seq[UnreachedUsesSelector]): seq[UnreachedDevelopSibling] =
   ## Which of the ``uses:`` selectors the solver-input fold could not reach
@@ -102929,8 +103260,7 @@ proc runWorkspaceEnableCommand*(c: ReproCommandLineWorkspaceEnable): int =
   # `enable`'s real work IS a sync, so the report and the JSON digest
   # describing what happened are that sync's.
   var syncArgs = defaultWorkspaceSyncArgs(workspaceRoot)
-  if c.cloneObjects.len > 0:
-    syncArgs.cloneObjects = parseCloneObjects(c.cloneObjects)
+  syncArgs.cloneObjects = cloneObjectsOf(c.cloneObjects)
   syncArgs.jobs = syncJobsOf(c.jobs, "--jobs")
   syncArgs.jobsNetwork = syncJobsOf(c.jobsNetwork, "--jobs-network")
   syncArgs.jobsCheckout = syncJobsOf(c.jobsCheckout, "--jobs-checkout")
@@ -112608,6 +112938,16 @@ proc runReproCommandLine(programName: string; args: seq[string];
     of ReproCommandLineNimbleCommand.check:
       let r = conf.nimble.check
       return runNimbleCheckCommand(r.lock, r.store)
+    of ReproCommandLineNimbleCommand.develop:
+      let r = conf.nimble.develop
+      return runNimbleDevelopCommand(r.package, r.source, r.lock,
+        r.workspaceRoot, r.dryRun, r.relock,
+        proc (projectDir, lockPath: string): seq[DeclaredRepo] =
+          nimbleDeclaredRepos(projectDir, lockPath))
+    of ReproCommandLineNimbleCommand.gitlinkAudit:
+      let r = conf.nimble.gitlinkAudit
+      return runGitlinkAuditCommand(r.project, r.at, r.lock, r.platform,
+        r.json)
   of ReproCommandLineCommand.deps:
     case conf.deps.command
     of ReproCommandLineDepsCommand.refresh:

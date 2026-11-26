@@ -310,7 +310,12 @@ type
     record*: VersionRecord
     package*: PackageEnvelope ## the record's package (origins, name)
     storePath*: string      ## the verified store tree ("" until present)
-    srcPath*: string        ## `<storePath>/<srcDir>`, the `--path` entry
+    srcPath*: string
+      ## `<storePath>/<srcDir>`, the `--path` entry; under a develop
+      ## override, the sibling's source directory
+    developDir*: string
+      ## the develop sibling that replaces the store tree on `--path`
+      ## (NPC-AREQ27); "" when the store tree is built
 
   NimbleSourcesReport* = object
     active*: bool          ## the lock pins Nimble packages

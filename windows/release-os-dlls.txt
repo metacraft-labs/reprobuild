@@ -1,0 +1,26 @@
+# release-os-dlls.txt -- the Windows DLLs a Windows release archive may rely on.
+#
+# The release closure audit (Assert-WindowsDllClosure in toolchain-utils.ps1)
+# accepts an import that is not in the archive's bin/ only if it is an API set
+# (api-ms-win-*, ext-ms-win-*) or a DLL named here, and the DLL is also present
+# in the auditing host's System32. Presence in System32 alone is not enough:
+# System32 also receives redistributables that Windows does not ship -- the
+# Visual C++ runtime (vcruntime140.dll, msvcp140.dll, ...) lands there with any
+# VC++ redistributable or Visual Studio install, including on the build
+# runners -- and an image importing one would pass on the build host and fail
+# with STATUS_DLL_NOT_FOUND on a clean machine.
+#
+# Every name here is a component of Windows itself, present on every supported
+# Windows 10/11 installation. Each line gives the reason the release needs it,
+# from the images that import it (measured on the windows-aarch64 archive,
+# reprobuild 0.2.36). A new import of a Windows DLL fails the audit until it is
+# added here with its reason; a redistributable never belongs here -- ship it
+# in bin/ instead.
+#
+# Format: <DLL name> <reason>. Names match case-insensitively.
+KERNEL32.dll  Win32 base API (processes, files, memory, threads); every image.
+ADVAPI32.dll  registry, security and service APIs; reprobuild, the helpers and the cache tools, and libcrypto (its registry and event-log hooks).
+WS2_32.dll    Winsock; OpenSSL's socket BIOs in libcrypto and libssl.
+CRYPT32.dll   the Windows certificate store; libcrypto's CAPI/store loader.
+USER32.dll    libcrypto's interactive-desktop check (MessageBox, GetProcessWindowStation) for error reporting.
+dbghelp.dll   symbolized stack traces in reprobuild.exe and reprobuild-helper.exe.
