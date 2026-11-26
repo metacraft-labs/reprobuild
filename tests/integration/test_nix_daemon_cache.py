@@ -30,6 +30,8 @@ checked only the first returned path cannot satisfy the case.
 import json
 import os
 from pathlib import Path
+import platform
+import shutil
 import socket
 import subprocess
 import sys
@@ -351,6 +353,149 @@ class NixDaemonFileTransportIsNeverCached(unittest.TestCase):
                             self.assertNotEqual(
                                 second, first,
                                 f"{selector}: the rewritten source was served from the cache")
+                    self.assertIsNone(process.poll(), "the helper must survive the requests")
+                finally:
+                    if process.poll() is None:
+                        process.terminate()
+                    process.wait(timeout=5)
+
+
+def host_nix_system() -> str:
+    """The Nix system string of this host (``x86_64-linux``, ...)."""
+    machine = platform.machine().lower()
+    cpu = {"amd64": "x86_64", "arm64": "aarch64"}.get(machine, machine)
+    kernel = "darwin" if sys.platform == "darwin" else "linux"
+    return f"{cpu}-{kernel}"
+
+
+def path_fallback_flake(tag: str, system: str) -> str:
+    """A flake whose default package is a derivation named ``tag``.
+
+    The store path names the bytes that were evaluated, so an answer served
+    from the helper's cache after a rewrite is visible as the old name. It
+    builds offline with ``/bin/sh`` and no inputs.
+    """
+    return (
+        "{ outputs = _: { packages.%s.default = derivation {"
+        " name = \"%s\"; system = \"%s\"; builder = \"/bin/sh\";"
+        " args = [ \"-c\" \"echo %s > $out\" ]; }; }; }\n"
+        % (system, tag, system, tag))
+
+
+@unittest.skipUnless(os.name == "posix", "the Nix helper serves only on POSIX hosts")
+@unittest.skipUnless(shutil.which("nix"), "needs `nix` on PATH: what is under test is "
+                     "where Nix itself reads a selector it rejects as a URL")
+class NixDaemonPathFallbackIsNeverCached(unittest.TestCase):
+    """A selector Nix falls back to reading as a workspace path is never cached.
+
+    Foreign-Provisioning-And-Nix-Evaluation-Daemon.md §3 item 4. When Nix
+    rejects a selector it first parsed as a URL -- its URL parser rejects
+    ``https://h:0/x#...`` (port out of range) on every version, and Nix
+    2.34's fetcher also rejects ``github:o#...`` (no repository) -- it reads
+    the text before the first ``?`` or ``#`` as a path relative to its
+    working directory, which the helper sets to the request's workspace.
+    The helper used to decide "remote" from the selector text alone, so with
+    a flake at ``<workspace>/github:o`` it cached the first answer and served
+    it after the flake was rewritten. The helper now also classifies a
+    selector local when such a fallback path exists in the workspace.
+
+    Uses REAL Nix, deliberately: what is under test is how Nix itself reads
+    the selector, and that depends on the Nix version (the fetcher-rejection
+    fallback is 2.34.x only). A script standing in for ``nix`` would encode
+    the assumption under test. Each selector is first built directly, the
+    way the helper builds it; a version that does not read it as the
+    workspace path skips that selector with the reason, and the port-0 URL,
+    whose fallback every version has, must not be skipped that way. The
+    builds are two trivial offline derivations per selector, left in the
+    host store for its garbage collector.
+    """
+
+    SELECTORS = (
+        # URL-parser rejection: falls back on every Nix version.
+        ("https://h:0/x", True),
+        # Fetcher rejection: falls back on Nix 2.34.x only.
+        ("github:o", False),
+    )
+
+    def nix_build(self, selector: str, cwd: Path):
+        with tempfile.TemporaryDirectory(prefix="nix-data-") as data_home:
+            env = dict(os.environ, NIX_DATA_HOME=data_home)
+            return subprocess.run(
+                ["nix", "--extra-experimental-features", "nix-command flakes",
+                 "build", "--no-link", "--print-out-paths", "--", selector],
+                cwd=str(cwd), env=env, text=True, stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE, check=False)
+
+    def test_a_rewritten_path_fallback_flake_is_never_served_stale(self):
+        system = host_nix_system()
+        with tempfile.TemporaryDirectory(prefix="rnq-", dir="/tmp") as directory:
+            directory = Path(directory)
+            version = subprocess.run(["nix", "--version"], text=True,
+                                     stdout=subprocess.PIPE, check=False).stdout.strip()
+
+            # Control: this host's Nix can build the trivial flake at all.
+            # Without it, every skip below could be a broken Nix rather than
+            # a version without the fallback.
+            control = directory / "control"
+            control.mkdir()
+            (control / "flake.nix").write_text(path_fallback_flake("control", system))
+            built = self.nix_build(f"path:{control}#packages.{system}.default", directory)
+            if built.returncode != 0:
+                self.skipTest(f"{version} cannot build a trivial offline flake here: "
+                              f"{built.stderr.strip()[-500:]}")
+
+            endpoint = directory / "d.sock"
+            with (directory / "daemon.log").open("w+") as log:
+                process = subprocess.Popen(
+                    [sys.executable, str(DAEMON), "--socket-path", str(endpoint),
+                     "--idle-exit-ms=120000"], stdout=log, stderr=log)
+                try:
+                    deadline = time.monotonic() + 5
+                    while not endpoint.exists():
+                        self.assertIsNone(process.poll(), "helper exited before readiness")
+                        self.assertLess(time.monotonic(), deadline, "helper did not bind")
+                        time.sleep(0.01)
+
+                    def request(selector, root):
+                        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+                            client.settimeout(300)
+                            client.connect(str(endpoint))
+                            payload = dict(action="resolve", selector=selector,
+                                           workspaceRoot=str(root))
+                            client.sendall((json.dumps(payload) + "\n").encode())
+                            with client.makefile("rb") as response:
+                                result = json.loads(response.readline())
+                            self.assertEqual(result["status"], "success", result)
+                            return result["paths"]
+
+                    for index, (prefix, every_version) in enumerate(self.SELECTORS):
+                        selector = f"{prefix}#packages.{system}.default"
+                        with self.subTest(selector=selector):
+                            root = directory / f"workspace-{index}"
+                            flake = root / prefix
+                            flake.mkdir(parents=True)
+                            tag = f"fallback-{index}"
+                            (flake / "flake.nix").write_text(path_fallback_flake(tag + "-probe", system))
+                            probe = self.nix_build(selector, root)
+                            if probe.returncode != 0 or not probe.stdout.strip().endswith(
+                                    tag + "-probe"):
+                                detail = probe.stderr.strip()[-500:]
+                                if every_version:
+                                    self.fail(f"{version} did not read {selector!r} as "
+                                              f"<workspace>/{prefix}: {detail}")
+                                self.skipTest(f"{version} does not read {selector!r} as "
+                                              f"<workspace>/{prefix}: {detail}")
+
+                            (flake / "flake.nix").write_text(path_fallback_flake(tag + "-one", system))
+                            first = request(selector, root)
+                            self.assertTrue(first[0].endswith(tag + "-one"), first)
+                            (flake / "flake.nix").write_text(path_fallback_flake(tag + "-two", system))
+                            second = request(selector, root)
+                            self.assertNotEqual(
+                                second, first,
+                                f"{selector}: the rewritten <workspace>/{prefix} flake was "
+                                "served from the cache")
+                            self.assertTrue(second[0].endswith(tag + "-two"), second)
                     self.assertIsNone(process.poll(), "the helper must survive the requests")
                 finally:
                     if process.poll() is None:

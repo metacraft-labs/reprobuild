@@ -177,6 +177,7 @@ when defined(macosx):
       check fileExists(prefix / Item / "readme.txt")
       for entry in entries(prefix):
         check entry in [Item, ".repro-receipt", ".repro-installation.json",
+          ".repro-cache-identity.json",
           ".reprobuild-tarball-receipt.json"]
       check realized.resolvedExecutablePath ==
         prefix / Item / (MainName & ".app") / "Contents" / "MacOS" / MainName
@@ -470,5 +471,5 @@ when defined(macosx):
       check "(literal \"/dev/null\")" in profile
       check darwinUserTempDir().startsWith("/private/var/")
 
-  removeDir(root)
-  removeDir(outsideRoot)
+  removeFixtureTree(root)
+  removeFixtureTree(outsideRoot)
