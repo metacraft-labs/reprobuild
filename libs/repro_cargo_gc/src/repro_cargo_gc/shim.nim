@@ -98,9 +98,11 @@ proc optionValue(args: seq[string]; i: int; name: string):
   else:
     (false, "", 0)
 
-proc planShim*(args: seq[string]; stdoutIsTerminal: bool): ShimPlan =
+proc planShim*(args: seq[string]; stdoutIsTerminal: bool;
+               stdoutIsStderr = false): ShimPlan =
   ## Decide what to do with the caller's argv. Pure: a command line that is
-  ## not understood is `smPassThrough`, never an error.
+  ## not understood is `smPassThrough`, never an error. `stdoutIsStderr` says
+  ## that standard output and standard error are the same open file (`2>&1`).
   var i = 0
   var prefix: seq[string]
   var chdir = ""
@@ -136,6 +138,12 @@ proc planShim*(args: seq[string]; stdoutIsTerminal: bool): ShimPlan =
     return passThrough("subcommand " & sub & " is not recorded", args)
   if isB and stdoutIsTerminal:
     return passThrough(sub & " with a terminal on standard output", args)
+  if isB and stdoutIsStderr:
+    # What a test binary writes to standard output travels through the shim's
+    # pipe and arrives later than what it writes to standard error, which it
+    # shares with cargo. Into one file the two would interleave differently
+    # from a bare run, and the caller would see a different byte stream.
+    return passThrough(sub & " with standard output and error on one file", args)
   let subAt = i
   # Arguments after the first bare `--` belong to the program being run.
   var dd = args.len
@@ -145,6 +153,7 @@ proc planShim*(args: seq[string]; stdoutIsTerminal: bool): ShimPlan =
       break
   var hasJson = false
   var hasOther = false
+  var noRun = false
   var target, manifest = ""
   var j = subAt + 1
   while j < dd:
@@ -153,6 +162,13 @@ proc planShim*(args: seq[string]; stdoutIsTerminal: bool): ShimPlan =
       return passThrough("help requested", args)
     if a == "--build-plan" or a == "--unit-graph":
       return passThrough(a & " prints its own JSON to standard output", args)
+    if a == "--no-run":
+      # Measured (cargo 1.94, `cargo test --no-run`): in a JSON message format
+      # cargo leaves out the `Executable unittests ... (path)` lines it prints
+      # to standard error otherwise, so the injected format would change what
+      # the person sees. The caller's own JSON format is not affected (the
+      # stream is theirs and argv is untouched).
+      noRun = true
     let fmt = optionValue(args, j, "--message-format")
     if fmt.matched:
       if fmt.value.len == 0: return passThrough("--message-format without value", args)
@@ -179,6 +195,8 @@ proc planShim*(args: seq[string]; stdoutIsTerminal: bool): ShimPlan =
     result.cargoArgs = args
   elif hasOther:
     return passThrough("a non-JSON --message-format was chosen", args)
+  elif noRun:
+    return passThrough("--no-run: cargo prints the test executables itself", args)
   else:
     result.mode = smDivert
     result.cargoArgs = args[0 ..< dd] & @[InjectedFormat] & args[dd .. ^1]
@@ -292,6 +310,16 @@ when defined(posix):
 
   proc devNull(flags: cint): cint = open("/dev/null", flags)
 
+  proc sameOpenFile(a, b: cint): bool =
+    ## Whether two descriptors name the same file (a pipe, a terminal, a
+    ## regular file): `2>&1`.
+    var sa, sb: Stat
+    fstat(a, sa) == 0 and fstat(b, sb) == 0 and
+      sa.st_dev == sb.st_dev and sa.st_ino == sb.st_ino
+
+  proc prctl(option: cint): cint {.importc: "prctl", header: "<sys/prctl.h>",
+                                    varargs.}
+
   proc captureMetadata(real: string; plan: ShimPlan): string =
     ## Standard output of `cargo metadata --no-deps --format-version 1`, run
     ## with the caller's toolchain and global options and silenced otherwise.
@@ -346,25 +374,44 @@ when defined(posix):
       execReal(real, original)
     putEnv(ShimActiveVar, "1")
     let argv = allocCStringArray(@[real] & plan.cargoArgs)
-    # Ctrl-C reaches the whole foreground group (the child too); a signal sent
-    # to the shim alone is passed on.
-    var act: Sigaction
-    act.sa_handler = forwardSignal
-    discard sigemptyset(act.sa_mask)
-    act.sa_flags = SA_RESTART
+    # The child shares our process group, so Ctrl-C and a signal sent to the
+    # group reach cargo directly; a signal sent to the shim alone is passed
+    # on by `forwardSignal`. A signal the caller had ignored (a command run
+    # under `nohup`) stays ignored, as it would for bare cargo. The signals
+    # are blocked from before the fork until `gChild` is set, so none is
+    # lost in between (and none reaches a handler that has no child to tell).
+    var blocked, previousMask: Sigset
+    discard sigemptyset(blocked)
     for sig in [SIGINT, SIGTERM, SIGHUP, SIGQUIT]:
-      discard sigaction(sig, act)
+      discard sigaddset(blocked, sig)
+    discard sigprocmask(SIG_BLOCK, blocked, previousMask)
+    for sig in [SIGINT, SIGTERM, SIGHUP, SIGQUIT]:
+      var act, old: Sigaction
+      discard sigaction(sig, act, old)   # act is all zero: SIG_DFL, only reads
+      discard sigaction(sig, old, act)   # put the previous disposition back
+      if old.sa_handler != SIG_IGN:
+        act.sa_handler = forwardSignal
+        discard sigemptyset(act.sa_mask)
+        act.sa_flags = SA_RESTART
+        discard sigaction(sig, act)
     let pid = fork()
     if pid < 0:
+      discard sigprocmask(SIG_SETMASK, previousMask, blocked)
       discard close(sfd); discard close(fds[0]); discard close(fds[1])
       removeFile(streamPath)
       execReal(real, original)
     if pid == 0:
+      when defined(linux):
+        # If the shim is killed without a chance to forward anything, cargo
+        # must not outlive it, as bare cargo would not outlive its own kill.
+        discard prctl(1, SIGKILL) # PR_SET_PDEATHSIG
+      discard sigprocmask(SIG_SETMASK, previousMask, blocked)
       discard dup2(fds[1], 1)
       discard close(fds[0]); discard close(fds[1]); discard close(sfd)
       discard execv(real.cstring, argv)
       underscoreExit(127)
     gChild = pid
+    discard sigprocmask(SIG_SETMASK, previousMask, blocked)
     var ignore: Sigaction
     ignore.sa_handler = SIG_IGN
     discard sigemptyset(ignore.sa_mask)
@@ -472,7 +519,7 @@ proc runShim*(args: seq[string]): int =
       return 127
     if getEnv(ShimActiveVar).len > 0 or recordingDisabled(getEnv(RecordVar)):
       execReal(real, args)
-    let plan = planShim(args, isatty(1) != 0)
+    let plan = planShim(args, isatty(1) != 0, sameOpenFile(1, 2))
     if plan.mode == smPassThrough:
       execReal(real, args)
     var targetDir = targetFromEnvironment(plan.chdir, plan.targetDirFlag,
