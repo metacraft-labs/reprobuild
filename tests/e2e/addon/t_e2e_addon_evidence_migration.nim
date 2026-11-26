@@ -1,7 +1,9 @@
-## Add-on VM gate: a host an engine before §13 decision 181 bootstrapped is
-## migrated by an operator's apply with this engine (ReproOS Add-On Mode
-## spec §13 decisions 181 and 188, as amended by the owner's decision of
-## 2026-11-26, "migrate existing hosts"; A11 round 26, Medium 2).
+## Add-on VM gate: a host an engine before §13 decision 181 (the shipping
+## unit's dynamic user) bootstrapped is migrated by an operator's apply
+## with this engine (ReproOS Add-On Mode spec §13 decisions 181, the
+## shipping unit's dynamic user, and 188, the egress drop directory, as
+## amended by the owner's decision of 2026-11-26, "migrate existing hosts";
+## A11 round 26, Medium 2).
 ##
 ## On each base:
 ##
