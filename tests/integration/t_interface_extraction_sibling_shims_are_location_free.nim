@@ -116,8 +116,12 @@ suite "interface extraction sibling shims are location-free":
       checkpoint("missing " & reproBin & "; run `just build` first")
       fail()
     else:
-      # A short root: the provider compile's argv is part of its key.
-      let tempRoot = "/tmp/rb-locfree-" & $getCurrentProcessId()
+      # A short root: the provider compile's argv is part of its key. Under
+      # the host's temp dir rather than a literal `/tmp`: this file runs on
+      # every OS, and on Windows `/tmp` is a drive-relative path that does
+      # not exist; a short name under `getTempDir()` keeps the root short,
+      # and honours the `TMPDIR` the test runner points at its scratch.
+      let tempRoot = getTempDir() / ("rb-locfree-" & $getCurrentProcessId())
       # Everything a build writes lies OUTSIDE `tempRoot`, which is an
       # ancestor of both workspaces: the compiles observe its listing, so an
       # entry appearing there between builds would be a new computation.

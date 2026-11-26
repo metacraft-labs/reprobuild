@@ -102,8 +102,12 @@ suite "recipe compiles keep one output directory per computation":
       checkpoint("missing " & reproBin & "; run `just build` first")
       fail()
     else:
-      # A short root: the provider compile's argv is part of its key.
-      let tempRoot = "/tmp/rb-percomp-" & $getCurrentProcessId()
+      # A short root: the provider compile's argv is part of its key. Under
+      # the host's temp dir rather than a literal `/tmp`: this file runs on
+      # every OS, and on Windows `/tmp` is a drive-relative path that does
+      # not exist; a short name under `getTempDir()` keeps the root short,
+      # and honours the `TMPDIR` the test runner points at its scratch.
+      let tempRoot = getTempDir() / ("rb-percomp-" & $getCurrentProcessId())
       removeDir(tempRoot)
       createDir(tempRoot)
       defer: removeDir(tempRoot)

@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 36,
-    "nimTestBinaries": 3312,
+    "nimTestBinaries": 3313,
     "pureUnitConsolidationGroups": 97,
     "pureUnitTests": 856,
     "staticallyDetectedRuntimeCompilerFlowTests": 165,
-    "testEntries": 3371
+    "testEntries": 3372
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1873,7 +1873,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 30,
-      "integration": 1882,
+      "integration": 1883,
       "platform/destructive": 206,
       "pure unit": 856,
       "unclassified": 397
@@ -2096,9 +2096,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 3312,
+    "nimTestBinaryCount": 3313,
     "pythonTestFileCount": 59,
-    "testEntryCount": 3371
+    "testEntryCount": 3372
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -45777,6 +45777,21 @@
       "owner": "tests/integration",
       "requiresReproBinary": true,
       "source": "tests/integration/t_an_unresolvable_membership_is_not_read_as_no_overrides.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_any_os_fixture_roots_follow_the_hosts_temp_dir",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [],
+      "owner": "tests/integration",
+      "requiresReproBinary": false,
+      "source": "tests/integration/t_any_os_fixture_roots_follow_the_hosts_temp_dir.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
       "staticallyDetectedRuntimeCompilerFlow": false,
