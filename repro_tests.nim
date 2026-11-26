@@ -2041,6 +2041,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "",
     singleReason: "module-level statement runs at every start-up: let TmpDir = absolutePath("),
   TestSpec(
+    source: "libs/repro_build_engine/tests/t_an_interrupted_build_stops_its_running_actions.nim",
+    binary: "build/test-bin/t_an_interrupted_build_stops_its_running_actions",
+    defines: @[],
+    requiresReproBinary: true,
+    requiresMonitorShim: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "",
+    singleReason: "self-spawn marker getAppFilename"),
+  TestSpec(
     source: "libs/repro_build_engine/tests/t_an_output_that_embeds_a_checkout_path_is_found_through_compression.nim",
     binary: "build/test-bin/t_an_output_that_embeds_a_checkout_path_is_found_through_compression",
     defines: @[],
