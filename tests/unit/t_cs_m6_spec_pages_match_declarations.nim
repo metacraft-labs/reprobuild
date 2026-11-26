@@ -235,7 +235,8 @@ const
     "repro tool", "repro tool realize",
     # Declared after `repro tool`; in the generator's order, which the
     # fixture's rows follow (`scripts/generate_cli_contract_fixture.py`).
-    "repro nimble check"]
+    "repro nimble check", "repro nimble develop",
+    "repro nimble gitlink-audit"]
     ## The commands whose flags and environment variables are compared:
     ## every command repro declares.
   SpecifiedNotImplemented = [

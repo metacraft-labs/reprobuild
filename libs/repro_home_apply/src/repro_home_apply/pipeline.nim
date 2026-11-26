@@ -2240,7 +2240,12 @@ proc classifyPackages*(references: seq[PlannedPackage];
 proc refuseClassificationDisagreement(opts: ApplyOptions; plan: ApplyPlan;
                                       previews: seq[PackagePreview];
                                       applied: AppliedConcerns;
-                                      catalog: ProfileCatalog) =
+                                      catalog: ProfileCatalog;
+                                      only: HashSet[string] =
+                                        initHashSet[string]()) =
+  ## ``only``, when not empty, limits the check to those package ids (an
+  ## adopt checks just the packages it claims); ``previews`` stays the full,
+  ## plan-ordered list, because it is indexed with ``plan.packages``.
   ## On a host whose declaration gives `packages` and `applications` to
   ## different sides, the Nix side reads which package is an application
   ## from the export (`classifyPackages`, made without the host-local lock
@@ -2256,6 +2261,8 @@ proc refuseClassificationDisagreement(opts: ApplyOptions; plan: ApplyPlan;
     opts.targetContext.platform, opts.targetContext.arch, catalog)
   var problems: seq[string]
   for i, pp in previews:
+    if only.len > 0 and pp.packageId notin only:
+      continue
     let key = packageClassificationKey(plan.packages[i].packageId,
       plan.packages[i].requestedVersion)
     let here = packageConcern(pp)
@@ -3147,8 +3154,10 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
       if adoptOnly: packagePreviews.filterIt(it.packageId in adoptedIds)
       else: packagePreviews
     # GM7: see `refuseClassificationDisagreement` (`runApplyPlan`).
-    refuseClassificationDisagreement(opts, applyPlan, checkedPreviews,
-      applied, catalog)
+    if not adoptOnly or adoptedIds.len > 0:
+      refuseClassificationDisagreement(opts, applyPlan, packagePreviews,
+        applied, catalog,
+        if adoptOnly: adoptedIds else: initHashSet[string]())
     # A package of an applied concern with no realization is refused HERE,
     # before the store is opened (which a first apply creates), the no-op
     # check, the marker, the generation directory and step 7 -- from the
