@@ -421,6 +421,7 @@ package shimLoaderInertProbe:
 
   uses:
     "sh"
+    "mkdir"
 
   build:
     let probe = shell(

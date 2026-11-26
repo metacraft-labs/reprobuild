@@ -92,6 +92,13 @@ package qt6QuickControls2Source:
 
   uses:
     "sh"
+    # The programs this package's shell action and the scripts it runs
+    # invoke. A shell edge runs on a hermetic PATH made only of its
+    # package's declared tools, so each one must be named here
+    # (Hermetic-Builds-And-Path-Independence.md §"Shell edges declare
+    # their package's tools").
+    "mkdir"
+    "cp"
 
   buildDeps:
     "qt6-declarative >=6.6"

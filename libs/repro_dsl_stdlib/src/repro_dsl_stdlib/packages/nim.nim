@@ -45,7 +45,9 @@ import repro_dsl_stdlib/active_context
 import repro_dsl_stdlib/operations/zig_c
 from repro_core/scratch_env import ScratchLocationEnvNames
 from repro_core/nimble_path_env import NimblePathDirsEnvVar,
-  decodeNimblePathDirs
+  decodeNimblePathDirs, NimDevelopSiblingsEnvVar, decodeNimDevelopSiblings,
+  decodeNimDevelopSiblingNotes, NimDevelopLockedEnvVar
+import repro_nimble_reader
 
 var reproNimPathsEnabled {.threadvar.}: bool
 var reproConfigNimsFile {.threadvar.}: string
@@ -1064,21 +1066,59 @@ proc resolveNimPackagePaths(): seq[string] =
           seenPaths.incl(pkgExt.srcDir)
           result.add(pkgExt.srcDir)
 
-  # Check physical sibling directories next to the current project
+  # The workspace siblings a develop override records for a dependency
+  # that is not a Nimble catalog package. The CLI hands them over
+  # (``NimDevelopSiblingsEnvVar``); a `nimble:` package's override it
+  # applies itself, in the catalog roots ``nimRepropathsConfig`` appends.
+  # A sibling's source directory is read from its `.nimble` by the static
+  # reader (`srcDir`, Nimble's `realDir`); a sibling whose `.nimble` cannot
+  # be read that way contributes its `src`, else its root, as an
+  # unrecorded sibling does below.
+  proc srcElseRoot(siblingDir: string): string {.nimcall.} =
+    if dirExists(siblingDir / "src"): siblingDir / "src" else: siblingDir
+  template addPath(dir: string) =
+    let spelled = dir.replace('\\', '/')
+    if not seenPaths.contains(spelled):
+      seenPaths.incl(spelled)
+      result.add(spelled)
+  # A `--locked` build puts no working tree of a sibling here
+  # (Workspace-And-Develop-Mode.md §"A locked build sets aside every develop
+  # override"): the compile receives each locked dependency's tree through
+  # the producer channel, never a checkout's working tree.
+  #
+  # Both variables shape the graph, and the engine hands them over in this
+  # process's environment: each is reported as an evaluation input, so a
+  # cached provider graph is not served once either changes (an override
+  # recorded, dropped or applied in a `--locked` build changes only them).
+  providerEnvironmentInput(NimDevelopLockedEnvVar)
+  if getEnv(NimDevelopLockedEnvVar) == "1":
+    return
+  providerEnvironmentInput(NimDevelopSiblingsEnvVar)
+  var recorded = initHashSet[string]()
+  for (name, siblingDir) in decodeNimDevelopSiblings(
+      getEnv(NimDevelopSiblingsEnvVar)):
+    if name.startsWith("nimble:") or name notin depNames or
+        not dirExists(siblingDir):
+      continue
+    recorded.incl(name)
+    let reading = readPackageDir(siblingDir)
+    if reading.kind == prRead: providerFileInput(reading.nimbleFile)
+    addPath(
+      if reading.kind == prRead: sourceDir(reading.file, siblingDir)
+      else: srcElseRoot(siblingDir))
+
+  # Physical sibling directories next to the current project, matched by
+  # the dependency's name: a Reprobuild workspace package. A `nimble:`
+  # catalog package is never matched this way (Nimble-Package-Catalog
+  # NPC-AREQ27): its line is the lock's store tree, or the sibling a
+  # recorded override names, matched by origin identity.
   let parent = getCurrentDir().parentDir()
   for dep in depNames:
+    if dep.startsWith("nimble:") or dep in recorded:
+      continue
     let siblingDir = parent / dep
     if dirExists(siblingDir):
-      let srcDir = (siblingDir / "src").replace('\\', '/')
-      if dirExists(srcDir):
-        if not seenPaths.contains(srcDir):
-          seenPaths.incl(srcDir)
-          result.add(srcDir)
-      else:
-        let rootDir = siblingDir.replace('\\', '/')
-        if not seenPaths.contains(rootDir):
-          seenPaths.incl(rootDir)
-          result.add(rootDir)
+      addPath(srcElseRoot(siblingDir))
 
 proc nimRepropathsConfig*(pkg: NimPackage;
                            reproPathsFile = "repro.paths";
@@ -1098,9 +1138,34 @@ proc nimRepropathsConfig*(pkg: NimPackage;
   # resolved them. The lines differ between two hosts only in the store's
   # prefix. A path under `$HOME/.nimble` never appears: only store trees
   # do.
+  #
+  # A catalog package a develop sibling overrides (NPC-AREQ27) arrives as
+  # the sibling's source directory in its place; the file says so, with
+  # the sibling read through its `.nimble` as the CLI read it.
+  #
+  # The line before such a package's line says which override put it there
+  # (Nim-Package-Path-Handling.md § 5): `# develop override of nimble:<name>:
+  # <dir> (declared repo <repo>)` or `(recorded override)`.
+  #
+  # The roots and the overrides come in this process's environment: each
+  # variable is reported as an evaluation input (as is each overriding
+  # checkout's `.nimble`), so a cached provider graph whose `repro.paths`
+  # names other roots or another override is never served.
+  providerEnvironmentInput(NimblePathDirsEnvVar)
+  providerEnvironmentInput(NimDevelopSiblingsEnvVar)
+  var developed = initTable[string, string]()
+  for s in decodeNimDevelopSiblingNotes(getEnv(NimDevelopSiblingsEnvVar)):
+    if not s.name.startsWith("nimble:"): continue
+    let reading = readPackageDir(s.dir)
+    if reading.kind == prRead:
+      providerFileInput(reading.nimbleFile)
+      developed[sourceDir(reading.file, s.dir).replace('\\', '/')] =
+        s.name & ": " & (if s.note.len > 0: s.note else: s.dir)
   for p in decodeNimblePathDirs(getEnv(NimblePathDirsEnvVar)):
     let spelled = p.replace('\\', '/')
     if spelled notin paths:
+      if spelled in developed:
+        lines.add("# develop override of " & developed[spelled])
       lines.add("switch(\"path\", \"" & spelled & "\")")
   let pathsContent = lines.join("\n") & "\n"
   

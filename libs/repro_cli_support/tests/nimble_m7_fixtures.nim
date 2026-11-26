@@ -145,6 +145,7 @@ package app:
     "nim"
     "gcc"
     "sh"
+    "mkdir"
 $USES
   build:
     discard nim.c(

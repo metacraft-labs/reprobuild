@@ -1472,6 +1472,18 @@ type
       ## name going forward; ``uses:`` is kept as a synonym until the
       ## M9.R.5 recipe sweep renames the existing 84 recipes onto the
       ## new spelling. Accessor: ``registeredBuildDeps(packageName)``.
+    generatedDeps*: seq[string]
+      ## MACRO-TIME ONLY, like ``packageSources`` below: the dependency
+      ## entries the ``package`` macro itself added to ``toolUses`` /
+      ## ``nativeBuildDeps`` (the Qt6 transitive and ``cross_zig`` shell-tool
+      ## injections) rather than the recipe author, each as
+      ## ``<kind> & '\x00' & <rawConstraint>`` with ``<kind>`` the
+      ## ``registerPackageDep`` kind (``"build"`` / ``"native"``). The
+      ## dep-registration emission registers these through
+      ## ``registerGeneratedToolDep`` so every reader still sees them while
+      ## nothing reads them as a statement about the recipe -- in
+      ## particular a ``shell(...)`` edge does not take them as its
+      ## package's tools (``packageShellToolRefs``). Not serialized.
     packageSources*: seq[PackageSourceDecl]
       ## M5 SELF-HOST — the declared SOURCE PROVENANCE of depended-on
       ## packages, from the package body's ``packageSource <name>,
@@ -1869,6 +1881,25 @@ type
       ## Constructor-generated actions populate this list so native tools
       ## retain PATH priority while target dependency headers and libraries
       ## can precede a native toolchain's transitive sysroot.
+    packageToolIdentityRefs*: seq[string]
+      ## Tool references the edge takes from its PACKAGE's declaration
+      ## rather than naming itself: a ``shell(...)`` edge's package
+      ## ``uses:`` / ``nativeBuildDeps:`` entries
+      ## (Hermetic-Builds-And-Path-Independence.md §"Shell edges declare
+      ## their package's tools"). Kept apart from ``toolIdentityRefs``
+      ## because one class of selector must NOT follow from the package
+      ## list: a cross-repo producer is admitted per edge, from the refs the
+      ## edge names, "not from ``uses:``" (Cross-Repo-Source-Consumption.md
+      ## §4.2b.3), so that building one target never builds an unrelated
+      ## target's sibling. Only the CLI knows which selectors are producers
+      ## (develop overrides, the lock), so it merges these into the edge's
+      ## refs when it lowers the action, minus every producer selector
+      ## (``withPackageToolIdentityRefs``). Payload codec v39+.
+    packageToolIdentityRefKinds*: seq[ToolIdentityRefKind]
+      ## Platform role parallel to ``packageToolIdentityRefs``: native for
+      ## a ``nativeBuildDeps:`` entry, build for a ``uses:`` entry -- the
+      ## classification ``classifyRegisteredActionToolIdentityRefs`` gives
+      ## the same lists on a constructor's edges. Payload codec v39+.
     requiresElevation*: bool
       ## Windows-System-Resources Phase E: marks an action edge as
       ## one whose execution must cross the privileged-operation

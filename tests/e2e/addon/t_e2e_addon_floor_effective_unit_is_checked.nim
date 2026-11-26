@@ -47,6 +47,11 @@
 ## - ``REPRO_ADDON_MUTATION=floor-static-r3-disabled`` (the parse-time half
 ##   off): the effective check alone must refuse every case, each refusal
 ##   naming ``EAddOnFloorNotEffective`` and the case's own rule -- green;
+## - ``REPRO_ADDON_MUTATION=effective-check-skipped`` (the effective half
+##   off, the parse half on) and ``activators-unchecked`` (the effective
+##   check skips the units' activators): red on the cases only the
+##   effective half sees -- the host drop-ins, and the host's ``Mark=`` on
+##   the profile's own socket (A9 review round 23);
 ## - ``REPRO_ADDON_MUTATION=floor-unchecked`` (both halves off): every case
 ##   must start (a case refused for another reason is a failed step), so
 ##   each case's "refused, never started" step is red -- red, case by case.
@@ -122,6 +127,7 @@ proc hostDropIn(dir, content: string): string =
     "' > " & dir & "/host.conf"
 
 const HostCleanup = "rm -rf /etc/systemd/system/a9e-*.service.d/host.conf " &
+  "/etc/systemd/system/a9e-*.socket.d/host.conf " &
   "/usr/lib/systemd/system/a9e-*.service.d " &
   "/usr/lib/systemd/system/service.d/zz-a9e.conf /run/a9e-exist; systemctl daemon-reload"
 
@@ -249,6 +255,17 @@ proc cases(binary, prefix: string): seq[Case] =
          activatorOnly: true,
          extra: "systemd.systemUnit {\n  name = \"a9e-mark.socket\"\n" &
                 "  content = \"[Socket]\nListenStream=127.0.0.1:18091\nMark=1\n\n" &
+                "[Install]\nWantedBy=sockets.target\n\"\n  enabled = true\n}\n"),
+    # The same option put on the profile's own activator by a host drop-in
+    # (A9 review round 23): the parse half cannot see it, so only the
+    # effective check of the unit's activators refuses it -- the case of
+    # ``activators-unchecked``.
+    Case(name: "a9e-hostmark.service", rule: "foreign-drop-in+socket-option", service: "",
+         activatorOnly: true,
+         host: "mkdir -p " & etc & "a9e-hostmark.socket.d && printf " &
+               "'[Socket]\\nMark=1\\n' > " & etc & "a9e-hostmark.socket.d/host.conf",
+         extra: "systemd.systemUnit {\n  name = \"a9e-hostmark.socket\"\n" &
+                "  content = \"[Socket]\nListenStream=127.0.0.1:18092\n\n" &
                 "[Install]\nWantedBy=sockets.target\n\"\n  enabled = true\n}\n"),
     # §13 decision 55: Conflicts= naming a unit the profile does not define
     # (a base service that is harmless to stop, if a build lets it through).
