@@ -15021,8 +15021,8 @@
       "owner": "libs/repro_cargo_edge",
       "requiresReproBinary": false,
       "source": "libs/repro_cargo_edge/tests/t_record_mode.nim",
-      "sourceSuiteCount": 3,
-      "staticCaseCount": 17,
+      "sourceSuiteCount": 4,
+      "staticCaseCount": 24,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -59412,7 +59412,7 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_rqe_cg5_record_mode_compiles_nothing.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 1,
+      "staticCaseCount": 3,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

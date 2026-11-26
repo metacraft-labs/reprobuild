@@ -5,9 +5,10 @@
 ##
 ## The record run itself (real cargo, the real wrapper and stub) is the
 ## integration case `tests/integration/t_rqe_cg5_record_mode_compiles_nothing`.
-## No mocks: these are functions of strings and JSON.
+## No mocks: these are functions of strings and JSON, and of small files
+## and a symbolic link in a temporary directory.
 
-import std/[json, os, strutils, unittest]
+import std/[json, os, strutils, tempfiles, unittest]
 import repro_cargo_edge/record_mode
 
 proc testRoots(): seq[RecordRoot] =
@@ -58,6 +59,76 @@ suite "recorded paths are written against logical roots":
     expect RecordModeError: discard parseRecordRoots("pro ject=/w")
     expect RecordModeError: discard parseRecordRoots("project=relative/dir")
     check parseRecordRoots("").len == 0
+
+  test "a root glued to a flag or a prefix is found":
+    let roots = testRoots()
+    check logicalize(roots, "-L/w/app/lib") == "-L${project}/lib"
+    check logicalize(roots, "-Lnative=/w/app/lib") == "-Lnative=${project}/lib"
+    check logicalize(roots, "@/w/app/args") == "@${project}/args"
+    check logicalize(roots, "file:///w/app/x") == "file://${project}/x"
+    # Inside another path it is still not a root.
+    check logicalize(roots, "-L/x/w/app/lib") == "-L/x/w/app/lib"
+
+  test "whatever the rewriting leaves is refused, as a substring":
+    let roots = testRoots()
+    checkNoRootLeft(roots, logicalize(roots, "-L/w/app/lib:/nix/store/a"))
+    expect RecordModeError: checkNoRootLeft(roots, "x/w/app/y")
+    expect RecordModeError:
+      checkNoRootLeft(roots, logicalize(roots, "/x/w/app/lib"))
+    # Sharing a root's prefix is refused too: the check fails closed.
+    expect RecordModeError:
+      checkNoRootLeft(roots, logicalize(roots, "/w/appx"))
+
+  test "a root is also found under its resolved spelling":
+    let base = createTempDir("record-roots-", "")
+    defer: removeDir(base)
+    createDir(base / "real")
+    createSymlink(base / "real", base / "link")
+    let roots = withResolvedSpellings(parseRecordRoots(
+      "project=" & base / "link"))
+    let real = expandFilename(base / "real")
+    check logicalize(roots, real / "src/lib.rs") == "${project}/src/lib.rs"
+    check logicalize(roots, base / "link" / "a") == "${project}/a"
+    # It expands to the spelling the caller gave.
+    check expandRecorded(roots, "${project}/a") == base / "link" / "a"
+    expect RecordModeError: checkNoRootLeft(roots, real)
+
+suite "which lines record mode passes to the real rustc":
+
+  test "only a positive probe passes; any line naming a crate is recorded":
+    check recordLineKind(["-vV"]) == rlProbe
+    check recordLineKind(["--version"]) == rlProbe
+    check recordLineKind(["--print", "sysroot"]) == rlProbe
+    check recordLineKind(["-", "--crate-name", "___", "--print=file-names",
+      "--crate-type", "bin"]) == rlProbe
+    check recordLineKind(["--crate-name", "a", "-"]) == rlProbe
+    check recordLineKind(["--crate-name", "a", "--error-format=json",
+      "src/lib.rs"]) == rlUnit
+    # A flag a project adds to every unit does not make it a probe.
+    check recordLineKind(["--crate-name", "a", "--error-format=json",
+      "--print=native-static-libs", "src/lib.rs"]) == rlUnit
+    # Nor does the absence of cargo's JSON diagnostics.
+    check recordLineKind(["--crate-name=a", "src/lib.rs"]) == rlUnit
+
+  test "argument files are expanded, one argument per line":
+    let dir = createTempDir("record-args-", "")
+    defer: removeDir(dir)
+    writeFile(dir / "args", "--crate-name\nfrom_file\n--cfg=a b\r\n\n--x\n")
+    let expanded = expandArgFiles(["--edition=2021", "@" & dir / "args"])
+    check expanded == @["--edition=2021", "--crate-name", "from_file",
+      "--cfg=a b", "", "--x"]
+    check recordLineKind(expandArgFiles(["@" & dir / "args"])) == rlUnit
+    expect RecordModeError: discard expandArgFiles(["@" & dir / "missing"])
+    expect RecordModeError: discard expandArgFiles(["@shell:" & dir / "args"])
+
+  test "the record run's own variables are not recorded":
+    check recordedEnvSkipped(RecordDirEnv)
+    check recordedEnvSkipped(RecordRootsEnv)
+    check recordedEnvSkipped(RecordMetadataEnv)
+    check recordedEnvSkipped("RUNQUOTA_PARENT_LEASE")
+    check recordedEnvSkipped("RUNQUOTA_SOCKET")
+    check not recordedEnvSkipped("CARGO_PKG_NAME")
+    check not recordedEnvSkipped("REPRO_RUSTC_WRAPPER_INNER")
 
 suite "a compile unit's placeholders are the files rustc would write":
 
@@ -180,6 +251,24 @@ suite "the build-script stub's sentinels":
     check not app.hasBenches
     expect RecordModeError:
       discard packageTargetsOf(metadata, "/w/missing/Cargo.toml")
+
+  test "malformed cargo metadata is an error, not a crash":
+    for bad in [
+        """{"packages": [{"name": "a", "version": "1", "source": null,
+           "manifest_path": "/w/a/Cargo.toml"}]}""",
+        """{"packages": [{"name": "a", "version": "1", "source": null,
+           "manifest_path": "/w/a/Cargo.toml", "targets": [{"name": "a"}]}]}""",
+        """{"packages": [{"name": "a", "version": "1", "source": null,
+           "manifest_path": "/w/a/Cargo.toml",
+           "targets": [{"name": "a", "kind": "bin"}]}]}""",
+        """{"packages": [{"version": "1", "source": null,
+           "manifest_path": "/w/a/Cargo.toml", "targets": []}]}""",
+        """{"packages": [7, {"name": "a", "version": "1", "source": null,
+           "manifest_path": "/w/a/Cargo.toml", "targets": [3]}]}""",
+        """{"packages": {}}"""]:
+      checkpoint bad
+      expect RecordModeError:
+        discard packageTargetsOf(parseJson(bad), "/w/a/Cargo.toml")
 
   test "a stub is recognised by a build script's name":
     check isStubImage(["/t/debug/build/a-1/build-script-build"])

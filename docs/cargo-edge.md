@@ -77,17 +77,28 @@ build-script run (`--unit-graph` is unstable and carries no command lines;
 `--build-plan` was removed). The wrapper's **record mode** learns them by
 letting cargo run its whole schedule while every step does nothing but record
 what cargo asked for. It is switched on by `REPRO_RUSTC_WRAPPER_RECORD`, set to
-the directory the recordings go into; it is independent of
-`REPRO_RUSTC_WRAPPER`, and it never takes a sub-lease or starts a
-measurement, because nothing is compiled.
+the absolute path of the directory the recordings go into (a build-script stub
+runs in its package's directory, so a relative path is refused). The directory
+should be empty when the run starts; the wrapper cannot tell where a run
+starts, so that is the caller's check. Record mode is independent of
+`REPRO_RUSTC_WRAPPER`, and it never connects to the resource manager, takes no
+sub-lease and starts no measurement, because nothing is compiled. It is
+refused on Windows until drive-letter paths are rewritten against the roots.
 
 - **A compile unit is recorded and not run.** The wrapper writes an empty file
   for each output the unit's `--emit` asks for, with the names `rustc` would
   have used (under `--out-dir`, with `-C extra-filename`), and exits 0. Cargo
   finds the files it expects and starts the dependents.
-- **Probes pass through.** `rustc -vV`, `--print …` and cargo's target-info
-  call run the real compiler: they compile nothing, and cargo needs their
-  answers (a build script's `TARGET`, `HOST` and `CARGO_CFG_*` come from them).
+- **Only probes pass through.** A line runs the real compiler only when it is
+  positively a probe: it names no crate (`rustc -vV`, `--version`,
+  `--print sysroot`), it is cargo's target-info call (crate `___`), or it
+  reads its source from standard input. Cargo needs their answers (a build
+  script's `TARGET`, `HOST` and `CARGO_CFG_*` come from them). Any other line
+  that names a crate is recorded, even one that carries `--print` (a
+  project's `build.rustflags` can add `--print=native-static-libs` to every
+  unit) or lacks cargo's `--error-format=json`. `@path` argument files are
+  expanded before a line is classified, and the expanded arguments are what
+  is recorded.
 - **A build script is replaced by a recording stub.** For a build script's
   compile the wrapper writes a copy of itself as the executable. When cargo
   runs it, it records the argv, working directory and environment cargo gave
@@ -104,11 +115,20 @@ measurement, because nothing is compiled.
   the output of `cargo metadata --offline --format-version 1`, saved to the
   file `REPRO_RUSTC_WRAPPER_RECORD_METADATA` names, because cargo refuses a
   `rustc-link-arg-bin` for a binary the package does not have.
-- **Paths are recorded against logical roots.** `REPRO_RUSTC_WRAPPER_RECORD_ROOTS`
-  holds `<label>=<absolute path>` lines (the checkout, the store, the scratch
-  target directory). A path under one of them is written as `${<label>}` and
-  the rest of the path, and a literal `$` as `$$`, so a recording names no
-  physical path of the machine that made it.
+- **Paths are recorded against the declared logical roots.**
+  `REPRO_RUSTC_WRAPPER_RECORD_ROOTS` holds `<label>=<absolute path>` lines
+  (the checkout, the store, the scratch target directory). A path under one of
+  them, in its given or its resolved spelling, is written as `${<label>}` and
+  the rest of the path, and a literal `$` as `$$`. Only the declared roots are
+  rewritten: the home directory, `TMPDIR` and `PATH` entries outside them stay
+  physical, and which variables the record run sees at all is up to its
+  caller. The rewriting fails closed: a recording in which any spelling of a
+  root is still present anywhere is refused, and so is a `links` provider in
+  a path member outside every root.
+- **The record run's own variables are not recorded.** The three
+  `REPRO_RUSTC_WRAPPER_RECORD*` variables and every `RUNQUOTA_*` variable
+  describe the record run (its directory, its lease, its session), not the
+  build, and would make every recording differ from the last.
 
 Each recorded process writes one JSON file (`"format": "repro-rustc-record-v1"`)
 with its `kind` (`unit` or `build-script-run`), `argv`, `cwd` and `env`; a unit

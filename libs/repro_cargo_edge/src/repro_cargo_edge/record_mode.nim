@@ -16,10 +16,20 @@
 ##   dependents. Output naming follows rustc's documented rules:
 ##   https://doc.rust-lang.org/rustc/command-line-arguments.html#--emit-specifies-the-types-of-output-files-to-generate
 ##   and https://doc.rust-lang.org/reference/linkage.html.
-## - A PROBE (`rustc -vV`, `--print ...`, cargo's target-info call) passes
-##   through to the real rustc: it compiles nothing, and cargo needs its
-##   answers (they become the build scripts' `TARGET`, `HOST` and
-##   `CARGO_CFG_*`).
+## - A PROBE passes through to the real rustc: it compiles nothing, and
+##   cargo needs its answers (they become the build scripts' `TARGET`,
+##   `HOST` and `CARGO_CFG_*`). Only a line that is POSITIVELY a probe passes
+##   (`recordLineKind`): one that names no crate (`rustc -vV`, `--version`,
+##   `--print sysroot`), cargo's target-info call (crate `___`), or one that
+##   reads its source from standard input (`-`). Every other line that names
+##   a crate is recorded, even one carrying `--print` (a project's
+##   `build.rustflags` can add `--print=native-static-libs` to every unit) or
+##   lacking `--error-format=json`: passing such a line through would compile
+##   it for real, record nothing and still let cargo succeed. `@path`
+##   arguments (rustc reads one argument per line from the file:
+##   https://doc.rust-lang.org/rustc/command-line-arguments.html#path-load-command-line-flags-from-a-path)
+##   are expanded before the line is classified, and the expanded argv is
+##   what is recorded.
 ## - A BUILD-SCRIPT COMPILE (a `bin` unit named `build_script_<stem>` whose
 ##   output directory is under cargo's `build/`) writes, as that unit's
 ##   executable, a copy of the wrapper's own image. When cargo runs it, the
@@ -54,15 +64,40 @@
 ##
 ## WHAT IS RECORDED, AND WHERE. Each recorded process writes one JSON file
 ## (`RecordFormat`) into the directory the switch names. Every path under a
-## logical root the caller declares (the checkout, the store, the scratch
+## logical root the caller DECLARES (the checkout, the store, the scratch
 ## target directory) is written as `${<label>}` followed by the rest of the
-## path, and a literal `$` as `$$`, so a recording names no physical path of
-## the host that made it and can be expanded on another (`expandRecorded`).
+## path, and a literal `$` as `$$`; `expandRecorded` gives it back. Only the
+## declared roots are rewritten: a path under none of them (the home
+## directory, `TMPDIR`, a `PATH` entry outside the store) stays physical, and
+## keeping such values out of the record run is the caller's environment
+## policy. Each root is registered under both its given spelling and its
+## resolved one (`withResolvedSpellings`), because cargo's paths come from
+## `getcwd`, which returns the resolved directory (on macOS `/var/folders`
+## is `/private/var/folders`). Rewriting FAILS CLOSED: a recording in which
+## any spelling of a declared root is still present anywhere, as a substring,
+## is refused and the process exits 1 (`checkNoRootLeft`).
 ##
-## THE SWITCH. `REPRO_RUSTC_WRAPPER_RECORD`, set to the record directory. It
-## is separate from `REPRO_RUSTC_WRAPPER` (which installs the measuring
-## wrapper), and in record mode the wrapper never connects to RunQuota, takes
-## no sub-lease and starts no measurement: there is no compile to measure.
+## The record mode's own control variables and every `RUNQUOTA_*` variable
+## are left out of the recorded environment (`recordedEnvSkipped`): they
+## describe this record run (its directory, its lease and session), not the
+## build, and keeping them would change the plan on every run.
+##
+## THE SWITCH. `REPRO_RUSTC_WRAPPER_RECORD`, set to the record directory, an
+## absolute path (a build-script stub runs in its package's directory, so a
+## relative one would scatter the recordings). It is separate from
+## `REPRO_RUSTC_WRAPPER` (which installs the measuring wrapper), and in
+## record mode the wrapper never connects to RunQuota, takes no sub-lease and
+## starts no measurement: there is no compile to measure. The directory
+## should be empty when the record run starts; the wrapper cannot see where
+## a run starts (each process is on its own), so that is the caller's check.
+## Record mode is refused on Windows until drive-letter paths are rewritten
+## against the roots.
+##
+## NOT MODELLED (yet). With no `--target`, placeholder names follow the
+## system the wrapper was built for, not rustc's host. The `.pdb`, `.dll.lib`
+## and `.dSYM` side outputs, and emscripten and UEFI output names, are not
+## written. A build-script compile is recognised by cargo's
+## `build/<package>-<hash>/` layout of the target directory.
 ##
 ## This module holds the pure parts (output naming, path rewriting, the
 ## sentinel lines) and the two record-mode entry points the wrapper calls.
@@ -97,6 +132,13 @@ type
   RecordRoot* = object
     label*: string
     path*: string   ## Absolute physical path, without a trailing separator.
+    resolved*: bool
+      ## An extra spelling added by `withResolvedSpellings` (the root's
+      ## resolved path); `expandRecorded` expands to the given spelling.
+
+  RecordLineKind* = enum
+    rlProbe   ## Passes through to the real rustc.
+    rlUnit    ## Recorded, not run.
 
   RecordKind* = enum
     rkUnit = "unit"                      ## A rustc compile, not run.
@@ -175,13 +217,45 @@ proc parseRecordRoots*(text: string): seq[RecordRoot] =
 const PathNameChars = {'a'..'z', 'A'..'Z', '0'..'9', '_', '-', '.', '+',
                        '@', '~'}
 
+proc withResolvedSpellings*(roots: openArray[RecordRoot]): seq[RecordRoot] =
+  ## `roots` plus, for each root that exists and resolves (through symbolic
+  ## links) to another path, that path under the same label. Longest first.
+  result = @roots
+  for root in roots:
+    if root.resolved or not dirExists(root.path): continue
+    var real = ""
+    try:
+      real = expandFilename(root.path)
+    except OSError:
+      continue
+    if real.len > 0 and real != root.path:
+      result.add RecordRoot(label: root.label, path: real, resolved: true)
+  result.sort(proc (a, b: RecordRoot): int = cmp(b.path.len, a.path.len))
+
+proc rootMayStartAt(text: string; i: int): bool =
+  ## Whether a root may begin at `text[i]` (a `/`): at the start, after a
+  ## character that cannot continue a path (`=`, `:`, a space), after the
+  ## empty authority of a URL (`file:///root`), or glued to a flag or prefix
+  ## (`-L/root`, `@/root`, `-Lnative=/root`): a run of path characters that
+  ## holds no `/` and starts the string or follows a non-path character. Not
+  ## inside another path: in `/x/nix/store` the run before `/nix` (`x`)
+  ## follows a `/`, so `/nix/store` does not match there.
+  if i == 0: return true
+  let prev = text[i - 1]
+  if prev == '/':
+    return i >= 3 and text[i - 3 ..< i] == "://"
+  if prev notin PathNameChars: return true
+  var j = i - 1
+  while j >= 0 and text[j] in PathNameChars: dec j
+  j < 0 or text[j] != '/'
+
 proc logicalize*(roots: openArray[RecordRoot]; text: string): string =
   ## Rewrite every occurrence of a root inside `text` (an argument such as
-  ## `--extern a=/r/x.rlib`, a `PATH` list) to `${label}`, and escape a
-  ## literal `$` as `$$`. A root matches only as a whole path: not when the
-  ## character before it continues a path (`/x/nix/store` holds no
-  ## `/nix/store` root) or the one after it continues a file name
-  ## (`/r/projectx` is not under `/r/project`).
+  ## `--extern a=/r/x.rlib`, `-L/r/lib`, a `PATH` list) to `${label}`, and
+  ## escape a literal `$` as `$$`. A root matches only as a whole path: where
+  ## `rootMayStartAt` allows it to begin, and not when the character after it
+  ## continues a file name (`/r/projectx` is not under `/r/project`).
+  ## Whatever this leaves, `checkNoRootLeft` refuses.
   var i = 0
   while i < text.len:
     if text[i] == '$':
@@ -189,7 +263,7 @@ proc logicalize*(roots: openArray[RecordRoot]; text: string): string =
       inc i
       continue
     var matched = false
-    if text[i] == '/' and (i == 0 or text[i - 1] notin PathNameChars + {'/'}):
+    if text[i] == '/' and rootMayStartAt(text, i):
       for root in roots:
         let n = root.path.len
         if n > 0 and text.continuesWith(root.path, i) and
@@ -220,7 +294,7 @@ proc expandRecorded*(roots: openArray[RecordRoot]; text: string): string =
       let label = text[i + 2 ..< close]
       var found = false
       for root in roots:
-        if root.label == label:
+        if root.label == label and not root.resolved:
           result.add root.path
           found = true
           break
@@ -229,6 +303,69 @@ proc expandRecorded*(roots: openArray[RecordRoot]; text: string): string =
       i = close + 1
     else:
       raise newException(RecordModeError, "a lone '$' in a recording: " & text)
+
+proc checkNoRootLeft*(roots: openArray[RecordRoot]; recorded: string) =
+  ## Fail closed: raise when any spelling of a root is still present in a
+  ## recorded string. A plain substring test, not the boundary rules of
+  ## `logicalize`: it can refuse a string that only shares a root's prefix
+  ## (`/r/projectx` beside the root `/r/project`), which costs a refused
+  ## record run, but it cannot pass a physical root path in a form the
+  ## rewriting did not anticipate. A recorded string holds no `/` that
+  ## `${label}` or `$$` introduced, so the test sees only what was left.
+  for root in roots:
+    if root.path.len > 1 and root.path in recorded:
+      raise newException(RecordModeError, "the recording would name the " &
+        "physical path of root '" & root.label & "' (" & root.path &
+        "), which the rewriting did not reach: " & recorded)
+
+# ---------------------------------------------------------------------------
+# Which lines pass through.
+
+proc expandArgFiles*(args: openArray[string]): seq[string] =
+  ## rustc's `@path` arguments replaced by the file's lines, one argument
+  ## each (rustc reads the file the same way; a final newline ends the last
+  ## line and adds no argument). `@shell:path` (an unstable form with shell
+  ## quoting) is refused rather than read wrongly. Raises when a file cannot
+  ## be read.
+  for arg in args:
+    if arg.len > 1 and arg[0] == '@':
+      let path = arg[1 .. ^1]
+      if path.startsWith("shell:"):
+        raise newException(RecordModeError,
+          "an @shell: argument file is not supported in record mode: " & arg)
+      var content = ""
+      try:
+        content = readFile(path)
+      except IOError as err:
+        raise newException(RecordModeError,
+          "cannot read the argument file " & path & ": " & err.msg)
+      var lines = content.split('\n')
+      if content.endsWith("\n"): lines.setLen(lines.len - 1)
+      for line in lines:
+        result.add(if line.endsWith("\r"): line[0 ..< ^1] else: line)
+    else:
+      result.add arg
+
+proc recordLineKind*(args: openArray[string]): RecordLineKind =
+  ## How record mode treats a rustc line (its arguments, `@path` already
+  ## expanded). A probe only when it is positively one: no crate named
+  ## (`-vV`, `--version`, `--print sysroot`), cargo's target-info call (crate
+  ## `___`), or source from standard input (`-`). Anything else names a crate
+  ## and is recorded.
+  var crateName = ""
+  var i = 0
+  while i < args.len:
+    let arg = args[i]
+    if arg == "-":
+      return rlProbe
+    if arg == "--crate-name" and i + 1 < args.len:
+      crateName = args[i + 1]
+      i += 2
+      continue
+    if arg.startsWith("--crate-name="):
+      crateName = arg["--crate-name=".len .. ^1]
+    inc i
+  if crateName.len == 0 or crateName == "___": rlProbe else: rlUnit
 
 # ---------------------------------------------------------------------------
 # What a compile unit writes.
@@ -429,12 +566,13 @@ proc packageTargetsOf*(metadata: JsonNode; manifest: string): PackageTargets =
     raise newException(RecordModeError, "cargo metadata lists no packages")
   var found: JsonNode = nil
   for pkg in packages:
-    if pkg{"manifest_path"}.getStr == manifest:
+    if pkg.kind == JObject and pkg{"manifest_path"}.getStr == manifest:
       found = pkg
       break
   if found.isNil:
     # The same file under another spelling (a symlinked checkout).
     for pkg in packages:
+      if pkg.kind != JObject: continue
       let other = pkg{"manifest_path"}.getStr
       if other.len > 0 and fileExists(other) and fileExists(manifest) and
           sameFile(other, manifest):
@@ -443,12 +581,30 @@ proc packageTargetsOf*(metadata: JsonNode; manifest: string): PackageTargets =
   if found.isNil:
     raise newException(RecordModeError,
       "cargo metadata has no package with manifest " & manifest)
+  proc malformed(what: string): ref RecordModeError =
+    newException(RecordModeError, "malformed cargo metadata for " &
+      manifest & ": " & what)
+  for key in ["name", "version"]:
+    if found{key}.isNil or found{key}.kind != JString:
+      raise malformed("no string \"" & key & "\"")
   result.name = found{"name"}.getStr
   result.version = found{"version"}.getStr
   result.isPathPackage = found{"source"}.isNil or
     found{"source"}.kind == JNull
-  for target in found{"targets"}:
-    for kind in target{"kind"}:
+  let targets = found{"targets"}
+  if targets.isNil or targets.kind != JArray:
+    raise malformed("no \"targets\" array")
+  for target in targets:
+    if target.kind != JObject:
+      raise malformed("a target is not an object")
+    let kinds = target{"kind"}
+    if kinds.isNil or kinds.kind != JArray:
+      raise malformed("a target has no \"kind\" array")
+    if target{"name"}.isNil or target{"name"}.kind != JString:
+      raise malformed("a target has no string \"name\"")
+    for kind in kinds:
+      if kind.kind != JString:
+        raise malformed("a target kind is not a string")
       case kind.getStr
       of "bin": result.bins.add target{"name"}.getStr
       of "test": result.hasTests = true
@@ -461,21 +617,38 @@ proc packageTargetsOf*(metadata: JsonNode; manifest: string): PackageTargets =
 # Writing and reading recordings.
 
 proc recordRoots(): seq[RecordRoot] =
-  parseRecordRoots(getEnv(RecordRootsEnv))
+  withResolvedSpellings(parseRecordRoots(getEnv(RecordRootsEnv)))
 
 proc recordModeOn*(): bool =
   getEnv(RecordDirEnv).len > 0
 
+proc recordDir*(): string =
+  ## The record directory. Raises unless it is absolute: a build-script stub
+  ## runs in its package's directory, so a relative one would put each
+  ## stub's recording somewhere else.
+  result = getEnv(RecordDirEnv)
+  if not result.isAbsolute:
+    raise newException(RecordModeError, RecordDirEnv &
+      " must name an absolute directory, not " & result)
+
+proc recordedEnvSkipped*(name: string): bool =
+  ## The variables a recording leaves out: the record mode's own switches,
+  ## and RunQuota's lease, session and measurement variables. They describe
+  ## the record run, not the build, and change from one run to the next.
+  name in [RecordDirEnv, RecordRootsEnv, RecordMetadataEnv] or
+    name.startsWith("RUNQUOTA_")
+
 proc environmentNow(): seq[(string, string)] =
   for name, value in envPairs():
-    result.add (name, value)
+    if not recordedEnvSkipped(name):
+      result.add (name, value)
   result.sort(proc (a, b: (string, string)): int = cmp(a[0], b[0]))
 
 proc writeRecording(kind: RecordKind; argv: openArray[string];
                     extra: openArray[(string, JsonNode)]) =
   ## One JSON file per recorded process, written under a temporary name and
   ## renamed into place, so a reader never sees half a recording.
-  let dir = getEnv(RecordDirEnv)
+  let dir = recordDir()
   let roots = recordRoots()
   var node = %*{"format": RecordFormat, "kind": $kind}
   var args = newJArray()
@@ -487,6 +660,16 @@ proc writeRecording(kind: RecordKind; argv: openArray[string];
     env[name] = %logicalize(roots, value)
   node["env"] = env
   for (key, value) in extra: node[key] = value
+  # Fail closed: every string written, whatever field it is in.
+  proc walk(n: JsonNode) =
+    case n.kind
+    of JString: checkNoRootLeft(roots, n.getStr)
+    of JArray:
+      for item in n: walk(item)
+    of JObject:
+      for _, item in n: walk(item)
+    else: discard
+  walk(node)
   createDir(dir)
   let name = $kind & "-" & $getCurrentProcessId() & "-" &
     $(epochTime() * 1e6).int64 & ".json"
@@ -589,11 +772,15 @@ proc runRecordStub*(argv: openArray[string]): int =
     let roots = recordRoots()
     var provider = ""
     if getEnv("CARGO_MANIFEST_LINKS").len > 0:
-      provider =
-        if targets.isPathPackage:
-          logicalize(roots, parentDir(manifest))
-        else:
-          targets.name & "@" & targets.version
+      if targets.isPathPackage:
+        provider = logicalize(roots, parentDir(manifest))
+        if not provider.startsWith("${"):
+          raise newException(RecordModeError, "the path member " &
+            targets.name & " provides `links` from " & parentDir(manifest) &
+            ", which is under no declared root; its provider cannot be " &
+            "named without a physical path")
+      else:
+        provider = targets.name & "@" & targets.version
     let lines = sentinelLines(targets, outDir, provider)
     var printed = newJArray()
     for line in lines: printed.add %logicalize(roots, line)

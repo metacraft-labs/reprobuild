@@ -34,7 +34,7 @@
 ## the overhead gate sets; without them the wrapper blocks in `wait4` and adds a few
 ## round trips to a local socket and nothing else.
 
-import std/[os, options]
+import std/[os, options, strutils]
 when defined(posix):
   import std/posix
 else:
@@ -275,6 +275,38 @@ when defined(posix):
     try: session.closeSession() except CatchableError: discard
     client.close()
 
+proc runRecordMode(args: seq[string]): int =
+  ## Record mode (see `record_mode`): the stub, a recorded unit, or a probe
+  ## passed through. It never reaches the reporting path below.
+  try:
+    discard recordDir()
+  except RecordModeError as err:
+    stderr.writeLine WrapperClientName & ": record mode: " & err.msg
+    return 1
+  if isStubImage([getAppFilename(), paramStr(0)]):
+    return runRecordStub(@[paramStr(0)] & args)
+  if args.len == 0:
+    stderr.writeLine WrapperClientName & ": record mode: no rustc command"
+    return 1
+  var expanded: seq[string]
+  try:
+    expanded = expandArgFiles(args[1 .. ^1])
+  except RecordModeError as err:
+    stderr.writeLine WrapperClientName & ": record mode: " & err.msg
+    return 1
+  case recordLineKind(expanded)
+  of rlUnit:
+    var crate = ""
+    for i, arg in expanded:
+      if arg == "--crate-name" and i + 1 < expanded.len: crate = expanded[i + 1]
+      elif arg.startsWith("--crate-name="): crate = arg["--crate-name=".len .. ^1]
+    noteOutcome(crate, "recorded")
+    recordUnit(@[args[0]] & expanded, getAppFilename())
+  of rlProbe:
+    # It compiles nothing, and cargo needs its answer. The line runs as
+    # cargo gave it (unexpanded), behind the project's own wrapper if any.
+    executeInPlace(realCommand(args, getEnv(InnerWrapperEnv)))
+
 proc runWrapper*(args: seq[string]): int =
   ## `args` are cargo's: the rustc path and its arguments. Returns the exit
   ## code to end with; it does not return when the compiler is exec'd in place.
@@ -286,14 +318,13 @@ proc runWrapper*(args: seq[string]): int =
   ## and starts no measurement, whatever `RUNQUOTA_MEASUREMENT` says, because
   ## there is no compile to measure.
   if recordModeOn():
-    if isStubImage([getAppFilename(), paramStr(0)]):
-      return runRecordStub(@[paramStr(0)] & args)
-    if args.len > 0:
-      let parsed = rustcUnitOf(args[1 .. ^1])
-      if parsed.isUnit:
-        noteOutcome(parsed.unit.crateName, "recorded")
-        return recordUnit(args, getAppFilename())
-      # A probe: it compiles nothing, and cargo needs its answer.
+    when defined(windows):
+      stderr.writeLine WrapperClientName & ": record mode is not supported " &
+        "on Windows: drive-letter paths are not yet rewritten against the " &
+        "logical roots"
+      return 1
+    else:
+      return runRecordMode(args)
   if args.len == 0:
     stderr.writeLine "usage: " & WrapperClientName & " <rustc> [rustc args...]"
     return 2
