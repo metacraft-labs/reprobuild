@@ -80,7 +80,8 @@ import nimcrypto/[hash, sha2]
 # every tool-identity cache hit.
 import repro_tool_profiles/executable_evidence
 export executable_evidence
-import repro_tool_profiles/[archive_inputs, archive_steps, archive_digest]
+import repro_tool_profiles/[archive_inputs, archive_steps, archive_digest,
+  cached_prefix]
 import repro_tool_profiles/elf_relocation
 # Binary-cache coverage of provisioned prefixes: the post-extraction step
 # hook of the tarball edge, the staging-path leak scan, and the identity of
@@ -1809,7 +1810,11 @@ proc registerInUnifiedStore*(storeRoot, packageName, version, adapter,
     receiptDigest: receiptDigest(receipt),
     createdAtUnix: receipt.createdAtUnix)
   let inserted = store.insertPrefixOrIgnore(row)
-  if not inserted and repoint:
+  # A tarball row already there describes an earlier receipt of this prefix
+  # (an interrupted realization, a repaired prefix): the receipt just sealed
+  # is the record, so the row follows it (and its content record is cleared,
+  # since the tree was realized again).
+  if not inserted and (repoint or adapter == "tarball"):
     store.repointPrefixRow(prefixId, rel, receiptDigest(receipt),
                            receipt.createdAtUnix)
   (prefixId: prefixId, inserted: inserted)
@@ -4361,6 +4366,20 @@ proc extractTarballArchive*(archivePath, destination, archiveType: string;
 proc tarballReceiptPath(prefix: string): string =
   prefix / ".reprobuild-tarball-receipt.json"
 
+proc planHoldsApplication(plan: TarballAcquisitionPlan): bool =
+  ## Whether the prefix this plan realizes holds a macOS application: an
+  ## ``app-bundle`` record or an installer application, on a macOS host.
+  ## ``archiveInstallerFeatures`` is broader (any record with an extract
+  ## path, installer arguments or launchers), so it only pre-selects.
+  when defined(macosx):
+    if archiveInstallerFeatures(plan.record).len == 0:
+      return false
+    let resolution = archiveRealizationOf(plan.packageSelector, plan.record)
+    resolution.installMethod == imAppBundle or isMacosInstallerApp(resolution)
+  else:
+    discard plan
+    false
+
 proc writeTarballReceipt(prefix: string; plan: TarballAcquisitionPlan;
                          selectedUrl: string) =
   let receipt = %*{
@@ -4390,6 +4409,17 @@ proc writeTarballReceipt(prefix: string; plan: TarballAcquisitionPlan;
     # copy such a prefix into a view that declares none of it.
     "installationDeclared": installationIdentity(plan).len > 0
   }
+  if planHoldsApplication(plan):
+    # What the application in this prefix must be: the cached-prefix check
+    # and the publish guard compare the bundle against it, so a prefix whose
+    # updater rewrote the bundle is told apart from the one the record pins.
+    let resolution = archiveRealizationOf(plan.packageSelector, plan.record)
+    let expectation = appBundleExpectationOf(resolution)
+    receipt["appBundle"] = %*{
+      "item": appPlacedItem(resolution).item,
+      "bundleId": expectation.bundleId,
+      "version": expectation.version,
+      "teamId": expectation.teamId}
   writeFile(extendedPath(tarballReceiptPath(prefix)), receipt.pretty())
 
 proc selectedUrlFromReceipt(prefix: string): string =
@@ -5203,25 +5233,103 @@ proc materializeTarballPrefix(plan: TarballAcquisitionPlan; storeRoot: string;
     "tarball", plan.lockIdentity, plan.declaredExecutablePath,
     plan.url, archiveDigestValue(plan), tarballPrefixLayoutParts(plan))
   let prefix = unified.absolutePath
+  let isAppPrefix = planHoldsApplication(plan)
+  let appResolution =
+    if isAppPrefix: archiveRealizationOf(plan.packageSelector, plan.record)
+    else: ArchiveRealization()
+
+  proc sealReceipt() =
+    ## The typed ``.repro-receipt`` and the store index row for the prefix at
+    ## ``prefix``. One call for every way a prefix reaches its place (a fresh
+    ## extraction, a cache substitution, a prefix found without a receipt),
+    ## so none of them leaves a prefix the realizer cannot read back.
+    discard registerInUnifiedStore(storeRoot, packageName,
+      resolvedVersion, "tarball", plan.lockIdentity,
+      plan.declaredExecutablePath, plan.url, archiveDigestValue(plan),
+      "directory", tarballPrefixLayoutParts(plan), prefix,
+      @[plan.declaredExecutablePath] & plan.record.detail.extraExecutables,
+      writerMode = writerMode,
+      declaredExecutableAlias = plan.declaredExecutableAlias,
+      declaredLauncher = plan.declaredLauncher,
+      declaredPrunePaths = plan.declaredPrunePaths)
+
+  proc settleAppPrefix() =
+    ## A prefix that holds an application and passed the trust checks:
+    ## receipted, read-only, and out of Launch Services
+    ## (Store-And-Installation-Layout.md, macOS application bundles,
+    ## "Cached prefixes").
+    if not isAppPrefix:
+      return
+    if not fileExists(extendedPath(prefix / ".repro-receipt")):
+      sealReceipt()
+    settleVerifiedPrefix(prefix, appResolution)
+
   if dirExists(extendedPath(prefix)):
-    let existing = probeDeclaredExecutable(prefix,
-      plan.declaredExecutablePath, rejectSymlinks = true)
-    if existing.verdict != deOk:
-      raise newException(OSError,
-        "tool-resolution failed: existing tarball realization " &
-        existing.reason & ": " & prefix)
-    let mismatch = tarballPrefixLayoutMismatch(prefix, plan)
-    if mismatch.len > 0:
-      raise newException(OSError,
-        "tool-resolution failed: the existing tarball realization at " &
-        prefix & " was realized with " & mismatch & "; it is not reused " &
-        "for a plan that differs. Remove the prefix (an older engine " &
-        "keyed it without the prune list and alias) and realize again.")
-    if archiveInstallerFeatures(plan.record).len > 0:
-      verifyArchiveApplication(archiveRealizationOf(plan.packageSelector,
-        plan.record), prefix, tarballAppTrust)
-    return (prefix: prefix, archivePath: "",
-        selectedUrl: selectedUrlFromReceipt(prefix), cacheHit: true)
+    var reusable = true
+    if isAppPrefix:
+      # A cached application is trusted only while it verifies. The checks
+      # run on the cached bytes: a prefix an updater rewrote, or one an
+      # interrupted or substituted realization left without its receipt, is
+      # judged by them like a freshly extracted one, and repaired -- never
+      # refused -- when it fails.
+      let verdict = cachedBundleVerdict(appResolution, prefix, tarballAppTrust)
+      if verdict.verified:
+        let mismatch = tarballPrefixLayoutMismatch(prefix, plan)
+        if mismatch.len > 0:
+          raise newException(OSError,
+            "tool-resolution failed: the existing tarball realization at " &
+            prefix & " was realized with " & mismatch & "; it is not " &
+            "reused for a plan that differs. Remove the prefix (an older " &
+            "engine keyed it without the prune list and alias) and " &
+            "realize again.")
+        settleAppPrefix()
+      else:
+        stderr.writeLine("repro: the cached prefix of " & plan.packageSelector &
+          " at " & prefix & " fails verification (" & verdict.check &
+          "); realizing it again")
+        stderr.writeLine("  " & verdict.detail.splitLines()[0])
+        flushStoreDiagnostics()
+        try:
+          discardCachedPrefix(prefix, verdict)
+          reusable = false
+        except EPrefixRepairDeferred as deferred:
+          # A process runs from the prefix: it is not replaced under it. The
+          # apply goes on with the prefix as it is (a placed copy that needs
+          # no change never reads it; one that does is verified when staged,
+          # and refused there if it is the rewritten bundle), and the next
+          # apply repairs it. Not sealed: it does not verify.
+          stderr.writeLine("repro: deferred the repair of " &
+            plan.packageSelector & ": " & deferred.msg)
+          flushStoreDiagnostics()
+          # The apply still needs the prefix's id, which the receipt
+          # carries and which derives from the plan, not from the bundle's
+          # trustworthiness. Every resolution verifies the bundle itself, so
+          # a receipt does not make this prefix trusted.
+          if not fileExists(extendedPath(prefix / ".repro-receipt")):
+            sealReceipt()
+    else:
+      let existing = probeDeclaredExecutable(prefix,
+        plan.declaredExecutablePath, rejectSymlinks = true)
+      if existing.verdict != deOk:
+        raise newException(OSError,
+          "tool-resolution failed: existing tarball realization " &
+          existing.reason & ": " & prefix)
+      let mismatch = tarballPrefixLayoutMismatch(prefix, plan)
+      if mismatch.len > 0:
+        raise newException(OSError,
+          "tool-resolution failed: the existing tarball realization at " &
+          prefix & " was realized with " & mismatch & "; it is not reused " &
+          "for a plan that differs. Remove the prefix (an older engine " &
+          "keyed it without the prune list and alias) and realize again.")
+    if reusable:
+      let probed = probeDeclaredExecutable(prefix,
+        plan.declaredExecutablePath, rejectSymlinks = true)
+      if probed.verdict != deOk:
+        raise newException(OSError,
+          "tool-resolution failed: existing tarball realization " &
+          probed.reason & ": " & prefix)
+      return (prefix: prefix, archivePath: "",
+          selectedUrl: selectedUrlFromReceipt(prefix), cacheHit: true)
 
   let tempPrefix = tmpRoot / ("extract." & $getCurrentProcessId() & "." &
     $getTime().toUnix & "." & archiveDigestValue(plan)[0 .. 15])
@@ -5256,9 +5364,13 @@ proc materializeTarballPrefix(plan: TarballAcquisitionPlan; storeRoot: string;
   # nothing a dev env provisioned was ever cache-substitutable.
   if not cloned and substituteToolPrefix(plan, packageName, resolvedVersion,
       prefix, storeRoot):
-    if archiveInstallerFeatures(plan.record).len > 0:
-      verifyArchiveApplication(archiveRealizationOf(plan.packageSelector,
-        plan.record), prefix, tarballAppTrust)
+    if isAppPrefix:
+      verifyArchiveApplication(appResolution, prefix, tarballAppTrust)
+    # A substituted prefix arrives without the receipt the publisher sealed
+    # only after publishing; seal this host's own.
+    if not fileExists(extendedPath(prefix / ".repro-receipt")):
+      sealReceipt()
+    settleAppPrefix()
     return (prefix: prefix, archivePath: "",
         selectedUrl: selectedUrlFromReceipt(prefix), cacheHit: true)
   let downloaded =
@@ -5460,15 +5572,8 @@ proc materializeTarballPrefix(plan: TarballAcquisitionPlan; storeRoot: string;
     # `.repro-receipt` envelope (the JSON receipt already written by
     # writeTarballReceipt is adapter-specific provenance and stays
     # alongside the binary receipt).
-    discard registerInUnifiedStore(storeRoot, packageName,
-      resolvedVersion, "tarball", plan.lockIdentity,
-      plan.declaredExecutablePath, plan.url, archiveDigestValue(plan), "directory",
-      tarballPrefixLayoutParts(plan), prefix,
-      @[plan.declaredExecutablePath] & plan.record.detail.extraExecutables,
-      writerMode = writerMode,
-      declaredExecutableAlias = plan.declaredExecutableAlias,
-      declaredLauncher = plan.declaredLauncher,
-      declaredPrunePaths = plan.declaredPrunePaths)
+    sealReceipt()
+    settleAppPrefix()
     (prefix: prefix, archivePath: downloaded.path,
       selectedUrl: downloaded.selectedUrl, cacheHit: false)
   except CatchableError:
@@ -6414,6 +6519,8 @@ proc resolveTarballTool*(useDef: InterfaceToolUse; storeRoot: string;
   var runtimePrefix = ""
   var receipt: TarballProvisionReceipt
   var actionCacheHit = false
+  let holdsApplication = planHoldsApplication(plan)
+  var appVerdict = CachedBundleVerdict(verified: true)
   for attempt in 0 .. 1:
     # A receipt restored or kept by the action cache can outlive the prefix
     # it names -- the store is garbage-collectable and the cache does not
@@ -6448,6 +6555,21 @@ proc resolveTarballTool*(useDef: InterfaceToolUse; storeRoot: string;
       runtimePrefix = readTarballProvisionReceipt(runtimeReceipt).prefix
     let runtimePresent = runtimeReceipt.len == 0 or
       (runtimePrefix.len > 0 and dirExists(extendedPath(runtimePrefix)))
+    if holdsApplication and rootPresent and runtimePresent:
+      # A recorded edge outlives what happened to its prefix: an updater can
+      # have rewritten the bundle, and an interrupted or substituted
+      # realization can have left no receipt. Either is repaired by running
+      # the edge again, whose realizer verifies the prefix, seals or
+      # replaces it (``materializeTarballPrefix``); it is not an error of
+      # this resolution until that has been tried.
+      appVerdict = cachedBundleVerdict(archiveRealizationOf(
+        plan.packageSelector, plan.record), receipt.prefix, tarballAppTrust)
+      if attempt == 0 and (not appVerdict.verified or
+          not fileExists(extendedPath(receipt.prefix / ".repro-receipt"))):
+        continue
+      if appVerdict.verified:
+        settleVerifiedPrefix(receipt.prefix, archiveRealizationOf(
+          plan.packageSelector, plan.record))
     if rootPresent and runtimePresent:
       break
     if attempt > 0 and rootPresent:
@@ -6476,7 +6598,11 @@ proc resolveTarballTool*(useDef: InterfaceToolUse; storeRoot: string;
     plan.declaredExecutablePath, rejectSymlinks = true)
   if finalProbe.verdict != deOk:
     raise newException(OSError, finalProbe.reason)
-  if archiveInstallerFeatures(plan.record).len > 0:
+  if holdsApplication and not appVerdict.verified and
+      processesRunningFromPrefix(receipt.prefix).len == 0:
+    # Repair was tried and the prefix still fails: refuse, naming the check.
+    # (A prefix a running process holds is left for the next apply; the
+    # realizer reported the deferral.)
     verifyArchiveApplication(archiveRealizationOf(plan.packageSelector,
       plan.record), receipt.prefix, tarballAppTrust)
   refuseUnrunnableTarballExecutable(useDef, receipt.executable,

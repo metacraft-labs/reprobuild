@@ -377,7 +377,7 @@ when defined(macosx):
         check dirExists(placed)
         check not fileExists(profileBin(root) / "gm4ccli")
         check fileExists(profileBin(root) / "gm4cbase")
-      removeDir(root)
+      removeFixtureTree(root)
 
     test "a declared command the bundle does not carry is refused at " &
         "realization; nothing is placed or published":
@@ -405,7 +405,7 @@ when defined(macosx):
         check not storeHasPackage(root / "store", "gm4cclimissing")
         check readCurrentGenerationId(root / "state") == genA.generationIdHex
         check attachedImagesOf(dmgCli).len == 0
-      removeDir(root)
+      removeFixtureTree(root)
 
     test "a profile `binaries` name the application does not provide is " &
         "refused at plan time, before anything is realized":
@@ -437,7 +437,7 @@ when defined(macosx):
         check runApply(withBinaries(applyOptions(root, 2000), "gm4ccliapp",
           @["gm4ccli"])).kind == aokFreshApplied
         check fileExists(profileBin(root) / "gm4ccli")
-      removeDir(root)
+      removeFixtureTree(root)
 
     test "a DMG-realized package installs its app bundle into " &
         "~/Applications, upgrades, and rollback restores then removes it":
@@ -529,7 +529,7 @@ when defined(macosx):
               relative = true):
             leftovers.add(path)
         check leftovers.len == 0
-      removeDir(root)
+      removeFixtureTree(root)
 
     test "negative control: a DMG whose bundle's signature does not " &
         "verify is refused, nothing is placed, nothing stays attached":
@@ -554,7 +554,7 @@ when defined(macosx):
         check attachedImagesOf(dmgBad).len == 0
         check not storeHasPackage(root / "store", "gm4cbad")
         check readCurrentGenerationId(root / "state") == genA.generationIdHex
-      removeDir(root)
+      removeFixtureTree(root)
 
     test "an app the user placed at the same path is never replaced":
       let root = newRoot("collision")
@@ -575,7 +575,7 @@ when defined(macosx):
         check refused
         check readFile(mine / "Contents" / "user-owned") == "mine"
         check readCurrentGenerationId(root / "state").len == 0
-      removeDir(root)
+      removeFixtureTree(root)
 
     test "a staged copy that fails verification fails the apply with a " &
         "structured error naming package, bundle and check; nothing is " &
@@ -604,6 +604,20 @@ when defined(macosx):
       setFilePermissions(payload.parentDir,
         {fpUserRead, fpUserWrite, fpUserExec})
       tamperFixtureApp(storeBundle)
+      # A cached prefix that fails its checks is repaired by the apply that
+      # reuses it (Store-And-Installation-Layout.md, "Cached prefixes"), so
+      # the staged copy sees the changed bytes only while the repair is
+      # deferred: a program runs from the store copy, as a vendor app
+      # launched from its prefix does. The staged-copy check is the second look.
+      discard execCmdEx("/bin/chmod -R u+w " & quoteShell(storeBundle))
+      let sleeper = storeBundle / "Contents" / "MacOS" / "sleeper"
+      copyFile("/bin/sleep", sleeper)
+      setFilePermissions(sleeper, {fpUserRead, fpUserWrite, fpUserExec})
+      let running = startProcess(sleeper, args = @["300"])
+      defer:
+        running.terminate()
+        discard running.waitForExit()
+        running.close()
       withApplyEnv(second):
         writeProfile(second, ["gm4cbase", "gm4capp"])
         var opts = applyOptions(second, 2000)
@@ -638,8 +652,47 @@ when defined(macosx):
       check dirExists(placedApp(first))
       check appBundleCanonicalBytes(readAppBundleIdentity(
         placedApp(first))) == identityV1
-      removeDir(second)
-      removeDir(first)
+      removeFixtureTree(second)
+      removeFixtureTree(first)
+
+    test "a store bundle changed after it was published is repaired by the " &
+        "next apply, which places the pinned bundle":
+      let first = newRoot("repair-source")
+      let second = newRoot("repair-second")
+      withApplyEnv(first):
+        registerFixtures("1.0.0")
+        writeProfile(first, ["gm4cbase", "gm4capp"])
+        check runApply(applyOptions(first, 1000)).kind == aokFreshApplied
+      var storeBundle = ""
+      block:
+        var store = openStore(first / "store")
+        defer: store.close()
+        for row in listPrefixes(store):
+          if row.packageName == "gm4capp":
+            storeBundle = store.absolutePrefixPath(row.realizedPath) /
+              (AppName & ".app")
+      check storeBundle.len > 0 and dirExists(storeBundle)
+      # The prefix is read-only once verified: an updater cannot rewrite it.
+      check fpUserWrite notin getFilePermissions(
+        storeBundle / "Contents" / "Resources" / "payload.txt")
+      let pinned = readFile(storeBundle / "Contents" / "Resources" /
+        "payload.txt")
+      discard execCmdEx("/bin/chmod -R u+w " & quoteShell(storeBundle))
+      tamperFixtureApp(storeBundle)
+      check readFile(storeBundle / "Contents" / "Resources" /
+        "payload.txt") != pinned
+      withApplyEnv(second):
+        writeProfile(second, ["gm4cbase", "gm4capp"])
+        var opts = applyOptions(second, 2000)
+        opts.storeRoot = first / "store"
+        check runApply(opts).kind == aokFreshApplied
+        # The bundle placed is the pinned one, and so is the store copy now.
+        check readFile(placedApp(second) / "Contents" / "Resources" /
+          "payload.txt") == pinned
+      check readFile(storeBundle / "Contents" / "Resources" /
+        "payload.txt") == pinned
+      removeStoreTree(second)
+      removeStoreTree(first)
 
     test "a rollback whose earlier bundle fails verification fails with " &
         "a structured error and leaves the current generation intact":
@@ -716,6 +769,6 @@ when defined(macosx):
         check entries == @[AppName & ".app"]
         check attachedImagesOf(dmgV1).len == 0
         check attachedImagesOf(dmgV2).len == 0
-      removeDir(root)
+      removeFixtureTree(root)
 
-  removeDir(fixtureRoot)
+  removeFixtureTree(fixtureRoot)
