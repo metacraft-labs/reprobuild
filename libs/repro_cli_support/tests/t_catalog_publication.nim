@@ -117,6 +117,38 @@ suite "catalog publication":
       "repository " & catalogRoot & " would publish a host path: " & sibling &
       ":7\n  the encoded artifact contains the host path " & catalogRoot
 
+  test "a reprobuild stdlib location publishes as one fixed spelling from any checkout":
+    # Federated-Catalog-Imports.md, step 2 (amended 2026-11-25): a location
+    # inside reprobuild's stdlib is rewritten, not refused, so a catalog that
+    # imports `curl` publishes the same bytes from two checkouts at different
+    # paths. The checkouts sit under different host directories.
+    let stdA = root / "checkout-a" / "libs" / "repro_dsl_stdlib" / "src" /
+      "repro_dsl_stdlib" / "packages" / "curl.nim"
+    let stdB = root / "deeper" / "checkout-b" / "libs" / "repro_dsl_stdlib" /
+      "src" / "repro_dsl_stdlib" / "packages" / "curl.nim"
+    let a = publishableArtifact(catalogArtifact(stdA), catalogRoot, "repro.nim")
+    let b = publishableArtifact(catalogArtifact(stdB), catalogRoot, "repro.nim")
+    check a.bytes == b.bytes
+    check a.artifact.interfaceFingerprint == b.artifact.interfaceFingerprint
+    check a.artifact.projectInterface.provisioningContributions[0].location.file ==
+      ReprobuildStdlibSpelling & "src/repro_dsl_stdlib/packages/curl.nim"
+    # The host paths of both checkouts stay out of the bytes.
+    check root / "checkout-a" notin a.bytes
+    check root / "deeper" notin b.bytes
+
+  test "a look-alike directory or a stdlib path that climbs out still refuses":
+    # Only the exact stdlib directory is rewritten: a sibling whose name
+    # merely starts like it is an ordinary outside location, and so is a
+    # path that climbs out of the stdlib with `..`.
+    let lookalike = root / "checkout-a" / "libs" / "repro_dsl_stdlib_extra" /
+      "x.nim"
+    check "source locations outside the catalog repository" in
+      refusal(catalogArtifact(lookalike))
+    let climbs = root / "checkout-a" / "libs" / "repro_dsl_stdlib" / ".." /
+      ".." / "escape.nim"
+    check "source locations outside the catalog repository" in
+      refusal(catalogArtifact(climbs))
+
   test "a location that climbs out of the catalog with .. refuses; . and inner .. are normalized":
     # Starts with the catalog root's spelling, names a file outside it.
     let climbing = catalogRoot & DirSep & ".." & DirSep & "elsewhere" & DirSep &
