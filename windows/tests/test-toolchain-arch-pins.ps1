@@ -552,6 +552,18 @@ try {
       if (Test-Path -LiteralPath (Join-Path $l "libgcc_s_seh-1.dll")) { throw "staged into lib/ instead of bin/" }
     } finally { Remove-Item -LiteralPath $l, $lb -Recurse }
   }
+  Check "a staged DLL keeps its source file's name, whatever case the import spells" {
+    $cb = Join-Path $ic "casebin"; $cs = Join-Path $ic "casesrc"
+    New-Item -ItemType Directory -Path $cb, $cs | Out-Null
+    New-TestPeImage -Path (Join-Path $cs "msvcp140.dll") -Machine $x64 -Imports @("KERNEL32.dll")
+    New-TestPeImage -Path (Join-Path $cb "clingo.dll") -Machine $x64 -Imports @("MSVCP140.dll")
+    try {
+      $copied = @(Copy-WindowsImportClosure -BinDir $cb -SourceDirs @($cs) -Arch x64 -SystemDir $icSys -OsDlls @("KERNEL32.dll"))
+      $names = @(Get-ChildItem -LiteralPath $cb -File | ForEach-Object Name | Sort-Object)
+      if (($names -join ",") -cne "clingo.dll,msvcp140.dll") { throw "bin/ holds '$($names -join ",")'" }
+      if (($copied -join ",") -cne "msvcp140.dll") { throw "reported '$($copied -join ",")'" }
+    } finally { Remove-Item -LiteralPath $cb, $cs -Recurse }
+  }
   Check "the first source that holds a DLL wins" {
     $both = Join-Path $ic "both"
     New-Item -ItemType Directory -Path $both | Out-Null

@@ -387,6 +387,9 @@ function Copy-WindowsImportClosure {
     }
   }
   $copied = New-Object System.Collections.Generic.List[string]
+  # bin/'s names, matched without regard to case as the loader matches them.
+  $binNames = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+  foreach ($f in @(Get-ChildItem -LiteralPath $BinDir -File)) { [void]$binNames.Add($f.Name) }
   $checked = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
   $pending = New-Object 'System.Collections.Generic.Queue[string]'
   foreach ($f in @(Get-ChildItem -LiteralPath $BinDir -File | Where-Object { $_.Extension -in @('.exe', '.dll') })) {
@@ -405,17 +408,21 @@ function Copy-WindowsImportClosure {
     $names = @(Get-PeImportNames -Path $image) + @(Get-PeDelayImportNames -Path $image)
     foreach ($import in $names) {
       if ($import -match '^(?i)(api|ext)-ms-win-') { continue }
-      if (Test-Path -LiteralPath (Join-Path $BinDir $import) -PathType Leaf) { continue }
+      if ($binNames.Contains($import)) { continue }
       if ($osDllNames.Contains($import) -and $systemNames.Contains($import)) { continue }
       if (-not $sources.ContainsKey($import)) {
         throw "import closure: $imageName imports $import, which no source holds (sources: $($SourceDirs -join ', '))"
       }
       $src = $sources[$import]
       Assert-PeMachine -Path $src -Arch $Arch -Consumer "import closure"
-      $dest = Join-Path $BinDir $import
+      # The source file's own name, not the import's spelling: an import may
+      # say MSVCP140.dll for msvcp140.dll, and the shipped name stays stable.
+      $name = Split-Path -Leaf $src
+      $dest = Join-Path $BinDir $name
       Copy-Item -LiteralPath $src -Destination $dest -Force
-      Write-Host "  staged $import  <-  $src  (imported by $imageName)"
-      $copied.Add($import)
+      Write-Host "  staged $name  <-  $src  (imported by $imageName)"
+      [void]$binNames.Add($name)
+      $copied.Add($name)
       $pending.Enqueue($dest)
     }
   }
