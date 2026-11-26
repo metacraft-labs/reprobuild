@@ -19,6 +19,8 @@ concurrency:
 
 jobs:
   audit:
+    # A commit marked [x64-only] reruns only the x64 job, sparing the ARM slot.
+    if: ${{ !contains(github.event.head_commit.message, '[x64-only]') }}
     runs-on: [self-hosted, windows, arm64]
     timeout-minutes: 360
     defaults:
@@ -232,3 +234,6 @@ jobs:
           if ($rc -ne 1 -or -not (($o -join "`n") -match 'lib.foreign\.dll is a PE image for machine 0x014C')) { $failures += "x64 negative control: exit $rc" }
           if ($failures.Count) { throw ($failures -join '; ') }
           'x64 archive audit: passed, and the negative control was refused'
+          # Windows PowerShell 5.1 reports a -File script's last native exit
+          # code as its own; the negative control's 1 is expected.
+          exit 0
