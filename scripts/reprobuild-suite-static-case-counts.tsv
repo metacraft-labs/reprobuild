@@ -2130,6 +2130,7 @@ tests/integration/t_develop_composes_lock_set_without_a_committed_lock.nim	nim	1
 tests/integration/t_develop_dependency_modes_walk_a_real_depends_graph.nim	nim	1
 tests/integration/t_develop_excludes_evidence_only_repos.nim	nim	1
 tests/integration/t_develop_ignores_sha_pinned_manifest_without_a_lock_record.nim	nim	1
+tests/integration/t_develop_inside_a_repo_resolves_that_repos_own_lock_set.nim	nim	1
 tests/integration/t_develop_list_reports_tier_and_backend.nim	nim	1
 tests/integration/t_develop_lock_store_supplies_private_route.nim	nim	1
 tests/integration/t_develop_only_except_refuse_unknown_names.nim	nim	1

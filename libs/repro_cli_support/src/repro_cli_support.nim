@@ -40653,6 +40653,13 @@ type
                              ## clone, no reset, no override file write. It is
                              ## the query form of the placement step, the way
                              ## ``--list`` is the query form of the lock set.
+    consumerRepo: string     ## Absolute path of the participating repo the
+                             ## command was run INSIDE (empty = run at the
+                             ## workspace root). The develop set is that repo's
+                             ## OWN dependencies per its committed lock
+                             ## (CLI/develop.md §"The Develop Set Is The Repo's
+                             ## Own Dependencies"), whichever workspace root it
+                             ## sits under.
     skipRecipePins: bool     ## Internal, never set from argv: skip the scan
                              ## of the workspace's recipes for exact pins
                              ## (§16.4). Set by the flake override verbs,
@@ -40723,6 +40730,12 @@ type
     ## backend; the remaining fields are what the union could NOT say, kept
     ## separate so nothing is dropped silently.
     lock: LockedDependencies
+    consumerNames: seq[string]
+                             ## When the run was scoped to one repo's own lock
+                             ## (``DevelopAllArgs.consumerRepo``): the names that
+                             ## lock depends on. The develop set is cut to
+                             ## exactly these once every backend has resolved
+                             ## their revisions; no backend may add a repo.
     backends: seq[DevelopBackendReport]
     refusals: seq[string]    ## fatal: conflicting revisions, an unreachable
                              ## public/team backend, an unroutable repo
@@ -41493,7 +41506,18 @@ proc executeDevelopAll(args: DevelopAllArgs): DevelopAllResult =
     return DevelopAllResult(outcomes: outcomes, notices: notices, exitCode: 2,
       backends: composed.backends)
 
-  let lock = composed.lock
+  var lock = composed.lock
+  if args.consumerRepo.len > 0:
+    # Whatever backend resolved a revision, the SET is the consumer's own
+    # dependencies: drop any repo a later backend added.
+    var keep: seq[LockedDep]
+    for d in lock.deps:
+      if d.name in composed.consumerNames: keep.add(d)
+    lock.deps = keep
+    notices.add("develop set of " & extractFilename(args.consumerRepo) &
+      " (its own committed lock, " &
+      (args.consumerRepo / CommittedLockFileName) & "): " &
+      $keep.len & " dependenc" & (if keep.len == 1: "y" else: "ies"))
   if lock.deps.len == 0:
     # DS-1 — "An empty union — no backend yielded any record — is the only
     # lock-set failure, and it names every backend consulted."
@@ -42594,6 +42618,30 @@ proc developAllArgsOf(selection: DevelopSetSelection; workspaceRoot: string;
   result.workspaceRoot = workspaceRoot
   result.toolProvisioning = toolProvisioning
 
+proc developConsumerRepoOf(workspaceRoot: string): string =
+  ## The participating repo the working directory sits inside, or "" when the
+  ## command runs at (or outside) ``workspaceRoot``. The nearest ancestor
+  ## below the root that carries a committed ``repro.lock`` with a self entry
+  ## is the consumer ``R`` whose own dependencies are the develop set.
+  let root = os.normalizedPath(absolutePath(workspaceRoot))
+  var dir = os.normalizedPath(absolutePath(getCurrentDir()))
+  while dir.len > root.len and dir.startsWith(root & DirSep):
+    let lockP = dir / CommittedLockFileName
+    if fileExists(extendedPath(lockP)):
+      try:
+        let parsed = populateLockedDeps(
+          LockSource(kind: lskCommittedLock, workspaceRoot: dir),
+          strictCommittedRead = true)
+        for d in parsed.deps:
+          if isSelfLockedDep(d): return dir
+      except CatchableError:
+        # An unreadable lock is reported by the composer, which reads it
+        # again as the consumer's own; fall through to the workspace set
+        # only when there is no readable self entry anywhere above.
+        discard
+    dir = parentDir(dir)
+  ""
+
 proc developSetArgsOf(c: ReproCommandLineDevelop;
                       given: set[DevelopFlag]): DevelopAllArgs =
   ## ``repro develop --list|--all|--direct|--indirect|--transitive-of=<pkg>
@@ -42660,6 +42708,7 @@ proc developSetArgsOf(c: ReproCommandLineDevelop;
       "operation: pass --all/--direct/--indirect/--transitive-of, a " &
       "membership selector, or --list to query the lock set")
   result.workspaceRoot = workspaceShellFirstRoot(result.workspaceRoot)
+  result.consumerRepo = developConsumerRepoOf(result.workspaceRoot)
 
 proc runDevelopDropCommand(c: ReproCommandLineDevelop;
                            given: set[DevelopFlag]): int =
@@ -52045,7 +52094,37 @@ proc composeDevelopLockSet(workspaceRoot: string; identity: GitToolIdentity;
   let committedLockP = committedLockPath(root)
   let committedLockPresent = fileExists(extendedPath(committedLockP))
   let publicContributes = tierContributes("public")
-  if publicContributes:
+  let consumerRepo = args.consumerRepo
+  if publicContributes and consumerRepo.len > 0:
+    # The command ran inside participating repo R: the develop set is R's own
+    # dependencies, so R's committed lock is the public-tier source and the
+    # workspace root's lock and the other repos' self-records are not read at
+    # all (they would add repos R does not depend on, and a sibling's
+    # self-record could outvote R's own pin).
+    try:
+      var consumerLock = populateLockedDeps(
+        LockSource(kind: lskCommittedLock, workspaceRoot: consumerRepo),
+        strictCommittedRead = true)
+      var kept: seq[LockedDep]
+      for d in consumerLock.deps:
+        if isRootLockedDep(d): continue
+        # A lock derives each location from the dependency name relative to
+        # the lock's own repo (a sibling); re-express it against the
+        # workspace root the checkouts are placed under.
+        var moved = d
+        moved.path = relativePath(os.normalizedPath(consumerRepo / d.path), root)
+        kept.add(moved)
+        if d.name.len > 0: result.consumerNames.add(d.name)
+      consumerLock.deps = kept
+      result.lock = consumerLock
+    except CatchableError as error:
+      let lockP = consumerRepo / CommittedLockFileName
+      result.backends.add(DevelopBackendReport(tier: "public",
+        backendKind: "committed-lock", location: lockP,
+        reachable: false, diagnostic: error.msg))
+      result.refusals.add(unreadableCommittedLockMessage(lockP, error.msg))
+      return
+  elif publicContributes:
     try:
       result.lock = populateLockedDeps(
         LockSource(kind: lskCommittedLock, workspaceRoot: root),
@@ -52073,7 +52152,7 @@ proc composeDevelopLockSet(workspaceRoot: string; identity: GitToolIdentity;
     ## the per-repo medium named) because the inventory line must name every
     ## medium that actually answered, and a run in which the per-repo locks
     ## only *replaced* entries answered just as much as one in which they added.
-  if publicContributes:
+  if publicContributes and consumerRepo.len == 0:
     perRepo = participatingRepoCommittedLocks(root)
     if perRepo.refusals.len > 0:
       result.refusals.add(perRepo.refusals)
@@ -52201,13 +52280,15 @@ proc composeDevelopLockSet(workspaceRoot: string; identity: GitToolIdentity;
     # that file to check finds nothing there and has no way to learn where the
     # rest came from.
     location:
-      (if committedLockPresent and perRepoAnswered > 0:
+      (if consumerRepo.len > 0: consumerRepo / CommittedLockFileName
+       elif committedLockPresent and perRepoAnswered > 0:
          committedLockP & " + " & perRepoLocation
        elif perRepoAnswered > 0: perRepoLocation
        else: committedLockP),
-    reachable: committedLockPresent or perRepoAnswered > 0,
+    reachable: consumerRepo.len > 0 or committedLockPresent or
+      perRepoAnswered > 0,
     diagnostic:
-      (if committedLockPresent or perRepoAnswered > 0: ""
+      (if consumerRepo.len > 0 or committedLockPresent or perRepoAnswered > 0: ""
        elif perRepo.probed.len == 0: "no committed lock at " & committedLockP
        else: "no committed lock at " & committedLockP & ", and none of the " &
          $perRepo.probed.len & " participating repo checkout(s) under " & root &
