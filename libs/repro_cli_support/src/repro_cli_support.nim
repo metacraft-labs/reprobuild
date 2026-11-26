@@ -8843,10 +8843,23 @@ proc toolIdentityCacheKeyInfo*(artifact: ProjectInterfaceArtifact;
   # v7: a Nix ``expressionFile`` anywhere makes the key uncacheable (see
   # above). The nonce is the LAST field, so nothing after it could make two
   # such keys equal.
+  #
+  # The workspace root a selector is classified against is THIS PROCESS'S
+  # WORKING DIRECTORY: the resolution this key guards reaches
+  # ``resolveNixTool`` with no ``requesterDir`` in process (so it resolves
+  # against ``getCurrentDir()``), or through the store daemon, whose client
+  # names ``getCurrentDir()`` as ``nixRequesterDir``. Either way the helper
+  # request's ``workspaceRoot`` is this directory. Both the declared selector
+  # and the one the plan hands Nix (``effectiveNixSelector``, a pinned
+  # ``nixpkgs#`` rewritten to its locked URL) are classified.
   result.cacheable = true
+  let nixWorkspaceRoot = getCurrentDir()
   for useDef in artifact.projectInterface.toolUses:
     for entry in useDef.nixProvisioning:
-      if requiresFreshNixEvaluation(entry.selector, entry.expressionFile):
+      if requiresFreshNixEvaluation(entry.selector, entry.expressionFile,
+            nixWorkspaceRoot) or
+          isMutableLocalNixSelector(effectiveNixSelector(entry),
+            nixWorkspaceRoot):
         result.cacheable = false
   if not result.cacheable:
     payload.addCacheField("uncacheable-nix-evaluation")

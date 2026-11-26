@@ -548,6 +548,16 @@ proc readBoundedByPath*(path: string): string =
   defer: discard posix.close(fd)
   readRegularBounded(fd, path)
 
+proc readRecordFileNoFollow*(path: string): string =
+  ## ``path``'s bytes in a root-owned directory: opened ``O_NOFOLLOW`` (a
+  ## link in its place is refused) and non-blocking, required to be a
+  ## regular file and read up to ``MaxRecordBytes``.
+  let fd = posix.open(path.cstring, O_RDONLY or O_CLOEXEC or ONoFollow or
+                      ONonBlock)
+  if fd < 0: raiseOSError(osLastError(), "open " & path)
+  defer: discard posix.close(fd)
+  readRegularBounded(fd, path)
+
 proc readInCheckedDir*(path: string): string =
   ## ``path``'s bytes, read through its directory's checked descriptor
   ## without following a link; raises ``OSError`` when they cannot be.
@@ -737,11 +747,69 @@ proc writeDelegatedEntry*(dir, name, bytes: string; staging = "";
     raiseOSError(e, "rename into " & dir / name)
   if fsync(dfd) != 0: raiseOSError(osLastError(), "fsync " & dir)
 
+proc delegatedStateFileExists*(state, name: string): bool =
+  ## Whether ``state/name`` exists (as anything: judged without following a
+  ## link), ``state`` reached as ``writeDelegatedStateFile`` reaches it.
+  ## False when ``state`` is absent.
+  let sfd = openDelegatedState(state, create = false)
+  if sfd < 0: return false
+  defer: discard posix.close(sfd)
+  var st: Stat
+  fstatatC(sfd, name.cstring, st, AtSymlinkNoFollow) == 0
+
+proc writeDelegatedStateFile*(state, name, bytes: string; mode = 0o600) =
+  ## Write ``state/name`` durably, a file directly in a dynamic user's state
+  ## directory, through descriptors that follow no link: the temporary is
+  ## made ``O_EXCL|O_NOFOLLOW`` beside it, handed to the directory's owner
+  ## when run as root (``fchown``: unlike an outbox entry, the owner must
+  ## also replace and rewrite it), synced, and renamed over ``name``. Made
+  ## (root 0700) when the directory is absent: systemd hands a state
+  ## directory whose owner is not its dynamic user to that user, contents
+  ## included, at the unit's next start (``StateDirectory=``,
+  ## systemd.exec(5)).
+  let sfd = openDelegatedState(state, create = true)
+  defer: discard posix.close(sfd)
+  var sst: Stat
+  if fstat(sfd, sst) != 0: raiseOSError(osLastError(), "stat " & state)
+  let tmp = "." & name & ".tmp-" & $getCurrentProcessId()
+  discard unlinkatC(sfd, tmp.cstring, 0)
+  let fd = openatC(sfd, tmp.cstring, O_WRONLY or O_CREAT or O_EXCL or
+                   O_CLOEXEC or ONoFollow, Mode(mode))
+  if fd < 0: raiseOSError(osLastError(), "create " & state / tmp)
+  var ok = false
+  try:
+    if geteuid() == 0 and sst.st_uid != 0 and
+        fchown(fd, sst.st_uid, sst.st_gid) != 0:
+      raiseOSError(osLastError(), "chown " & state / tmp)
+    var off = 0
+    while off < bytes.len:
+      let n = posix.write(fd, unsafeAddr bytes[off], bytes.len - off)
+      if n < 0:
+        if errno == EINTR: continue
+        raiseOSError(osLastError(), "write " & state / tmp)
+      off += n
+    if fsync(fd) != 0: raiseOSError(osLastError(), "fsync " & state / tmp)
+    ok = true
+  finally:
+    discard posix.close(fd)
+    if not ok: discard unlinkatC(sfd, tmp.cstring, 0)
+  if renameatC(sfd, tmp.cstring, sfd, name.cstring) != 0:
+    let e = osLastError()
+    discard unlinkatC(sfd, tmp.cstring, 0)
+    raiseOSError(e, "rename into " & state / name)
+  if fsync(sfd) != 0: raiseOSError(osLastError(), "fsync " & state)
+
 # ---------------------------------------------------------------------------
 # A root drop directory a confined root writer fills, emptied by a
 # privileged step into a delegated directory (§13 decision 188: the egress
 # check's entries, moved into the shipping unit's outbox).
 # ---------------------------------------------------------------------------
+
+var crashPointHook*: proc (point: string) {.nimcall.} = nil
+  ## Tests only: called at each point a run of the drop or legacy-state move
+  ## may be killed at, so a test can stop it there (by raising) and run the
+  ## move again, as a host does after a crash. Nil in every build that runs
+  ## on a host.
 
 type
   DropEntry* = tuple[name: string; bytes: string]
@@ -901,11 +969,27 @@ proc takeDropEntries*(dir: string; maxBytes: int; suffix = ".evr";
       if not ok:
         aside(name, "unreadable or grew past " & $maxBytes & " bytes")
         continue
+    when mutated("legacy-move-unlinks-first"):
+      # FALSIFYING BUILD: the entry is unlinked before it is handed over,
+      # so a run killed between the two loses it.
+      discard unlinkatC(dfd, name.cstring, 0)
+      if crashPointHook != nil: crashPointHook("handed-over:" & name)
     try:
       take((name, bytes))
     except CatchableError as e:
       h.left.add(name & ": not moved (" & e.msg & "); left for the next run")
       continue
-    discard unlinkatC(dfd, name.cstring, 0)
+    # A run killed here leaves the entry in both places; the next run hands
+    # it over again under the same name, which replaces the copy, so the
+    # entry is neither lost nor queued twice.
+    if crashPointHook != nil: crashPointHook("handed-over:" & name)
+    when not mutated("legacy-move-unlinks-first"):
+      if unlinkatC(dfd, name.cstring, 0) != 0 and errno != ENOENT:
+        # Handed over and still here: the next run hands it over again, so
+        # it counts as left (a shipping run must not send the copy and
+        # then receive the entry a second time).
+        h.left.add(name & ": handed over but not removed (" &
+          osErrorMsg(osLastError()) & "); left for the next run")
+        continue
     inc h.moved
   result = h

@@ -70,10 +70,17 @@ const
   Prefix = "/repro/store/prefixes/svc/1.0"
 
 proc ownFor(exe: string): string =
-  renderOwnProfile(generation0Objects(Gen0Inputs(reproExe: exe,
-    agent: AgentUnitsInputs(target: "https://deploy.example/h",
-                            sources: @["https://deploy.example/m"],
-                            allowedAddresses: @["192.0.2.1"]))), "/f")
+  ## With a sink and the egress observer, so the shipping and egress check
+  ## units, re-pointed since the owner's decision of 2026-11-26, are among
+  ## the units every case checks.
+  let agent = AgentUnitsInputs(target: "https://deploy.example/h",
+                               sources: @["https://deploy.example/m"],
+                               allowedAddresses: @["192.0.2.1"])
+  renderOwnProfile(generation0Objects(Gen0Inputs(reproExe: exe, agent: agent,
+    egress: EgressObserverInputs(nft: "/usr/sbin/nft",
+                                 allowedAddresses: agent.allowedAddresses),
+    evidence: EvidenceUnitsInputs(sinkAddress: "192.0.2.9", sinkPort: 7443))),
+    "/f")
 
 suite "A9 review round 17, finding 1: a revert or rollback after a re-point":
   # The target generation (committed before the re-point) names E1; the

@@ -756,6 +756,15 @@ proc renderAddonSections*(r: AddonApplyResult): string =
   ## the sysctl values observed from the host's namespaces too.
   result = renderLedgerDiff(r) & renderCollisionReport(r.collisions) &
     renderTransitions(r.transitions)
+  if r.ownMigrated.len > 0:
+    # Generation 0's own units this engine renders differently, for the
+    # operator's review. Every switch carries them, an agent's too: §10.1's
+    # agent refusal judges the operator's services, and none of these
+    # widens a unit (the owner's decision of 2026-11-26 for the shipping
+    # and egress check units, which it narrows).
+    result.add("generation 0 migrated by this engine (every switch " &
+      "carries it):\n")
+    for u in r.ownMigrated: result.add("  " & u & "\n")
   if r.floorIntroduced.len > 0:
     # Units installed without the floor that it now changes (§10.1): each
     # is in the transition list as a restart too.

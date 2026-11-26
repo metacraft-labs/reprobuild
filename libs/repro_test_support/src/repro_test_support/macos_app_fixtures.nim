@@ -62,6 +62,15 @@ proc runChecked(exe: string; args: openArray[string]; workingDir = "") =
     raise newException(OSError, "fixture command failed (exit " &
       $res.exitCode & "): " & exe & " " & args.join(" ") & "\n" & res.output)
 
+proc removeFixtureTree*(path: string) =
+  ## ``removeDir`` for a tree that may hold a sealed store prefix: a verified
+  ## application prefix is read-only (Store-And-Installation-Layout.md,
+  ## "Cached prefixes"), so write bits come back before the removal, as they
+  ## do for the store's own discards.
+  if dirExists(path):
+    discard runArgv("/bin/chmod", ["-R", "u+w", path])
+    removeDir(path)
+
 proc makeFixtureApp*(dir, name, bundleId, version: string;
                      teamId = FixtureTeamId; sign = true;
                      declareExecutable = true;

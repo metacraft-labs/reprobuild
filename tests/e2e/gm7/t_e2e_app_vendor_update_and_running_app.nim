@@ -182,7 +182,7 @@ when defined(macosx):
   proc vendorUpdates(root, app: string) =
     ## What an in-place updater does: the vendor's build replaces the
     ## placed bundle at the same path.
-    removeDir(placed(root))
+    removeFixtureTree(placed(root))
     let res = execCmdEx(quoteShellCommand(["/usr/bin/ditto", app,
       placed(root)]))
     doAssert res.exitCode == 0, res.output
@@ -226,7 +226,7 @@ when defined(macosx):
         check runApply(applyOptions(root, 1000)).kind == aokFreshApplied
         check fileExists(profileBinDir(root / "state") / "gm7app")
         check profileBinDir(root / "state") == root / "state" / "current" / "bin"
-      removeDir(root)
+      removeFixtureTree(root)
 
   suite "GM7: e2e_app_vendor_update_and_running_app":
 
@@ -271,7 +271,7 @@ when defined(macosx):
           drift = true
         check drift
         check placedVersion(root) == "1.0.0"
-      removeDir(root)
+      removeFixtureTree(root)
 
     test "a running application is not replaced until it quits":
       let root = newRoot("running")
@@ -339,6 +339,6 @@ when defined(macosx):
         finally:
           if running:
             stopHelper()
-      removeDir(root)
+      removeFixtureTree(root)
 
-  removeDir(fixtureRoot)
+  removeFixtureTree(fixtureRoot)
