@@ -537,7 +537,7 @@ def red_record(kind, base="debian-13"):
             "/etc/systemd/system/x.service.d/50-repro-state-restore.conf",
             "ok": False}
         rec["steps"] = [ok("bootstrap"),
-                        red("decision 194: after a successful restore, retire "
+                        red("decision 195: after a successful restore, retire "
                             "removes the marker, every restore requirement "
                             "and the restore unit, and the profile decision "
                             "192 refused applies with sshd still reachable")]
