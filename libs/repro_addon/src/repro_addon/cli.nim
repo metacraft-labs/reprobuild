@@ -409,6 +409,9 @@ proc runAddonStateVerb[T](s: T; path: seq[string]): int =
   of V.installUnit:
     runStateCommand(StateCommand(verb: "install-unit",
       fromDir: s.installUnit.fromDir, root: s.installUnit.root))
+  of V.retire:
+    runStateCommand(StateCommand(verb: "retire",
+      fromDir: s.retire.fromDir, root: s.retire.root))
 
 proc runAddonVerb*(c: ReproAddonCommandLineSystemAddon): int =
   ## ``repro system addon <verb> ...``, from the configuration the generated

@@ -83,6 +83,25 @@ const
     "fs.systemFile {\n  path = \"/etc/cron.d/a11-drill\"\n" &
     "  content = \"* * * * * root touch /run/a11-drill-owned\n\"\n}\n"
 
+proc waitForApplied(sink: GateSink; host: string; sequence: uint64;
+                    timeoutSec: int; since: uint64): bool =
+  ## Until the sink holds this host's ``addon-apply``/``applied`` record for
+  ## the agent ``sequence`` (its ``sequence`` field), above ``since``. Any
+  ## ``applied`` record is not enough: the shipping path unit ships
+  ## asynchronously, so an earlier apply's record can reach the sink after
+  ## ``since`` and before the awaited apply has switched. A falsifier run
+  ## of A11 round 25 took its baseline fingerprint at such a moment, and its
+  ## containment step then saw the honest generation land as a difference.
+  let deadline = epochTime() + float(timeoutSec)
+  while epochTime() < deadline:
+    for e in sink.entries():
+      if e.kind == ekRecord and e.seq > since and $e.senderHostId == host and
+          e.record.detector == "addon-apply" and e.record.trigger == "applied" and
+          e.record.field("sequence") == $sequence:
+        return true
+    sleep(1000)
+  false
+
 proc installCompiler(g: Guest; emits: string) =
   ## The fetch unit's profile compiler: emits ``emits`` whatever its input.
   writeFile(g.runDir / "emits.canonical", emits)
@@ -140,7 +159,7 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
   let s0 = sink.headSeq()
   publish(1)
   step("setup: sequence 1 applies through the honest compile, by the timer",
-       sink.waitFor(host, "addon-apply", "applied", waitSec, since = s0), "")
+       sink.waitForApplied(host, 1, waitSec, since = s0), "")
   let fp0 = g.takeFingerprint(repro)
   phase("setup", %*{"sinkHost": sink.hostId, "guestHost": host,
                     "sinkStore": sink.storeDir})
@@ -323,8 +342,7 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
          "operator-released", 60, since = beforeRecovery), rl.stdout & rl.stderr)
   publish(3)
   step("recovery: sequence 3 applies through the honest compile, by the timer",
-       sink.waitFor(host, "addon-apply", "applied", waitSec,
-                    since = beforeRecovery), "")
+       sink.waitForApplied(host, 3, waitSec, since = beforeRecovery), "")
   # A tick heartbeat after the apply, so the tick reads live.
   let afterApply = sink.headSeq()
   discard sink.waitFor(host, "addon-agent-tick", "", waitSec, since = afterApply)

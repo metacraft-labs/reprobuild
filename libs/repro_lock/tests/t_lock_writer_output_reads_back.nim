@@ -409,7 +409,7 @@ suite "a lock pins a commit, never a branch":
       "schema = \"" & SolvedGraphLockSchemaV3 & "\"\n\n[lock]\n" &
         "platform = \"amd64-linux\"\noptimal = true\n" &
         "inputs_digest = \"fnv1a64:0\"\nvariants = []\npackages = []\n" &
-        "deps = [" & entry.replace("REF", refField) & "]\n"
+        "deps = [\n  " & entry.replace("REF", refField) & "\n]\n"
     let current = document("")
     # What the writer emits has no `ref`, and it reads back byte-identically.
     check serializeLockedDependencies(parseLockedDependencies(current)) ==

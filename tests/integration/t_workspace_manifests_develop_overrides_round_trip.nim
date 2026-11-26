@@ -1,6 +1,6 @@
 ## M5 — `<workspace-root>/.repro/develop-overrides.toml` round-trip.
 
-import std/[options, os, tempfiles, unittest]
+import std/[options, os, strutils, tempfiles, unittest]
 
 import repro_workspace_manifests
 import repro_test_support/process_fixtures
@@ -34,7 +34,7 @@ created_at = "2026-06-02T10:14:33Z"
 """
 
 const wrongSchemaToml = """
-schema = "reprobuild.workspace.develop-overrides.v2"
+schema = "reprobuild.workspace.develop-overrides.v3"
 
 [[override]]
 package = "x"
@@ -103,7 +103,10 @@ suite "M5 — DevelopOverrides round-trip":
       check e.keyPath == "random_top"
     check raised
 
-  test "schema-version mismatch reports observed v2":
+  # Schema v2 is read since Workspace-Manifests.md §"Develop-Mode Override
+  # File" defined it (2026-11-24, M9-P2): the schema this reader does not
+  # read is now v3, and the expected one it reports is the current, v2.
+  test "schema-version mismatch reports observed v3":
     let path = writeFixture(dir, "develop-overrides-wrong-schema.toml",
                             wrongSchemaToml)
     var raised = false
@@ -113,9 +116,10 @@ suite "M5 — DevelopOverrides round-trip":
       raised = true
       check e.keyPath == "schema"
       check e.expectedSchema ==
-        "reprobuild.workspace.develop-overrides.v1"
-      check e.observedSchema ==
         "reprobuild.workspace.develop-overrides.v2"
+      check e.observedSchema ==
+        "reprobuild.workspace.develop-overrides.v3"
+      check "reprobuild.workspace.develop-overrides.v1" in e.msg
     check raised
 
   test "missing override.package is reported":

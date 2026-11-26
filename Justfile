@@ -790,6 +790,12 @@ lint:
     # contributor to edit a copy nobody reads; the published page under
     # docs/users/content/ goes stale. Pure grep, no build needed.
     bash ./scripts/check_superseded_doc_pointers.sh 2>&1 | tee -a test-logs/lint.log
+    # The generated user-docs regions (command tables, the `repro health`
+    # check table, installer help, llms.txt) must match the sources they are
+    # rendered from. Before this line only the docs build ran `--check`, so a
+    # health check added to the engine without a row in the generator's table
+    # landed on `agents` and broke the next docs build. Python only, seconds.
+    python3 ./scripts/render_user_docs_generated.py --check 2>&1 | tee -a test-logs/lint.log
     # The private-reference ratchet, beside the pointer gate above because it
     # guards the same thing one level out: a comment that sends a public reader
     # somewhere they cannot go. This repository is public and its
@@ -1840,6 +1846,18 @@ integration_hx_s10_a_zero_case_result_is_not_a_pass *args:
     mkdir -p test-logs
     bash tests/integration/test_hx_s10_a_zero_case_result_is_not_a_pass.sh {{args}} \
         2>&1 | tee test-logs/integration_hx_s10_a_zero_case_result_is_not_a_pass.log
+
+# Linux HCR provider, design §6.2 "Deadlock hazards" / §11.2: no claim-map or
+# libc mapping call while tier-2 quiescence holds other threads parked. Runs
+# the production agent compiled whole into a C driver; no Nim needed.
+# A shebang recipe so `pipefail` holds and `tee` cannot turn a red gate green;
+# `.github/workflows/hcr-lanes.yml` runs it in the Linux lane.
+integration_hcr_linux_claim_map_is_never_called_with_threads_parked:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mkdir -p test-logs
+    bash tests/integration/test_hcr_linux_claim_map_is_never_called_with_threads_parked.sh \
+        2>&1 | tee test-logs/integration_hcr_linux_claim_map_is_never_called_with_threads_parked.log
 
 e2e_scoop_adapter_realize_and_launch:
     mkdir -p test-logs build/test-bin build/nimcache
