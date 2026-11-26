@@ -176,9 +176,44 @@ suite "workspace clone object policy":
       let res = runShell(shellCommand(@[reproBin, "workspace", "init",
         "ra5proj",
         "--workspace-root=" & scratch, "--clone-objects=" & policy]))
+      checkpoint("init --clone-objects=" & policy & "\n" & res.output)
       check res.code != 0
       check "clone-objects" in res.output
+      # The scratch root holds no manifest, so a value checked only after
+      # manifest resolution is reported as the missing manifest instead
+      # (issue 2026-11-24-workspace-init-refuses-on-the-missing-manifest-
+      # before-validating-clone-objects): the flag must be refused first.
+      check "no manifest configured" notin res.output
     check not dirExists(scratch / ".repro")
+
+  test "an empty clone object policy is a usage error on every verb":
+    # `--clone-objects=` must not read as "flag absent, use shared": every
+    # verb that takes the flag refuses it, naming the flag, before it looks
+    # for a manifest, a workspace or a destination. The scratch root is
+    # empty, so any other refusal would mean the flag was never checked.
+    let reproBin = reproBinary()
+    let scratch = createTempDir("repro-clone-policy-empty-", "")
+    defer: removeDir(scratch)
+    let root = "--workspace-root=" & scratch
+    let invocations = @[
+      @["workspace", "init", "ra5proj", root],
+      @["workspace", "init", fileUrl(scratch / "absent-root"),
+        scratch / "cold-destination"],
+      @["workspace", "sync", root],
+      @["workspace", "sync", "--mainline", root],
+      @["workspace", "pull", "ra5proj", root],
+      @["workspace", "enable", "ra5proj", root],
+      @["branch", scratch / "branched", root]]
+    for argv in invocations:
+      let res = runShell(shellCommand(@[reproBin] & argv &
+        @["--clone-objects="]))
+      checkpoint(argv.join(" ") & " --clone-objects=\n" & res.output)
+      check res.code != 0
+      check "--clone-objects" in res.output
+      check "no manifest configured" notin res.output
+    check not dirExists(scratch / ".repro")
+    check not dirExists(scratch / "cold-destination")
+    check not dirExists(scratch / "branched")
 
   test "bootstrap and cold init keep standalone manifests inside destination":
     let gitBin = findExe("git")

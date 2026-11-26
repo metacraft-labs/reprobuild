@@ -1493,11 +1493,20 @@ proc readWorkspaceLocal*(path: string): WorkspaceLocal =
 # ---- .repro/develop-overrides.toml -----------------------------------------
 
 proc readDevelopOverrides*(path: string): DevelopOverrides =
-  let content = slurpManifest(path, schemaDevelopOverridesV1)
-  validateSchema(path, content, schemaDevelopOverridesV1)
-  result = decodeStrict(path, content, schemaDevelopOverridesV1,
-                        DevelopOverrides)
+  ## Reads schema v1 and v2 (Workspace-Manifests.md §"Develop-Mode Override
+  ## File"); any other schema id is refused naming the file, the schema
+  ## found and the ones accepted. `replaces` is a v2 key: a v1-labelled file
+  ## that carries it is refused, as a reader of v1 only refuses it.
+  let content = slurpManifest(path, schemaDevelopOverridesV2)
+  let found = validateSchemaOneOf(path, content,
+    schemasDevelopOverridesAccepted)
+  result = decodeStrict(path, content, found, DevelopOverrides)
   for i, o in result.`override`:
+    if found == schemaDevelopOverridesV1 and o.replaces.isSome:
+      raiseManifestError(path, "override[" & $i & "].replaces",
+        schemaDevelopOverridesV2, found,
+        "key `override[].replaces` is a schema v2 key; a file that carries " &
+        "it must say schema = \"" & schemaDevelopOverridesV2 & "\"")
     if o.package.len == 0:
       raiseManifestError(path, "override[" & $i & "].package",
         schemaDevelopOverridesV1, schemaDevelopOverridesV1,

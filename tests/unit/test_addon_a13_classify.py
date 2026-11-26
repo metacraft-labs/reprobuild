@@ -267,6 +267,8 @@ def green(kind, base="debian-13"):
                                                   "written": "",
                                                   "connected": "a13-connected",
                                                   "ok": True}
+            rec["carriedRetired"] = {"exit": 0, "requirementsAfter": "",
+                                     "ok": True}
             rec["orderingCheck"] = "not run: the product engine carries no seam"
         else:
             rec["steps"] = padded([], 37, "a carried unit without default "
@@ -528,6 +530,17 @@ def red_record(kind, base="debian-13"):
                         red("decision 190 (b): with a generator making the "
                             "probe root at the put's own reload, the put "
                             "refuses and the probe never runs as root")]
+    elif kind == "mutretire":
+        rec = base_record(CONV, base, engine=ENGINE,
+                          engine_mutation="retire-leaves-requirements")
+        rec["carriedRetired"] = {"exit": 0, "requirementsAfter":
+            "/etc/systemd/system/x.service.d/50-repro-state-restore.conf",
+            "ok": False}
+        rec["steps"] = [ok("bootstrap"),
+                        red("decision 195: after a successful restore, retire "
+                            "removes the marker, every restore requirement "
+                            "and the restore unit, and the profile decision "
+                            "192 refused applies with sshd still reachable")]
     elif kind == "mutessreq":
         rec = base_record(CONV, base, engine=ENGINE,
                           engine_mutation="essential-restore-requirement-allowed")
@@ -702,7 +715,7 @@ RED_KINDS = ["mutexec", "mutimport", "mutstate", "mutunordered", "tickold",
              "mutfixstart", "mutdepblock", "mutstaleorder", "mutessential",
              "mutrevertstarts", "mutdeadhold", "mutfullfix", "mutbootblock",
              "mutdeadactive", "mutlateess", "mutprefixcall", "mutsecretput",
-             "mutessreq"]
+             "mutessreq", "mutretire"]
 
 
 class Accepts(unittest.TestCase):
@@ -1310,6 +1323,9 @@ class TheTriggersOfHeldUnits(unittest.TestCase):
         rec = red_record("mutessreq")
         rec["essentialRequirementRefused"]["exit"] = 1
         self.assertRejected("mutessreq-debian-13", rec)
+        rec = red_record("mutretire")
+        rec["carriedRetired"]["requirementsAfter"] = ""
+        self.assertRejected("mutretire-debian-13", rec)
         rec = red_record("mutlateess")
         rec["lateEssentialTrigger"]["activeBefore"] = "inactive"
         self.assertRejected("mutlateess-debian-13", rec)
