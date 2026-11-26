@@ -3,7 +3,9 @@
 ##
 ## reprobuild-pm Distribution-And-Packaging.md §5.3 (approved by Zahary
 ## Karadjov, 2026-11-03): decision C (the runtime closure, RUNPATH relative
-## to the image, the symbol check) and decision B (the builder-path gate).
+## to the image, the symbol check) and decision B (the builder-path gate),
+## and its 2026-11-26 amendment: with glibc a system soname, each image's
+## `PT_INTERP` names the triple's system loader (`glibc_loaders`).
 ##
 ## NO MOCKS. The images and libraries are real ELF files compiled by the
 ## host's C compiler in a temp dir, and the edges' own shell programs run
@@ -12,11 +14,19 @@
 ## the RUNPATH rule, the symbol check and the gate, none of which depend on
 ## the architecture. Without the tools on PATH the cases skip with the
 ## reason, and fail in a gate run.
+##
+## The loader cases link their images with `--dynamic-linker=` naming a
+## loader that need not exist: a store-shaped path standing in for what a
+## Nix gcc links with, so the case does not depend on which C compiler is on
+## PATH (the host's gcc already names the system loader). The images are
+## never run; what is under test is what the assembly writes into them.
 
 import std/[os, osproc, sequtils, strutils, tempfiles, unittest]
 
 import repro_test_support/reasoned_skip
+import repro_core/target_object_check
 import repro_project_dsl
+import repro_dsl_stdlib/glibc_loaders
 import repro_dsl_stdlib/packaging/producers/installed_prefix
 
 proc missingTool(): string =
@@ -54,7 +64,7 @@ type Fixture = object
   root, built, libs, oldLibs: string
 
 proc makeFixture(root: string; homeLiteral = false;
-                 portableInterp = false): Fixture =
+                 portableInterp = false; interp = ""): Fixture =
   ## `built/bin/app` needs `libfoo.so.1`, which needs `libbar.so.1`; both
   ## libraries are in `libs/`. `oldlibs/` holds a `libfoo.so.1` built
   ## without `foo_new`, which `app` calls. `built/lib/libplain.so` needs
@@ -80,16 +90,22 @@ proc makeFixture(root: string; homeLiteral = false;
     "-Llibs -l:libbar.so.1")
   cc(root, "-shared -fPIC -Wl,-soname,libfoo.so.1 -o oldlibs/libfoo.so.1 " &
     "foo_old.c -Llibs -l:libbar.so.1")
-  # `portableInterp`: the target's loader path, not the build toolchain's
-  # (a store path), for a fixture the gate must pass; such an app does not
-  # run on this host, so only the gate cases use it.
+  # `portableInterp`: a loader path that is not the build toolchain's (a
+  # store path), for a fixture the gate must pass; such an app does not run
+  # on this host, so only the gate cases use it. `interp`: the loader the
+  # app is linked to name.
+  let dynamicLinker =
+    if interp.len > 0: interp
+    elif portableInterp: "/lib/ld-linux.so.2"
+    else: ""
   cc(root, "-o built/bin/app app.c -Llibs -l:libfoo.so.1 " &
     "-Wl,-rpath-link,libs" &
-    (if portableInterp: " -Wl,--dynamic-linker=/lib/ld-linux.so.2" else: ""))
+    (if dynamicLinker.len > 0: " -Wl,--dynamic-linker=" & dynamicLinker
+     else: ""))
   cc(root, "-shared -fPIC -o built/lib/libplain.so plain.c")
 
 proc spec(f: Fixture; sources: seq[string]): InstalledPrefixSpec =
-  result = InstalledPrefixSpec(name: "probe", triple: "native",
+  result = InstalledPrefixSpec(name: "probe", triple: hostTriple(),
     output: f.root / "prefix",
     entries: @[
       PrefixEntry(source: f.built / "bin" / "app", dest: "bin/app"),
@@ -103,6 +119,19 @@ proc spec(f: Fixture; sources: seq[string]): InstalledPrefixSpec =
 
 proc runpath(f: string): string =
   sh("patchelf --print-rpath " & quoteShell(f), "/").output.strip()
+
+proc interpreter(f: string): string =
+  ## The image's `PT_INTERP`, or "" for one without (readelf's own words).
+  let r = sh("readelf -l -W " & quoteShell(f), "/")
+  doAssert r.code == 0, r.output
+  const marker = "[Requesting program interpreter: "
+  let at = r.output.find(marker)
+  if at < 0: return ""
+  let rest = r.output[at + marker.len .. ^1]
+  rest[0 ..< rest.find(']')]
+
+const FakeStoreGlibc = "/nix/store/" & repeat('a', 32) & "-glibc-2.42/lib/"
+  ## A store-shaped directory: what a Nix gcc's images name their loader in.
 
 suite "an installed prefix":
 
@@ -122,11 +151,16 @@ suite "an installed prefix":
       check runpath(o / "lib" / "libfoo.so.1") == "$ORIGIN"
       check runpath(o / "lib" / "libplain.so") == ""
       let record = readFile(o / PrefixRecordPath)
-      check "triple=native\n" in record
+      check ("triple=" & hostTriple() & "\n") in record
       check "source_revision=abc123\n" in record
       check "runtime libfoo.so.1 test:libs\n" in record
-      # The bundled prefix runs from where it is, with nothing else.
-      check sh(quoteShell(o / "bin" / "app"), "/").code == 0
+      # The bundled prefix runs from where it is, with nothing else. Through
+      # the loader the app was linked with: the assembly made the image
+      # name this triple's system loader, which a NixOS host does not have.
+      let linkedLoader = interpreter(f.built / "bin" / "app")
+      require linkedLoader.len > 0
+      check sh(quoteShell(linkedLoader) & " " & quoteShell(o / "bin" / "app"),
+        "/").code == 0
 
   test "a library no source holds is refused by name":
     requireTools:
@@ -302,3 +336,110 @@ suite "an installed prefix":
       checkpoint(passed.output)
       check passed.code == 0
       check fileExists(gateStamp(o))
+
+  test "the loader table holds glibc's own paths, by triple":
+    check glibcLoaderOfTriple("x86_64-unknown-linux-gnu") ==
+      "/lib64/ld-linux-x86-64.so.2"
+    check glibcLoaderOfTriple("aarch64-unknown-linux-gnu") ==
+      "/lib/ld-linux-aarch64.so.1"
+    check glibcLoaderOfTriple("armv7-unknown-linux-gnueabihf") ==
+      "/lib/ld-linux-armhf.so.3"
+    check glibcLoaderOfTriple("armv7-unknown-linux-gnueabi") ==
+      "/lib/ld-linux.so.3"
+    check glibcLoaderOfTriple("i686-unknown-linux-gnu") == "/lib/ld-linux.so.2"
+    check glibcLoaderOfTriple("riscv64gc-unknown-linux-gnu") ==
+      "/lib/ld-linux-riscv64-lp64d.so.1"
+    # Not glibc, or not in the table: no answer, never a guess.
+    check glibcLoaderOfTriple("x86_64-unknown-linux-musl") == ""
+    check glibcLoaderOfTriple("aarch64-apple-darwin") == ""
+    check glibcLoaderOfTriple("native") == ""
+    var seen: seq[string]
+    for row in GlibcLoaders:
+      check row.path.isAbsolute
+      # A prefix that keeps glibc the target's never bundles a loader.
+      check row.path.extractFilename in GlibcSonames
+      for t in row.triples:
+        checkpoint(t)
+        check t notin seen
+        seen.add(t)
+    # The architecture names the packaging layer uses read the same rows.
+    check glibcLoaderOfArchitecture("x86_64") == "/lib64/ld-linux-x86-64.so.2"
+    check glibcLoaderOfArchitecture("armhf") == "/lib/ld-linux-armhf.so.3"
+    check glibcLoaderOfArchitecture("sparc") == ""
+
+  test "each image names the triple's system loader; others are left alone":
+    requireTools:
+      let triple = hostTriple()
+      let loader = glibcLoaderOfTriple(triple)
+      if loader.len == 0:
+        skip("no glibc loader is known for this host's triple " & triple)
+      else:
+        let root = createTempDir("prefix-interp-", "")
+        defer: removeDir(root)
+        # bin/app names the loader under a store path, as a Nix gcc links.
+        let f = makeFixture(root,
+          interp = FakeStoreGlibc & loader.extractFilename)
+        require interpreter(f.built / "bin" / "app") ==
+          FakeStoreGlibc & loader.extractFilename
+        # Three images in lib/, which no RUNPATH rule touches, so any
+        # change to their bytes is the loader step's: one that already
+        # names the system loader, one that names musl's, and a static one.
+        writeFile(root / "helper.c", "int main(void) { return 0; }\n")
+        writeFile(root / "start.c", "void _start(void) { for (;;) {} }\n")
+        cc(root, "-o built/lib/helper helper.c -Wl,--dynamic-linker=" & loader)
+        let musl = "/lib/ld-musl-" & triple.split('-')[0] & ".so.1"
+        cc(root, "-o built/lib/helper-musl helper.c -Wl,--dynamic-linker=" &
+          musl)
+        cc(root, "-nostdlib -static -no-pie -o built/lib/static start.c")
+        require interpreter(f.built / "lib" / "static") == ""
+        var s = spec(f, @[f.libs])
+        for name in ["helper", "helper-musl", "static"]:
+          s.entries.add(PrefixEntry(source: f.built / "lib" / name,
+            dest: "lib/" & name))
+        let o = root / "prefix"
+        # Control: the image as the toolchain linked it fails the gate, on
+        # the store path in its PT_INTERP and on nothing else.
+        let raw = root / "raw"
+        createDir(raw / "bin")
+        copyFile(f.built / "bin" / "app", raw / "bin" / "app")
+        let refused = sh(gateScript(raw), root)
+        checkpoint(refused.output)
+        check refused.code != 0
+        check "bin/app: 1 line(s) match /nix/store/" in refused.output
+        let r = sh(assemblyScript(s), root)
+        checkpoint(r.output)
+        require r.code == 0
+        check interpreter(o / "bin" / "app") == loader
+        check interpreter(o / "lib" / "helper") == loader
+        check interpreter(o / "lib" / "helper-musl") == musl
+        check interpreter(o / "lib" / "static") == ""
+        for name in ["helper", "helper-musl", "static", "libplain.so"]:
+          checkpoint(name)
+          check readFile(o / "lib" / name) == readFile(f.built / "lib" / name)
+        let gate = sh(gateScript(o), root)
+        checkpoint(gate.output)
+        check gate.code == 0
+        check fileExists(gateStamp(o))
+        # Assembling again writes the same bytes.
+        let first = readFile(o / "bin" / "app")
+        require sh(assemblyScript(s), root).code == 0
+        check readFile(o / "bin" / "app") == first
+
+  test "a triple with no known loader is refused when glibc is a system soname":
+    var s = InstalledPrefixSpec(name: "x", triple: "sparc64-unknown-linux-gnu",
+      output: "/o", systemSonames: @GlibcSonames)
+    try:
+      discard assemblyScript(s)
+      check false
+    except ValueError as e:
+      checkpoint(e.msg)
+      check "sparc64-unknown-linux-gnu" in e.msg
+      check "GlibcLoaders" in e.msg
+    resetBuildActionRegistry()
+    expect ValueError:
+      discard installedPrefix(s, "/project")
+    # Without glibc among the system sonames (a musl prefix) the images keep
+    # their loader, so any triple is accepted and no loader step is written.
+    s.systemSonames = @["libc.musl-x86_64.so.1"]
+    check systemLoaderOf(s) == ""
+    check "--set-interpreter" notin assemblyScript(s)

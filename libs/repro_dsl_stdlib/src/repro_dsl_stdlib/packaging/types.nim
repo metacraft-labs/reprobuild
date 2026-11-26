@@ -50,6 +50,7 @@ import std/[algorithm, strutils, tables]
 import repro_project_dsl
 
 import ../prefix_layout
+import ../glibc_loaders
 
 export prefix_layout
 
@@ -1131,21 +1132,14 @@ proc defaultInterpreterPath*(architecture: string): string =
   ## The canonical absolute path of the glibc dynamic loader for an
   ## architecture, in reprobuild's own architecture vocabulary.
   ##
-  ## These are the paths the ABI supplements fix and every glibc
+  ## These are the paths glibc installs its loader at, and every glibc
   ## distribution therefore provides; they are not a Debian convention.
-  ## An unknown architecture answers "" and ``validate`` turns that into
-  ## a refusal, because the alternative is shipping a package whose
-  ## binaries name the BUILDER's loader.
-  case architecture
-  of "x86_64", "amd64": "/lib64/ld-linux-x86-64.so.2"
-  of "aarch64", "arm64": "/lib/ld-linux-aarch64.so.1"
-  of "i386", "i686": "/lib/ld-linux.so.2"
-  of "riscv64": "/lib/ld-linux-riscv64-lp64d.so.1"
-  of "armv7l", "armhf": "/lib/ld-linux-armhf.so.3"
-  of "ppc64le", "powerpc64le": "/lib64/ld64.so.2"
-  of "s390x": "/lib/ld64.so.1"
-  of "loongarch64": "/lib64/ld-linux-loongarch-lp64d.so.1"
-  else: ""
+  ## They come from ``glibc_loaders.GlibcLoaders``, the one table of them,
+  ## which an installed prefix reads by target triple. An unknown
+  ## architecture answers "" and ``validate`` turns that into a refusal,
+  ## because the alternative is shipping a package whose binaries name the
+  ## BUILDER's loader.
+  glibcLoaderOfArchitecture(architecture)
 
 proc interpreterPathFor*(dist: Distribution): string =
   ## The interpreter the staged executables get, recipe override first.

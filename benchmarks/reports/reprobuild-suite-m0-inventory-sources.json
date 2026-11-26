@@ -2173,7 +2173,7 @@
           "executedVariables": [
             "spec"
           ],
-          "line": 72,
+          "line": 73,
           "path": "libs/repro_cli_support/tests/t_installed_prefix_assembly_is_recorded.nim",
           "patterns": [
             "cc"
@@ -16088,6 +16088,7 @@
       "language": "nim",
       "localDependencyShape": [
         "repro_build_engine",
+        "repro_core",
         "repro_dsl_stdlib",
         "repro_test_support"
       ],
@@ -19754,6 +19755,7 @@
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
+        "repro_core",
         "repro_dsl_stdlib",
         "repro_project_dsl",
         "repro_test_support"
@@ -19762,7 +19764,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_dsl_stdlib/tests/t_installed_prefix.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 11,
+      "staticCaseCount": 14,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
