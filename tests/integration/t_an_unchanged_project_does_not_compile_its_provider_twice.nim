@@ -34,6 +34,7 @@
 ## compiles a real recipe in real directories.
 
 import std/[os, osproc, strutils, tempfiles, unittest]
+import repro_test_support/reasoned_skip
 
 proc repoRoot(): string =
   currentSourcePath().parentDir.parentDir.parentDir

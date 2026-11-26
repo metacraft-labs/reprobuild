@@ -44553,7 +44553,9 @@
       "classificationReason": "e2e/integration path or requires the repro binary",
       "defines": [],
       "language": "nim",
-      "localDependencyShape": [],
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
       "owner": "tests/integration",
       "requiresReproBinary": true,
       "source": "tests/integration/t_a_committed_lock_never_records_a_local_path_as_a_url.nim",
@@ -45677,7 +45679,8 @@
       "language": "nim",
       "localDependencyShape": [
         "repro_dsl_stdlib",
-        "repro_project_dsl"
+        "repro_project_dsl",
+        "repro_test_support"
       ],
       "owner": "tests/integration",
       "requiresReproBinary": true,

@@ -7,8 +7,7 @@
 ## siblings had been cloned from the workspace (`git clone ../m/<repo>`), so
 ## their `origin` was a local directory, and the managed pre-commit hook took
 ## each sibling's URL from that `origin`, printing `repro-lock refreshed sibling
-## coordinates; staged into this commit` (reprobuild-pm issue
-## 2026-11-26-repro-lock-records-a-siblings-local-origin-as-its-fetch-url).
+## coordinates; staged into this commit`.
 ## `repro lock refresh` used the same source. No other machine can fetch from
 ## such a URL.
 ##
@@ -41,6 +40,7 @@
 
 import std/[os, strutils, unittest]
 import ./committed_lock_siblings_fixture
+import repro_test_support/reasoned_skip
 
 const AllowEnv = "REPRO_ALLOW_PIN_REGRESSION"
 const AppUrl = "https://example.invalid/fixture/app"

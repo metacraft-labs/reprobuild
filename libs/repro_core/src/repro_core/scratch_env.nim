@@ -103,9 +103,8 @@ proc fingerprintedEnvValue*(name, value: string): string =
   ## nix-shell.XXXXXX)"` (and points the four temp-directory names at it)
   ## every time it is sourced, so an action whose process tree read one of
   ## them missed in every new shell: measured 2026-11-26 on codetracer's
-  ## `stylus-*` edges, `cache-miss: input metadata changed: NIX_BUILD_TOP`
-  ## (reprobuild-pm issue 2026-11-26-a-second-build-in-the-same-checkout-
-  ## compiles-the-provider-again-on-both-edges).
+  ## `stylus-*` edges, `cache-miss: input metadata changed: NIX_BUILD_TOP`,
+  ## so a second build of an unchanged checkout compiled the provider again.
   ##
   ## WHY IT IS SAFE. The name still counts: set and unset, and a deliberate
   ## directory such as `TMPDIR=/scratch`, are different keys. Only the random

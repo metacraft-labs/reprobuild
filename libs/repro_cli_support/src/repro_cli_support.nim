@@ -32169,8 +32169,7 @@ proc lockFetchUrlOfCheckout*(repoRoot, remoteUrl: string): string =
   ## ../m/<repo>``) has the workspace checkout as its ``origin``. Measured
   ## 2026-11-26: codetracer ``a9d16e2b4b`` committed a lock naming 19 siblings
   ## at ``/home/…/codetracer-gui/<repo>``, written by the managed pre-commit
-  ## hook from such clones (reprobuild-pm issue
-  ## 2026-11-26-repro-lock-records-a-siblings-local-origin-as-its-fetch-url).
+  ## hook from such clones.
   ## So a local remote is FOLLOWED: the clone it names is asked for its own
   ## remote, up to ``MaxLocalRemoteHops`` times, and the first network URL
   ## found is the answer. That is the repository the local clone was made
