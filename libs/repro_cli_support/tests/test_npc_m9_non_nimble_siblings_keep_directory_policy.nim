@@ -36,6 +36,7 @@ package app:
     "nim"
     "gcc"
     "sh"
+    "mkdir"
     "isonim"
     "isonim-tui"
     "codetracer-trace-format-nim"

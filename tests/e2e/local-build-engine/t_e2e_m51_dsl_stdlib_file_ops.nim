@@ -178,6 +178,8 @@ proc writeGeneratedSourcePreserveTreeProject(path: string) =
     "  defaultToolProvisioning \"path\"\n" &
     "  uses:\n" &
     "    \"sh\"\n" &
+    "    \"rm\"\n" &
+    "    \"mkdir\"\n" &
     "  build:\n" &
     "    let gen = shell(\n" &
     "      command = \"rm -rf out/app && mkdir -p out/app && echo a > out/app/a.txt\",\n" &

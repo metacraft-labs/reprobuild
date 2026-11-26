@@ -48,6 +48,7 @@ package app:
     "nim"
     "gcc"
     "sh"
+    "mkdir"
     "greetlib"
 $USES
   build:
@@ -82,6 +83,7 @@ package greetlib:
 
   uses:
     "sh"
+    "mkdir"
 
   library greetlib:
     kind: static

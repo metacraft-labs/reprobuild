@@ -10736,14 +10736,40 @@ macro packageImpl*(name: untyped;
   let buildKindLit = newLit("build")
   let nativeKindLit = newLit("native")
   let runtimeKindLit = newLit("runtime")
+  # An entry the macro itself injected (``pkg.generatedDeps``) is registered
+  # as GENERATED: every reader of the list still sees it, but nothing infers
+  # a statement about the recipe from it (``registerGeneratedToolDep``).
+  # A ``uses:`` / ``nativeBuildDeps:`` entry naming a workspace sibling
+  # PROJECT is a source the package consumes, not a tool: recorded so a
+  # ``shell(...)`` edge does not take it as one (``packageShellToolRefs``).
+  # The same rule ``usesImportCode`` uses to import a sibling producer.
+  var siblingSelectors: seq[string] = @[]
+  for useDef in pkg.toolUses & pkg.nativeBuildDeps:
+    let selector = useDef.packageSelector
+    if selector.len > 0 and selector notin siblingSelectors and
+        workspaceProducerModule(selector, consumerSourceFile).len > 0:
+      siblingSelectors.add(selector)
+      let selectorLit = newLit(selector)
+      result.add(quote do:
+        registerWorkspaceSiblingDep(`pkgLitForDeps`, `selectorLit`))
   for useDef in pkg.toolUses:
     let constraintLit = newLit(useDef.rawConstraint)
-    result.add(quote do:
-      registerPackageDep(`pkgLitForDeps`, `buildKindLit`, `constraintLit`))
+    if ("build\x00" & useDef.rawConstraint) in pkg.generatedDeps:
+      result.add(quote do:
+        registerGeneratedToolDep(`pkgLitForDeps`, `buildKindLit`,
+          `constraintLit`))
+    else:
+      result.add(quote do:
+        registerPackageDep(`pkgLitForDeps`, `buildKindLit`, `constraintLit`))
   for useDef in pkg.nativeBuildDeps:
     let constraintLit = newLit(useDef.rawConstraint)
-    result.add(quote do:
-      registerPackageDep(`pkgLitForDeps`, `nativeKindLit`, `constraintLit`))
+    if ("native\x00" & useDef.rawConstraint) in pkg.generatedDeps:
+      result.add(quote do:
+        registerGeneratedToolDep(`pkgLitForDeps`, `nativeKindLit`,
+          `constraintLit`))
+    else:
+      result.add(quote do:
+        registerPackageDep(`pkgLitForDeps`, `nativeKindLit`, `constraintLit`))
   for useDef in pkg.runtimeDeps:
     let constraintLit = newLit(useDef.rawConstraint)
     result.add(quote do:

@@ -26,6 +26,7 @@ package projectStemTarget:
 
   uses:
     "sh"
+    "mkdir"
 
   build:
     let selected = shell(

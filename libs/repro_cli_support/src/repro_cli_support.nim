@@ -3487,13 +3487,35 @@ proc relocatableInlineExecAnchors(argv: openArray[string]): seq[string] =
       result.add(normalized)
   result.sort()
 
+proc packageRefProducerSelectors*(selectors: openArray[string];
+                                  projectRoot: string): HashSet[string]
+  ## The members of ``selectors`` that name a declared cross-repo producer
+  ## (a develop override or a committed lock pin) for ``projectRoot``.
+  ## Defined beside ``resolveProducerBinding``.
+
+proc packageRefProducerSignature*(artifact: ProjectInterfaceArtifact;
+                                  projectRoot: string): string
+  ## The lowered-graph key's record of which ``uses:`` selectors are
+  ## cross-repo producers. Defined beside ``resolveProducerBinding``.
+
+proc withPackageToolIdentityRefs*(payload: BuildActionDef;
+                                  projectRoot: string): BuildActionDef
+  ## ``payload`` with the tool references it takes from its package's
+  ## declaration (``BuildActionDef.packageToolIdentityRefs``) merged into its
+  ## own ``toolIdentityRefs``, minus every selector that names a declared
+  ## cross-repo producer. Defined beside ``resolveProducerBinding``.
+
 proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfile];
                       projectRoot: string): BuildAction =
   # `BuildAction.governingLockIdentity` is required. Give `result` a complete
   # sentinel value before the deferred metadata copier can observe it; every
   # successful branch below replaces the sentinel with its real action.
   result = noScheduledAction()
-  let payload = decodeBuildActionPayload(toBytes(node.payload))
+  # A shell edge's package-derived refs become ordinary refs here, before
+  # anything below reads ``toolIdentityRefs`` (the PATH decision, the tool
+  # prefix, the channels, the key).
+  let payload = withPackageToolIdentityRefs(
+    decodeBuildActionPayload(toBytes(node.payload)), projectRoot)
   # The tool's own sub-tools (``cli: subTools``) sit between the tool's
   # directory and the edge's declared refs. They widen the prefix only;
   # whether the PATH is hermetic is decided by ``toolIdentityRefs`` alone
@@ -9448,7 +9470,8 @@ proc loweredGraphCacheKey*(artifact: ProjectInterfaceArtifact;
                           pathEnv: string;
                           extensionSignature = "";
                           pins: openArray[ProvisioningPin] = [];
-                          resolvedIdentity = PathOnlyBuildIdentity()):
+                          resolvedIdentity = PathOnlyBuildIdentity();
+                          projectRoot = ""):
     string =
   ## ``extensionSignature`` (Workspace-Manifest-Optional MO-13, correcting
   ## MO-6) folds the ACTIVE ``projectExtension`` set into the key. The disk
@@ -9504,6 +9527,16 @@ proc loweredGraphCacheKey*(artifact: ProjectInterfaceArtifact;
   payload.addCacheField(extensionSignature)
   if mode == tpmPathOnly:
     payload.addCacheField(pathEnv)
+  # Which ``uses:`` selectors are cross-repo producers decides which of a
+  # shell edge's package-derived refs lowering keeps
+  # (``withPackageToolIdentityRefs``), and a develop override can change it
+  # with nothing else here moving. Appended only when non-empty, for the
+  # reason given at the environment signature above: a project that
+  # consumes no producer keeps its key byte-identical.
+  let producerSignature = packageRefProducerSignature(artifact, projectRoot)
+  if producerSignature.len > 0:
+    payload.addCacheField("package-ref-producers")
+    payload.addCacheField(producerSignature)
   digestHex(blake3DomainDigest(payload.bytesOf(), hdMetadataEnvelope))
 
 proc buildToolStoreRoot*(mode: ToolProvisioningMode;
@@ -12071,7 +12104,10 @@ proc selectedToolIdentitySelectors(snapshot: ProviderGraphSnapshot;
     for node in fragment.nodes:
       if node.kind != gnkAction:
         continue
-      let action = decodeBuildActionPayload(toBytes(node.payload))
+      # The same merge lowering applies, so the tools selected for
+      # realization are exactly the ones the lowered edge will name.
+      let action = withPackageToolIdentityRefs(
+        decodeBuildActionPayload(toBytes(node.payload)), projectRoot)
       if action.subToolRefs.len > 0:
         subToolRefsById[action.id] = action.subToolRefs
       let packageName = action.call.packageName
@@ -15782,7 +15818,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     let graphCacheKey = loweredGraphCacheKey(buildArtifact, effectiveMode,
       providerArtifactId, refresh.persistedSnapshotPath, pathEnv,
       extensionSignature, pins = provisioningPins,
-      resolvedIdentity = identity)
+      resolvedIdentity = identity, projectRoot = projectRoot)
     let graphCacheReadStart = statStart(statsEnabled)
     progressRenderer.renderPhase("reading lowered graph cache")
     let cachedLowered =
@@ -31047,6 +31083,114 @@ proc resolveProducerBinding*(selector: string;
         overrides = some(overrides.get().removeOverride(selector))
   resolveProducerBinding(selector, workspaceRoot, lock, overrides)
 
+proc packageRefProducerSelectors*(selectors: openArray[string];
+                                  projectRoot: string): HashSet[string] =
+  ## One read of the committed lock and the develop overrides for the whole
+  ## set, then the SC-1 resolver per selector. A selector an override names
+  ## (or any selector, when only the legacy override metadata exists) goes
+  ## through the full two-argument resolver, which applies the
+  ## bulk-override rule (§16.4) exactly as producer admission does, so this
+  ## answers "is it a producer" the way admission will.
+  result = initHashSet[string]()
+  if selectors.len == 0 or projectRoot.len == 0:
+    return
+  let lockP = committedLockPath(projectRoot)
+  let lock =
+    if fileExists(extendedPath(lockP)):
+      parseWorkspaceLockedDeps(readFile(extendedPath(lockP)), lockP)
+    else:
+      LockedDependencies()
+  let overrides = readDevelopOverridesFile(projectRoot)
+  let legacyOverrides =
+    fileExists(extendedPath(developOverridesMetadataPath(projectRoot)))
+  for selector in selectors:
+    if selector.len == 0 or selector in result:
+      continue
+    let binding =
+      if legacyOverrides or (overrides.isSome and
+          findOverride(overrides.get(), selector).isSome):
+        resolveProducerBinding(selector, projectRoot)
+      else:
+        resolveProducerBinding(selector, projectRoot, lock, overrides)
+    if binding.declaresProducerEdge:
+      result.incl(selector)
+
+proc packageRefProducerSignature*(artifact: ProjectInterfaceArtifact;
+                                  projectRoot: string): string =
+  ## ``withPackageToolIdentityRefs`` drops exactly the producer selectors
+  ## from a shell edge's package-derived refs while lowering, and a develop
+  ## override can change which selectors those are without changing
+  ## anything else the lowered-graph key covers. Sorted, newline-joined;
+  ## empty when the project consumes no producer.
+  var selectors: seq[string] = @[]
+  for useDef in artifact.projectInterface.toolUses:
+    if useDef.packageSelector.len > 0:
+      selectors.add(useDef.packageSelector)
+  var producers: seq[string] = @[]
+  for selector in packageRefProducerSelectors(selectors, projectRoot):
+    producers.add(selector)
+  producers.sort()
+  producers.join("\n")
+
+proc withPackageToolIdentityRefs*(payload: BuildActionDef;
+                                  projectRoot: string): BuildActionDef =
+  ## Hermetic-Builds-And-Path-Independence.md §"Shell edges declare their
+  ## package's tools": a ``shell(...)`` edge declares its package's
+  ## ``uses:`` / ``nativeBuildDeps:`` tools. The DSL records them apart from
+  ## the edge's own refs because it cannot tell which of them are cross-repo
+  ## PRODUCERS, and a producer must not follow from the package list:
+  ## Cross-Repo-Source-Consumption.md §4.2b.3, "admission follows from
+  ## `mayUse`, not from `uses:`", is what keeps ``repro build <target>`` from
+  ## building an unrelated target's sibling. A consumer edge that runs a
+  ## producer's executable names it itself, as it always had to.
+  ##
+  ## Every other selector joins the edge's ``toolIdentityRefs`` after the
+  ## edge's own, deduplicated, with its platform role appended to
+  ## ``toolIdentityRefKinds``. An edge that names refs of its own but no
+  ## kinds (the engine reads an empty list as "every ref is a host-platform
+  ## ref") first has that default written out, so a ``nativeBuildDeps:``
+  ## entry keeps its build-platform role instead of silently becoming a
+  ## host-platform ref in a cross build. An edge whose kinds are already
+  ## mismatched keeps the engine's default for all of them, as before.
+  ##
+  ## Called wherever the CLI reads an action's refs to DECIDE something --
+  ## lowering (``lowerGraphAction``) and tool selection
+  ## (``selectedToolIdentitySelectors``) -- so the two agree. The producer
+  ## decision reads the committed lock and the develop overrides, which the
+  ## lowered-graph key covers (``packageRefProducerSignature``).
+  result = payload
+  if payload.packageToolIdentityRefs.len == 0:
+    return
+  result.packageToolIdentityRefs = @[]
+  result.packageToolIdentityRefKinds = @[]
+  let producers = packageRefProducerSelectors(
+    payload.packageToolIdentityRefs, projectRoot)
+  var added: seq[string] = @[]
+  var addedKinds: seq[ToolIdentityRefKind] = @[]
+  for i, refName in payload.packageToolIdentityRefs:
+    if refName.len == 0 or refName in result.toolIdentityRefs or
+        refName in added or refName in producers:
+      continue
+    added.add(refName)
+    addedKinds.add(
+      if i < payload.packageToolIdentityRefKinds.len:
+        payload.packageToolIdentityRefKinds[i]
+      else: tirkBuild)
+  if added.len == 0:
+    return
+  if result.toolIdentityRefKinds.len == 0:
+    # Spell out the engine's reading of an empty list (all host-platform)
+    # so the package refs' roles can be appended in parallel. Only when a
+    # ref is actually added, so an edge this merge leaves unchanged keeps
+    # its payload byte-identical.
+    for _ in result.toolIdentityRefs:
+      result.toolIdentityRefKinds.add(tirkBuild)
+  let kindsParallel =
+    result.toolIdentityRefKinds.len == result.toolIdentityRefs.len
+  result.toolIdentityRefs.add(added)
+  if kindsParallel:
+    result.toolIdentityRefKinds.add(addedKinds)
+
 # ---------------------------------------------------------------------------
 # Cross-Repo-Source-Consumption SC-8 — the producer's ``executable … cli:`` /
 # ``library`` schema as a consumable TYPED CONTRACT keyed by workspace project
@@ -35000,7 +35144,7 @@ proc prepareBuildGraphInspection(target: string; mode: ToolProvisioningMode;
   let graphCacheKey = loweredGraphCacheKey(resolvedArtifact, effectiveMode,
     result.providerArtifactId, refresh.persistedSnapshotPath, pathEnv,
     extensionSignature, pins = provisioningPins,
-    resolvedIdentity = identity)
+    resolvedIdentity = identity, projectRoot = projectRoot)
   let cachePath = loweredGraphCachePath(outDir, selectedActionId)
   result.loweredGraphCachePath = cachePath
   let cachedLowered =
