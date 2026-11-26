@@ -75,6 +75,15 @@ done < libs/libraries.txt
 # fail to resolve and the lint reports spurious "cannot open file"
 # errors while the actual ``nim c`` build in
 # ``scripts/build_apps.sh`` succeeds.
+#
+# An entrypoint is checked with exactly the defines its build gets: its
+# own extra flags, and not ``nim_check_flags``. ``scripts/build_apps.sh``
+# gives ``--define:reproProviderMode`` only to the two provider apps, whose
+# rows carry it; the other entrypoints compile in the mode this
+# repository's ``config.nims`` selects. A program that imports the root
+# ``repro.nim`` in the DSL's thin mode (``repro-cmake-dyndep-fragment``)
+# refuses any other mode at compile time, so a check under the provider
+# mode would report a failure no build has.
 while read -r name path extra_flags; do
   case "${name}" in
     ""|\#*) continue ;;
@@ -90,7 +99,6 @@ while read -r name path extra_flags; do
   read -r -a extra_flags_array <<<"${extra_flags:-}"
   labels+=("${path}")
   run_check "${#labels[@]}" \
-    "${nim_check_flags[@]}" \
     ${extra_flags_array[@]+"${extra_flags_array[@]}"} \
     --nimcache:"build/nimcache/check-${name}" \
     "${path}"

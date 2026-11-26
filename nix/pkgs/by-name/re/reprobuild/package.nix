@@ -152,8 +152,8 @@
   cliSpecSrc ? fetchFromGitHub {
     owner = "metacraft-labs";
     repo = "nim-cli-spec";
-    rev = "6e0b4e78d96c4118103f2be571e1edd6ff0c938d";
-    hash = "sha256-3/XxB8gACGgcJ9YP6HeA3mwwOl7R/b+rxUpvYjsIStQ=";
+    rev = "dc7c08aac8cac11470cdf5e7fbcec88f9e8eb93c";
+    hash = "sha256-Bwe3TE5ksiL744Qd0sAwzLnK6EHJr+/EAYf4+dDiV1o=";
   },
   # Added after the `src` commit too: nim-entrypoints, the `entrypoints`
   # package (the declarative description of a program's entry points); the
@@ -258,7 +258,7 @@ stdenv.mkDerivation (finalAttrs: {
   # forbids. reprobuild's flake overrides it with the value it parses from the
   # nimble manifest, and `checks.nixpkgs-package-version-sync` fails the build
   # if this literal and the manifest disagree, so the two cannot drift silently.
-  version = "0.2.36";
+  version = "0.2.37";
 
   # The default source: a published commit whose `reprobuild.nimble` carries
   # `version` above and whose `flake.lock` pins the `*Src` defaults above
@@ -559,17 +559,17 @@ stdenv.mkDerivation (finalAttrs: {
         --set-default NIMCRYPTO_SRC ${nimcryptoSrc} \
         --set-default BEARSSL_SRC ${bearsslSrc} \
         --set-default STACKABLE_HOOKS_SRC ${stackableHooksSrc}/src \
-        --set-default CODETRACER_TRACE_FORMAT_NIM_SRC ${codeTracerTraceFormatNimSrc} \
-        --set-default IO_MON_SRC ${ioMonSrc}/src \
-        --set-default SHM_GSET_SRC ${shmGsetSrc}/src \
-        --set-default SHM_QUEUE_SRC ${shmQueueSrc}/src \
+        --set-default REPRO_ENGINE_CODETRACER_TRACE_FORMAT_NIM_SRC ${codeTracerTraceFormatNimSrc} \
+        --set-default REPRO_ENGINE_IO_MON_SRC ${ioMonSrc}/src \
+        --set-default REPRO_ENGINE_SHM_GSET_SRC ${shmGsetSrc}/src \
+        --set-default REPRO_ENGINE_SHM_QUEUE_SRC ${shmQueueSrc}/src \
         --set-default CLI_SPEC_SRC ${cliSpecSrc}/src \
         --set-default ENTRYPOINTS_SRC ${entrypointsSrc}/src \
         --set-default CONFUTILS_SRC ${confutilsSrc} \
         --set-default CODETRACER_PINNED_SRC ${codetracerSrc}/src \
         --set-default REPRO_CT_TEST_RUNNER_SRC ${ctTestRunnerSrc} \
         --set-default REPRO_TEST_ADAPTERS_SRC ${testAdaptersSrc}/src \
-        --set-default TEST_CERTIFICATES_TOOLS_SRC ${testCertificatesToolsSrc}/src \
+        --set-default REPRO_ENGINE_TEST_CERTIFICATES_TOOLS_SRC ${testCertificatesToolsSrc}/src \
         --set-default REPROBUILD_USE_SYSTEM_HASH_LIBS 1 \
         --set-default REPROBUILD_NIX_DAEMON_BIN "$out/libexec/reprobuild-nix-daemon" \
         --set-default RUNQUOTA_SRC ${runquotaSrc} \

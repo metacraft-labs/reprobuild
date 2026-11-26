@@ -788,5 +788,5 @@ windows/ensure-openssl.ps1	1
 windows/ensure-runtime-dlls.ps1	1
 windows/stage-release-dlls.ps1	1
 windows/tests/test-toolchain-arch-pins.ps1	1
-windows/toolchain-utils.ps1	3
+windows/toolchain-utils.ps1	2
 windows/toolchain-versions.env	1

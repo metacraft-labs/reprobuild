@@ -10,6 +10,17 @@
 ## link-time symlink to it (``Library.linkTimeName``). Without ``sover``
 ## the file and its SONAME are ``lib/lib<soname>.so``; without an ``api:``
 ## block the base name is ``into``.
+##
+## ``linkKind static`` builds a static archive instead, with
+## ``nim c --app:staticlib``: ``lib/lib<soname>.a``, the path ``c_library``
+## writes one to. An archive has no SONAME, so there is no ``-Wl,-soname,``
+## and no link-time symlink. Unlike a shared Nim library, an archive does
+## not start the Nim runtime from a loader constructor: its consumer calls
+## ``NimMain()`` before calling into it. Under a zig target ``static`` is
+## refused: nim archives a clang build with ``llvm-ar`` from ``PATH``, a
+## tool the ``cross_zig`` wrappers do not provide, so the edge would depend
+## on whatever the host has. ``linkKind both`` builds the shared library
+## only, exactly as ``c_library`` does, so the two constructors agree on it.
 
 {.experimental: "callOperator".}
 
@@ -33,17 +44,44 @@ proc nim_library*(into: string;
                   mm = "orc";
                   paths: seq[string] = @[]): Library =
   ## Build a Nim library from one entry-point source file via
-  ## ``nim c --app:lib``.
+  ## ``nim c --app:lib``, or ``--app:staticlib`` for ``linkKind static``.
   # A zig target is threaded here: Nim's --cpu/--os and clang pointed at
   # the zig `cc` wrapper. Any other non-native target still refuses.
   let zigTarget = activeZigCrossTarget()
+  let pkg = activePackageName()
+  let api = registeredLibraryApi(pkg, into)
+  let isStatic = api.linkKind == llkStatic
+  # Refuse before ``zigNimCross``, which registers the target's wrapper
+  # edge: a refused library leaves nothing behind.
+  if isStatic and zigTarget != nil:
+    raise newException(ValueError,
+      "nim_library(into = \"" & into & "\"): `linkKind static` is not " &
+      "supported under the zig target " & zigTarget.triple & ": nim archives " &
+      "a clang build with `llvm-ar` from PATH, which the target's toolchain " &
+      "does not provide. Build it natively, or declare `linkKind shared`.")
   var cross: ZigNimCross
   if zigTarget != nil:
     cross = zigNimCross(zigTarget, "nim_library")
   else:
     requireCrossTargetConsulted("nim_library")
-  let pkg = activePackageName()
-  let api = registeredLibraryApi(pkg, into)
+
+  if isStatic:
+    # A static archive: no SONAME and no link-time symlink, written where
+    # ``c_library`` writes one (``lib/lib<soname>.a``).
+    let baseName = if api.soname.len > 0: api.soname else: into
+    let archive = targetKeyedPath("lib" / ("lib" & baseName & ".a"))
+    let action = nim.c(
+      source = source,
+      output = archive,
+      defines = defines,
+      mm = mm,
+      paths = paths,
+      appStaticLib = true)
+    result = newLibrary(install = action, api = api,
+                        installPrefix = "usr/lib")
+    # A consumer's link searches where this edge writes the archive.
+    result.linkDir = archive.parentDir
+    return
 
   # One name drives the file, ``-Wl,-soname,`` and the declared output,
   # as for ``c_library``: a consumer's ``DT_NEEDED`` is the SONAME, and the

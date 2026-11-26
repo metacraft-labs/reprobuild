@@ -1580,12 +1580,29 @@ static void *repro_hcr_lx_map_anonymous(void *hint, size_t length,
   if ((protection & REPRO_HCR_LX_PROT_EXEC) != 0) {
     prot |= PROT_EXEC;
   }
-  mapped = mmap(hint, length, prot,
-                MAP_PRIVATE | MAP_ANONYMOUS | extra_flags, -1, 0);
+  /* Inside the tier-2 window (a §5.1 page replacement's anonymous fallback)
+   * this must be a raw system call: design §6.2 allows only those between
+   * signalling and release, and libc entry points are interposed when MCR is
+   * loaded (§5.1). Outside the window it stays libc's `mmap`, so a recorder
+   * sees the provider's ordinary data and probe pages as it always has. */
+  if (repro_hcr_lx_quiesce_is_held()) {
+    long raw = repro_hcr_lx_syscall6(
+        REPRO_HCR_LX_NR_MMAP, (long)(uintptr_t)hint, (long)length, (long)prot,
+        (long)(MAP_PRIVATE | MAP_ANONYMOUS | extra_flags), -1L, 0L);
+    return raw < 0 && raw > -4096 ? NULL : (void *)(uintptr_t)raw;
+  }
+  mapped = mmap(hint, length, prot, MAP_PRIVATE | MAP_ANONYMOUS | extra_flags,
+                -1, 0);
   return mapped == MAP_FAILED ? NULL : mapped;
 }
 
 static int repro_hcr_lx_unmap(void *address, size_t length) {
+  /* Raw inside the tier-2 window, libc outside it, as just above. */
+  if (repro_hcr_lx_quiesce_is_held()) {
+    return repro_hcr_lx_raw_munmap((uint64_t)(uintptr_t)address, length) == 0
+               ? 0
+               : -1;
+  }
   return munmap(address, length);
 }
 
@@ -1649,10 +1666,21 @@ static int32_t repro_hcr_lx_on_stack_threads = -1;
  *
  * `repro_hcr_apply_direct_patch` is now the composition of the two, so there is
  * ONE implementation rather than a second copy for the ABI path to drift away
- * from. Quiescence spans both halves exactly as it did before this split —
- * moving it would have changed what every existing HLX-M4 gate measures, and
- * suspending threads slightly earlier than step 21 is a superset of what
- * Phase G requires, not a reordering of it.
+ * from.
+ *
+ * WHERE QUIESCENCE STARTS AND ENDS (design §6.2 "Deadlock hazards", §11.2).
+ * Quiescence is acquired as the LAST step of prepare, after the transaction
+ * prepare has claimed the window and mapped the body, and every rollback step
+ * other than re-publishing saved words runs after it is released. Until
+ * 2026-11-18 it was taken BEFORE the transaction prepare, so every tier-2
+ * publication called the claim map — `ct_claimed_guest_text_claim`, or the
+ * recorder call, either of which may take a lock — with the other threads
+ * parked, and a prepare or commit failure released claims and unmapped bodies
+ * inside the window too. A thread parked while holding that lock deadlocked
+ * the publication: the parked thread can only release the lock once it runs
+ * again, and it runs again only when the publication finishes. The regression
+ * gate is `tests/integration/test_hcr_linux_claim_map_is_never_called_with_
+ * threads_parked.sh`.
  */
 typedef struct repro_hcr_direct_patch_txn {
   void *entry;
@@ -1734,16 +1762,53 @@ static int repro_hcr_prepare_direct_patch(repro_hcr_direct_patch_txn *txn,
       repro_hcr_lx_quiesce_scratch_a, REPRO_HCR_LX_MAX_QUIESCE_THREADS);
   repro_hcr_lx_last_publication_tier =
       REPRO_HCR_PUBLICATION_TIER_NO_QUIESCENCE;
+  repro_hcr_lx_on_stack_threads = -1;
 
-  /* A failed enumeration is treated as "multithreaded", never as "probably
-   * fine": the whole point of the rule is that an unobserved thread is the
-   * dangerous case. */
+  /*
+   * HLX-M3 (design §11.2): rollback has to "unregister JIT symfiles and
+   * `.eh_frame` sections". The registration functions live in this translation
+   * unit and the transaction lives in a header the test probe also includes,
+   * so the two are joined by pointers installed here rather than by name.
+   *
+   * HLX-M5 made this REACHABLE. Both registrations now succeed on Linux and
+   * `repro_hcr_lx_txn_record_registration` writes the per-site fields
+   * (`jit_entry_address`, `eh_frame_payload_address`), so a rollback after a
+   * registered patch actually calls back through here. The hooks are the
+   * unwind header's own functions rather than agent wrappers around them:
+   * one owner per behaviour, so there is no second copy to drift.
+   */
+  repro_hcr_lx_unregister_jit_hook = repro_hcr_lxu_unregister_jit_symfile;
+  repro_hcr_lx_unregister_eh_frame_hook = repro_hcr_lxu_unregister_eh_frame;
+
+  /* Phase F (§3.2: the in-memory link). Provider-owned memory only; target
+   * text is untouched until the commit below. A refusal here is what §3.3
+   * step 38 is about.
+   *
+   * It runs with every thread RUNNING (§6.2 "Deadlock hazards", §11.2): it
+   * claims the window through the claim map and maps the body, and a prepare
+   * failure releases both again, all of which may take a lock a parked thread
+   * holds. A failed enumeration is treated as "multithreaded", never as
+   * "probably fine": the whole point of the rule is that an unobserved thread
+   * is the dangerous case. So tier 2 is PLANNED here and acquired below. */
+  repro_hcr_lx_quiesce_planned = thread_count != 1;
+  prepare_rc = repro_hcr_lx_prepare_direct_patch_at(entry_address, sled_address,
+                                                    patch_bytes, patch_len);
+  repro_hcr_lx_quiesce_planned = 0;
+  if (prepare_rc != REPRO_HCR_LX_OK) {
+    return prepare_rc;
+  }
+
+  /* The last step of prepare: acquire quiescence. Nothing below allocates,
+   * frees, claims or releases until the threads are released again. */
   if (thread_count != 1) {
     int status = repro_hcr_lx_quiesce_begin(0);
     if (status != REPRO_HCR_LX_QUIESCE_OK) {
       /* §6.3: bounded wait, then release all parked threads, write nothing,
-       * and report. Nothing has touched target text at this point, so the
-       * abort is safe by construction rather than by cleanup. */
+       * and report. `repro_hcr_lx_quiesce_begin` has already released every
+       * thread it parked, so the prepared transaction — its claim and its
+       * body page — is discarded with the threads running (§11.2). Nothing
+       * has touched target text, so the abort is safe by construction. */
+      repro_hcr_lx_discard_direct_patch();
       memset(&repro_hcr_lx_last_report, 0, sizeof(repro_hcr_lx_last_report));
       repro_hcr_lx_last_report.refusal =
           REPRO_HCR_LX_REFUSED_QUIESCENCE_FAILED;
@@ -1765,38 +1830,9 @@ static int repro_hcr_prepare_direct_patch(repro_hcr_direct_patch_txn *txn,
     if (repro_hcr_lx_target_function_size > 0) {
       repro_hcr_lx_on_stack_threads = repro_hcr_lx_quiesce_threads_on_stack_in(
           entry_address, entry_address + repro_hcr_lx_target_function_size);
-    } else {
-      repro_hcr_lx_on_stack_threads = -1;
     }
-  } else {
-    repro_hcr_lx_on_stack_threads = -1;
   }
-
-  /*
-   * HLX-M3 (design §11.2): rollback has to "unregister JIT symfiles and
-   * `.eh_frame` sections". The registration functions live in this translation
-   * unit and the transaction lives in a header the test probe also includes,
-   * so the two are joined by pointers installed here rather than by name.
-   *
-   * HLX-M5 made this REACHABLE. Both registrations now succeed on Linux and
-   * `repro_hcr_lx_txn_record_registration` writes the per-site fields
-   * (`jit_entry_address`, `eh_frame_payload_address`), so a rollback after a
-   * registered patch actually calls back through here. The hooks are the
-   * unwind header's own functions rather than agent wrappers around them:
-   * one owner per behaviour, so there is no second copy to drift.
-   */
-  repro_hcr_lx_unregister_jit_hook = repro_hcr_lxu_unregister_jit_symfile;
-  repro_hcr_lx_unregister_eh_frame_hook = repro_hcr_lxu_unregister_eh_frame;
-
-  /* Phase F (§3.2: the in-memory link). Provider-owned memory only; target
-   * text is untouched until the commit below. A refusal here is what §3.3
-   * step 38 is about. */
-  prepare_rc = repro_hcr_lx_prepare_direct_patch_at(entry_address, sled_address,
-                                                    patch_bytes, patch_len);
   txn->quiesced = quiesced;
-  if (prepare_rc != REPRO_HCR_LX_OK) {
-    return prepare_rc;
-  }
   txn->prepared = 1;
   return REPRO_HCR_LX_OK;
 }
@@ -1805,12 +1841,16 @@ static int repro_hcr_prepare_direct_patch(repro_hcr_direct_patch_txn *txn,
 static void *repro_hcr_commit_direct_patch(repro_hcr_direct_patch_txn *txn) {
   void *patch_page = NULL;
   if (txn->prepared) {
-    patch_page = repro_hcr_lx_commit_direct_patch();
+    /* Under tier 2 a commit failure restores the published words with the
+     * threads parked and leaves the rest of the rollback to after release. */
+    patch_page = repro_hcr_lx_commit_direct_patch_ex(txn->quiesced);
   }
   if (txn->quiesced) {
     (void)repro_hcr_lx_quiesce_release();
     txn->quiesced = 0;
   }
+  /* §11.2: unregistration, claim release and unmapping, threads running. */
+  repro_hcr_lx_finish_direct_patch_cleanup();
   if (patch_page != NULL) {
     repro_hcr_notify_did_patch(txn->entry, patch_page, txn->patch_len);
   }
@@ -1818,12 +1858,18 @@ static void *repro_hcr_commit_direct_patch(repro_hcr_direct_patch_txn *txn) {
 }
 
 /* Release whatever the prepare half acquired without touching target text.
- * `repro_hcr_lx_txn_prepare` has already discarded any site it prepared before
- * the one that refused, so the only thing left to undo here is quiescence. */
+ * Both callers abort only after a refused prepare, which has already discarded
+ * what it prepared, with the threads running, and holds no quiescence. The
+ * branches below are defensive: a caller that abandoned a SUCCESSFUL prepare
+ * would hold quiescence, a claim and a body, and must release the threads
+ * before discarding (§11.2). */
 static void repro_hcr_abort_direct_patch(repro_hcr_direct_patch_txn *txn) {
   if (txn->quiesced) {
     (void)repro_hcr_lx_quiesce_release();
     txn->quiesced = 0;
+  }
+  if (txn->prepared) {
+    repro_hcr_lx_discard_direct_patch();
   }
   txn->prepared = 0;
 }

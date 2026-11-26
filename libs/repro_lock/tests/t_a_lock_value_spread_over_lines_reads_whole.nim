@@ -59,6 +59,18 @@ proc vcsDep(name, rev: string; self = false): LockedDep =
       url: "https://example.invalid/" & name & ".git", revision: rev),
     integrity: "git-sha1:" & rev)
 
+proc oneLineLayout(doc: string): string =
+  ## The pre-2026-11-25 layout, the whole array on one line: what committed
+  ## locks carried until the writer moved to one record per line, and what
+  ## this file's layouts are derived from. The writer's own layout is pinned
+  ## in t_a_lock_writes_one_dependency_per_line.nim.
+  var records: seq[string]
+  for line in lockStatementSource(doc, "deps").splitLines():
+    var l = line.strip()
+    if l.startsWith("{"): records.add(l.strip(chars = {','}))
+  doc.replace(lockStatementSource(doc, "deps"),
+    "deps = [" & records.join(", ") & "]")
+
 proc threeDepLock(): LockedDependencies =
   result = lockedDepsFromSolved(solutionToLock(
     solutionOf(@[("libfoo", "1.4.2"), ("nim", "2.2.0")], []), Platform,
@@ -89,7 +101,7 @@ proc depRevisions(ld: LockedDependencies): seq[string] =
 suite "a lock value spread over several lines":
 
   test "the continuation-line layout reads every dependency":
-    let canonical = serializeLockedDependencies(threeDepLock())
+    let canonical = oneLineLayout(serializeLockedDependencies(threeDepLock()))
     let spread = continuationLayout(canonical)
     # The fixture really is the issue's layout: three physical lines.
     check spread.count("\n, { name = ") == 2
@@ -100,10 +112,10 @@ suite "a lock value spread over several lines":
     check depRevisions(got) == depRevisions(expected)
     check got.deps[0].depends == @["lib-b", "lib-c"]
     # Read whole, it re-serializes to the canonical document.
-    check serializeLockedDependencies(got) == canonical
+    check oneLineLayout(serializeLockedDependencies(got)) == canonical
 
   test "one record per line, a trailing comma and comments read too":
-    let canonical = serializeLockedDependencies(threeDepLock())
+    let canonical = oneLineLayout(serializeLockedDependencies(threeDepLock()))
     let line = depsLineOf(canonical)
     let body = line["deps = [".len ..< line.len - 1]
     let laidOut = "deps = [ # one record per line\n  " &
@@ -111,11 +123,11 @@ suite "a lock value spread over several lines":
       ",\n]"
     let doc = canonical.replace(line, laidOut)
     check doc.count('\n') > canonical.count('\n') + 3
-    check serializeLockedDependencies(parseLockedDependencies(doc)) ==
-      canonical
+    check oneLineLayout(serializeLockedDependencies(
+      parseLockedDependencies(doc))) == canonical
 
   test "lockStatementSource returns the whole multi-line statement":
-    let canonical = serializeLockedDependencies(threeDepLock())
+    let canonical = oneLineLayout(serializeLockedDependencies(threeDepLock()))
     let spread = continuationLayout(canonical)
     let source = lockStatementSource(spread, "deps")
     check source.startsWith("deps = [{ name = \"app\"")
@@ -130,7 +142,7 @@ suite "a lock value spread over several lines":
     check lockStatementSource(canonical, "provisioning") == ""
 
   test "CRLF line endings keep the statement's own bytes":
-    let canonical = serializeLockedDependencies(threeDepLock())
+    let canonical = oneLineLayout(serializeLockedDependencies(threeDepLock()))
     let spread = continuationLayout(canonical).replace("\n", "\r\n")
     let source = lockStatementSource(spread, "deps")
     check source.count("\r\n") == 2
@@ -140,7 +152,7 @@ suite "a lock value spread over several lines":
       @["app", "lib-b", "lib-c"]
 
   test "the document the old rewrite left behind is refused by name":
-    let canonical = serializeLockedDependencies(threeDepLock())
+    let canonical = oneLineLayout(serializeLockedDependencies(threeDepLock()))
     let spread = continuationLayout(canonical)
     # What the pre-commit re-pin wrote: the FIRST physical line replaced by a
     # complete one-line array, the continuation lines left where they were.
@@ -158,7 +170,7 @@ suite "a lock value spread over several lines":
       discard lockStatementSource(broken, "deps")
 
   test "an array still open at the end of the document is refused":
-    let canonical = serializeLockedDependencies(threeDepLock())
+    let canonical = oneLineLayout(serializeLockedDependencies(threeDepLock()))
     let line = depsLineOf(canonical)
     let truncated = canonical.replace(line, line[0 ..< line.len - 1])
     expect SolvedGraphLockParseError:
@@ -176,7 +188,7 @@ suite "a lock value spread over several lines":
 
   test "the CONTROL: the one-line layout and the policy section":
     let ld = threeDepLock()
-    let canonical = serializeLockedDependencies(ld)
+    let canonical = oneLineLayout(serializeLockedDependencies(ld))
     check depNames(parseLockedDependencies(canonical)) ==
       @["app", "lib-b", "lib-c"]
     # A `deps` key inside the certificate-policy snapshot is not the lock's
