@@ -78332,7 +78332,12 @@ proc runRecordStorePrePushGuard(repoRoot, refsFile, remoteLocation: string): int
     if observed != update.remoteOid:
       return refuse("destination ref " & update.remoteRef & " changed since Git advertised " & update.remoteOid & "; retry the push")
   var snapshots = initTable[string, Table[string, string]]()
-  var published = initTable[string, string]()
+  # Every object entry published for a path, with the ref that publishes it.
+  # A disagreement between destination refs is recorded, not refused: the
+  # guard binds what the push supplies (CLI/hooks.md), and refusing an
+  # unrelated addition would block every lock publication until the store's
+  # owner resolved the disagreement.
+  var published = initTable[string, Table[string, string]]()
   var fetched = initHashSet[string]()
   for refName, oid in remoteRefs:
     if oid notin fetched:
@@ -78345,9 +78350,16 @@ proc runRecordStorePrePushGuard(repoRoot, refsFile, remoteLocation: string): int
     if not snapshot.ok: return refuse(snapshot.diagnostic)
     snapshots[refName] = snapshot.entries
     for path, objectId in snapshot.entries:
-      if published.hasKey(path) and published[path] != objectId:
-        return refuse("destination already contains conflicting published record " & path)
-      published[path] = objectId
+      if not published.hasKey(path): published[path] = initTable[string, string]()
+      published[path][objectId] = refName
+      if published[path].len > 1:
+        var holders: seq[string]
+        for otherId, otherRef in published[path]:
+          holders.add(otherRef & " holds " & otherId)
+        holders.sort()
+        stderr.writeLine("repro hooks: warning: destination refs disagree on published record " &
+          path & " (" & holders.join("; ") & "); the push is not refused for it, " &
+          "but the store's owner must decide which record stands")
   for update in stream.updates:
     let proposed = records(update.localOid)
     if not proposed.ok: return refuse(proposed.diagnostic)
@@ -78358,9 +78370,16 @@ proc runRecordStorePrePushGuard(repoRoot, refsFile, remoteLocation: string): int
         if proposed.entries[path] != objectId:
           return refuse(update.remoteRef & " changes published record " & path)
     for path, objectId in proposed.entries:
-      if published.hasKey(path) and published[path] != objectId:
-        return refuse(update.remoteRef & " changes published record " & path)
-      published[path] = objectId
+      # A key this ref already publishes was verified unchanged above; only a
+      # key the push newly supplies must agree with every other publication.
+      let alreadyOnRef = snapshots.hasKey(update.remoteRef) and
+        snapshots[update.remoteRef].hasKey(path)
+      if not alreadyOnRef and published.hasKey(path):
+        for otherId in published[path].keys:
+          if otherId != objectId:
+            return refuse(update.remoteRef & " changes published record " & path)
+      if not published.hasKey(path): published[path] = initTable[string, string]()
+      published[path][objectId] = update.remoteRef
   0
 
 proc runCheckCommand*(parsed: CheckArgs; hookRemoteName = "";

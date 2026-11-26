@@ -31189,6 +31189,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_tests_integration_g12",
     singleReason: ""),
   TestSpec(
+    source: "tests/integration/t_record_store_push_guard_tolerates_disagreeing_destination_refs.nim",
+    binary: "build/test-bin/t_record_store_push_guard_tolerates_disagreeing_destination_refs",
+    defines: @[],
+    requiresReproBinary: true,
+    requiresMonitorShim: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_tests_integration_g12",
+    singleReason: ""),
+  TestSpec(
     source: "tests/integration/t_records_url_locates_the_lock_record_store.nim",
     binary: "build/test-bin/t_records_url_locates_the_lock_record_store",
     defines: @[],
@@ -31294,7 +31306,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g12",
+    group: "t_group_tests_integration_g13",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_rename_fork_at_previous_path_is_refused.nim",
@@ -31978,7 +31990,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g13",
+    group: "t_group_tests_integration_g14",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_reproos_source_bridge_inventory.nim",
@@ -32770,7 +32782,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g14",
+    group: "t_group_tests_integration_g15",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_shell_non_tty_refusal_and_inline_command.nim",
@@ -33706,7 +33718,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g15",
+    group: "t_group_tests_integration_g16",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_tdx_agent_backend.nim",
@@ -34498,7 +34510,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g16",
+    group: "t_group_tests_integration_g17",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_v3_artifact_refused_on_a_v2_host.nim",
@@ -35230,7 +35242,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g17",
+    group: "t_group_tests_integration_g18",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_workspace_override_shadows_upstream_in_resolver.nim",
