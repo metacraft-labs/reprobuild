@@ -58,8 +58,8 @@ proc helperRebuildHint(name: string): string =
 
 proc helperBuildDir*(repoRoot: string): string =
   ## Where the helper binaries are: ``build/`` of the tree, or
-  ## ``$REPRO_TEST_BUILD_DIR`` (the Nim 2.2.4 lane builds its own there,
-  ## ``scripts/run_nim224_lane.sh``).
+  ## ``$REPRO_TEST_BUILD_DIR`` (the Nim floor lane builds its own there,
+  ## ``scripts/run_nim_floor_lane.sh``).
   let d = getEnv("REPRO_TEST_BUILD_DIR")
   if d.len > 0: absolutePath(d, repoRoot) else: repoRoot / "build"
 

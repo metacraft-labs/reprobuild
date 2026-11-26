@@ -43,6 +43,7 @@ when not defined(windows):
 
 import repro_core
 import repro_core/ambient_execution
+import repro_core/recipe_compiler_requirement
 import repro_elevation/broker
 import repro_local_store
 import repro_lock
@@ -109,6 +110,17 @@ proc realizePinnedProviderNim*(storeRoot: string; pin: SelfPin): string =
   ## provider with a compiler the lock does not name, which is the failure
   ## the pin exists to rule out.
   let pkg = providerNimPin()
+  # Recipe compilation requires Nim 2.2.10 or newer (operator decision of
+  # 2026-11-24), so a lock that pins an older release is refused before
+  # anything is downloaded or built for it. Only a pin that reads as a
+  # version below the floor is refused.
+  let refusal = recipeCompilerRefusal(pin.version,
+    pin.lockPath & " pins the provider compiler " & pkg.name)
+  if refusal.len > 0:
+    raise newException(ProviderNimPinError, refusal &
+      " Re-pin it: `repro lock update " & pkg.name & "` (or the lock's " &
+      "`" & pkg.name & "` pin) to " & RecipeCompilerMinimumVersion &
+      " or newer.")
   let prefix = selfPrefixAbsolutePath(storeRoot, pin)
   let exe = pinnedExecutableIn(pkg, prefix)
   if fileExists(exe):

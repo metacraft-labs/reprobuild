@@ -136,6 +136,12 @@ const CanonicalPinExemptions = [
   # anticipates: a single coherent snapshot for the rest of the catalog,
   # with this one ABI-driven divergence documented + exempted explicitly.
   "accountsservice",
+  # 2026-11-24 (operator decision): ``nim`` is pinned to the snapshot that
+  # carries Nim 2.2.10, the release recipe compilation requires, instead of
+  # the canonical snapshot's 2.2.4. The pair equals the engine's own
+  # bootstrap pin (``BootstrapNimNixpkgsRev``); see the comment in
+  # ``packages/nim.nim`` and ``t_catalog_nim_nix_arm_is_the_recipe_compiler_release``.
+  "nim",
 ]
 
 iterator catalogFiles(): tuple[name, path: string] =
