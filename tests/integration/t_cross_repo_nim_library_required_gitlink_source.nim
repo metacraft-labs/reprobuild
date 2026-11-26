@@ -139,6 +139,7 @@ package consumer:
     "nim"
     "clang"
     "sh"
+    "mkdir"
     "greetlib"
 
   build:

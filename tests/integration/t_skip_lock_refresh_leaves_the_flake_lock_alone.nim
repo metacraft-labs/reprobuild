@@ -18,12 +18,20 @@
 ##   3. the opt-out covers ONE commit: the next commit without the variable
 ##      records the pin (and `REPRO_SKIP_LOCK_REFRESH=0` is "not set");
 ##   4. it skips the writers, not the checks: an opted-out commit carrying an
-##      H1-inconsistent `flake.lock` is still refused (§16.3 H1 / H2).
+##      H1-inconsistent `flake.lock` is still refused (§16.3 H1 / H2);
+##   5. the notice is planned by the hook's own rules: with one input AHEAD
+##      of its pin and another whose checkout is BEHIND its pin, it still
+##      says `flake.lock` would have been re-pinned. The hook keeps the
+##      behind pin and records the ahead one (Unified-Locking-And-Hooks.md
+##      §13.3, "What 'backward' is judged against"), so "no lock needed
+##      re-pinning" would be false.
 ##
 ## ## Mutation
 ##
 ## Ignore the variable ⇒ (1) RED: the commit carries the moved `alpha-src`
-## node. Skip silently ⇒ (2) RED.
+## node. Skip silently ⇒ (2) RED. Plan the notice by the lock-update node's
+## rules (which refuse on the behind input and so plan no `flake.lock` write
+## at all) ⇒ (5) RED: the notice says no lock needed re-pinning.
 ##
 ## Test-double policy: NO mocks, doubles or fakes; see the header of
 ## `nf2_flake_lock_fixture.nim`. Arm (3) records a pin, which needs nix to
@@ -32,7 +40,7 @@
 
 import std/[json, os, strutils, unittest]
 
-import nf2_flake_lock_fixture
+import nf3_override_state_fixture
 import repro_test_support/reasoned_skip
 
 const caseName = "t_skip_lock_refresh_leaves_the_flake_lock_alone"
@@ -118,3 +126,43 @@ suite "REPRO_SKIP_LOCK_REFRESH: one commit leaves flake.lock alone":
       check "H1 (" in inconsistent.output
       check "REFUSED" in inconsistent.output
       check "REPRO_SKIP_LOCK_REFRESH is set" in inconsistent.output
+
+  test "t_skip_notice_counts_an_ahead_input_beside_a_kept_pin":
+    if not nf2Prerequisites(caseName):
+      skip("git or the built ./build/bin/repro is missing (named above)")
+    else:
+      let fx = setupNf2Fixture("skip-refresh-beside-kept")
+      defer: removeDir(fx.scratch)
+      isolateNf2Config(fx)
+      defer: releaseNf2Config()
+
+      # gamma's lock pin is one commit ahead of its checkout (the objects
+      # stay in the store, so the row classifies as BEHIND); alpha moves
+      # ahead of its pin and is published, so the hook would record it.
+      let gammaPinned = advanceSibling(fx, "gamma", 1)
+      let gammaCheckout = rewindSibling(fx, "gamma", 1)
+      check gammaPinned != gammaCheckout
+      setFlakePins(fx, fx.seedSha[0], fx.seedSha[1], gammaPinned)
+      commitLockAndPublish(fx, "a lock pinned ahead of the gamma checkout")
+      let before = readFile(lockPath(fx))
+      discard moveAndPublishSibling(fx, "alpha", "revision 2")
+
+      putEnv("REPRO_SKIP_LOCK_REFRESH", "1")
+      let skipped = tryCommitInApp(fx, "a commit with no pin change")
+      delEnv("REPRO_SKIP_LOCK_REFRESH")
+      checkpoint("commit output:\n" & skipped.output)
+      checkpoint("pre-commit log:\n" & preCommitLog(fx))
+      check skipped.code == 0
+      check lockInCommit(fx) == before
+      check readFile(lockPath(fx)) == before
+
+      var notice = ""
+      for line in skipped.output.splitLines():
+        if line.startsWith("repro pre-commit:") and
+            line.contains("REPRO_SKIP_LOCK_REFRESH is set"):
+          notice = line
+      checkpoint("notice: " & notice)
+      check notice.len > 0
+      check notice.contains("flake.lock would have been re-pinned")
+      check not notice.contains("no lock needed re-pinning")
+      check not notice.contains("REFUSED")

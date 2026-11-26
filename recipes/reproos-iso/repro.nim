@@ -40,6 +40,58 @@ package reproosIso:
 
   uses:
     "sh"
+    # The programs this package's shell action and the scripts it runs
+    # invoke. A shell edge runs on a hermetic PATH made only of its
+    # package's declared tools, so each one must be named here
+    # (Hermetic-Builds-And-Path-Independence.md §"Shell edges declare
+    # their package's tools").
+    # The scripts are build-iso.sh, build-initramfs.sh, stage-de-rootfs.sh,
+    # build-base-rootfs.sh and normalize-source-runtime.sh. grub-mkrescue
+    # runs xorriso and mformat itself; tar runs xz to unpack .tar.xz.
+    "bash"
+    "awk"
+    "basename"
+    "cat"
+    "chmod"
+    "chown"
+    "comm"
+    "cp"
+    "cpio"
+    "cut"
+    "dd"
+    "depmod"
+    "dirname"
+    "du"
+    "find"
+    "grep"
+    "gzip"
+    "head"
+    "ln"
+    "mcopy"
+    "mformat"
+    "mkdir"
+    "mkfs.fat"
+    "mksquashfs"
+    "mktemp"
+    "mmd"
+    "mv"
+    "patchelf"
+    "readlink"
+    "rm"
+    "sed"
+    "sha256sum"
+    "sort"
+    "stat"
+    "tail"
+    "tar"
+    "touch"
+    "tr"
+    "wc"
+    "xorriso"
+    "xz"
+    "zstd"
+    "grub-mkimage"
+    "grub-mkrescue"
 
   # The two vendored inputs. R10 will replace these with selectors into
   # the R8 + R7 typed packages; the rest of the recipe doesn't change.

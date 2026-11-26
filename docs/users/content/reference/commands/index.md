@@ -92,7 +92,7 @@ Commands fall into four side-effect classes:
 | `repro gateway` | `pre-receive`, `post-receive`, `migrate` | Run a push-gateway hook entry point. |
 | `repro bundle` | `create`, `publish`, `restore`, `inspect` | Create, publish and restore workspace bundles (docs/workspace-bundles.md). |
 | `repro catalog` | `generate`, `verify`, `publish` | Publish a catalog's interface artifacts, or generate and verify a Nimble package index. |
-| `repro nimble` | `verify`, `check` | Work with the Nimble packages a lock pins. |
+| `repro nimble` | `verify`, `check`, `develop`, `gitlink-audit` | Work with the Nimble packages a lock pins. |
 
 ## Machines & Diagnostics
 

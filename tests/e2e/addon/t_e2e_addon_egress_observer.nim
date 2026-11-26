@@ -74,7 +74,7 @@
 ##
 ## *Mocking.* None.
 
-import std/[json, os, sequtils, strutils, unittest]
+import std/[json, os, sequtils, strutils, times, unittest]
 
 import repro_test_support/reasoned_skip
 
@@ -187,28 +187,50 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
          it.record.field("destination") == EgressControlAddress), "")
   # 3b. A burst of records (A11 audit F2): thirty refused destinations from
   # the fetch slice make the check write thirty records at once. The path
-  # unit must survive the burst and ship them within a minute.
+  # unit must survive the burst and ship them all. The unit's
+  # IPAddressDeny= drops each SYN rather than refusing the connect, so a
+  # connect waits for TCP's retries (measured: 6-7 packets per address, A11
+  # round 26); the thirty run at once, each in its own background subshell,
+  # and are killed after ten seconds, long enough for every one to start
+  # and send its first SYN on a loaded host (a serial `timeout 1 bash` that
+  # did not start within its second sent none, round 25). The
+  # table's set is recorded, so a destination the table never counted is
+  # told apart from a record that did not ship, and the arrival is polled
+  # for three minutes with the time it took recorded.
   let burstSince = sink.headSeq()
   discard g.exec("systemd-run --wait --quiet --slice=" & "system-reproagent.slice" &
     " -p DynamicUser=yes -p IPAddressDeny=any -p IPAddressAllow=10.0.2.2 " &
-    "/bin/bash -c 'for i in $(seq 20 49); do timeout 1 bash -c " &
-    "\"exec 3<>/dev/tcp/198.51.100.$i/443\" 2>/dev/null; done; true'",
+    "/bin/bash -c 'for i in $(seq 20 49); do " &
+    "( exec 3<>/dev/tcp/198.51.100.$i/443 ) >/dev/null 2>&1 & done; " &
+    "sleep 10; kill $(jobs -p) 2>/dev/null; wait; true'",
     timeoutSec = 300)
+  let burstSet = g.exec("nft list set inet repro_addon_egress refused4").stdout
+  var burstCounted = 0
+  for i in 20 .. 49:
+    if ("198.51.100." & $i) in burstSet: inc burstCounted
+  step("the table counted all thirty burst destinations", burstCounted == 30,
+       $burstCounted & " counted: " & burstSet)
+  let burstStart = epochTime()
   discard g.exec("systemctl start repro-addon-egress-check.service")
   var arrived = 0
-  for _ in 0 ..< 30:
+  var tookSec = -1.0
+  while epochTime() - burstStart < 180:
     arrived = 0
     for e in sink.entries():
       if e.seq > burstSince and e.kind == ekRecord and
           e.record.trigger == "egress-refused" and
           e.record.field("destination").startsWith("198.51.100."): inc arrived
-    if arrived >= 30: break
+    if arrived >= 30:
+      tookSec = epochTime() - burstStart
+      break
     sleep(2000)
   let pathState = g.exec("systemctl is-failed repro-addon-evidence.path").stdout.strip()
-  record["burst"] = %*{"arrived": arrived, "pathUnit": pathState}
-  step("a burst of thirty records leaves within a minute, the path unit alive",
-       arrived >= 30 and pathState != "failed", $arrived & " arrived; path " &
-       pathState)
+  record["burst"] = %*{"arrived": arrived, "pathUnit": pathState,
+                       "counted": burstCounted, "tookSec": tookSec,
+                       "refused4": burstSet}
+  step("a burst of thirty records all leave, the path unit alive",
+       arrived >= 30 and pathState != "failed", $arrived & " arrived in " &
+       $tookSec & " s; path " & pathState)
   # 3c. The re-assert, confined to a private network namespace, reads the
   # HOST's table (session 2, G4): a healthy reboot is ``ok``, a deleted
   # table is ``missing``.

@@ -347,6 +347,7 @@ COVERED_COMMANDS = [
     "system addon state digest",
     "system addon state unit",
     "system addon state install-unit",
+    "system addon state retire",
     "system addon status",
     "system addon retention",
     "system addon selfcheck-btrfs",
@@ -359,6 +360,7 @@ COVERED_COMMANDS = [
     "system state digest",
     "system state unit",
     "system state install-unit",
+    "system state retire",
     "system secret",
     "system secret put",
     "system secret materialise",
@@ -399,6 +401,8 @@ COVERED_COMMANDS = [
     "tool",
     "tool realize",
     "nimble check",
+    "nimble develop",
+    "nimble gitlink-audit",
 ]
 
 BUILT_IN_FLAGS = {"--help", "-h"}

@@ -525,7 +525,16 @@ proc shipAndConfirm*(site: ShipSite; host: string):
   ## were never acknowledged (A11 code review round 11; §13 decision 62:
   ## nothing is discarded unshipped without its signed record).
   if not fileExists(site.confPath):
-    let queued = outboxEntries(site.outbox).len
+    # The egress check's drop entries not yet moved into the outbox are
+    # queued records too (§13 decision 188; A11 round 26).
+    let dropped = when mutated("uninstall-ignores-drop"): 0
+                  else: dropEntryNames(site.dropDir).len
+    # So are the outbox's entries from before §13 decision 181 not yet
+    # moved (the owner's decision of 2026-11-26).
+    let legacy = if site.legacyOutbox.len > 0:
+                   dropEntryNames(site.legacyOutbox).len
+                 else: 0
+    let queued = outboxEntries(site.outbox).len + dropped + legacy
     when mutated("ship-ok-without-sink-configuration"):
       return (true, "")                   # FALSIFIER: queued records ignored
     if queued == 0: return (true, "")
@@ -769,7 +778,16 @@ proc writeOverrideRecord(custody: CustodySite; dir: string;
              "time": t.utc.format("yyyy-MM-dd'T'HH:mm:ss'Z'"),
              "host": custody.evidence.host, "why": why,
              "objects": objects,
-             "queuedRecords": outboxEntries(custody.evidence.outbox),
+             "queuedRecords": outboxEntries(custody.evidence.outbox) &
+               (when mutated("uninstall-ignores-drop"): @[]
+                else: dropEntryNames(custody.evidence.dir / "egress-drop").mapIt(
+                  custody.evidence.dir / "egress-drop" / it)) &
+               # The outbox's entries from before §13 decision 181 not yet
+               # moved (the owner's decision of 2026-11-26), unless that is
+               # where this site's outbox is.
+               (if custody.evidence.dir / "outbox" == custody.evidence.outbox: @[]
+                else: dropEntryNames(custody.evidence.dir / "outbox").mapIt(
+                  custody.evidence.dir / "outbox" / it)),
              "attestationKey": (if keyless: "" else: attestationPublicKeyHex(keyPath))}
   if keyless: j["unsigned"] = %"the host has no attestation key"
   result.text = pretty(j) & "\n"

@@ -54,6 +54,13 @@ package nixPathCopyProbe:
 
   uses:
     "sh"
+    "mkdir"
+
+  # A dependency the build never runs, declared only so the package reaches
+  # the interface artifact. `runtimeDeps:` rather than `uses:` because a
+  # `shell(...)` edge declares its package's `uses:` tools and would then
+  # have to resolve this Nix-only package under `--tool-provisioning=path`.
+  runtimeDeps:
     "nixPathCopyTool"
 
   build:

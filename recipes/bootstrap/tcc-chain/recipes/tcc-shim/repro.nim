@@ -40,6 +40,30 @@ package tccChainTccShim:
 
   uses:
     "sh"
+    # The programs this package's shell action and the scripts it runs
+    # invoke. A shell edge runs on a hermetic PATH made only of its
+    # package's declared tools, so each one must be named here
+    # (Hermetic-Builds-And-Path-Independence.md §"Shell edges declare
+    # their package's tools").
+    # head and uname are run by recipes/cache/scripts/cache-helper.sh,
+    # which the build script sources; tar needs gzip to unpack .tar.gz.
+    "bash"
+    "awk"
+    "cat"
+    "chmod"
+    "cp"
+    "date"
+    "dirname"
+    "gzip"
+    "head"
+    "ln"
+    "mkdir"
+    "mktemp"
+    "rm"
+    "sha256sum"
+    "stat"
+    "tar"
+    "uname"
 
   build:
     shell(
