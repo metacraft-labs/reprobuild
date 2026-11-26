@@ -62339,7 +62339,7 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_workspace_clone_object_policy.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 6,
+      "staticCaseCount": 7,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

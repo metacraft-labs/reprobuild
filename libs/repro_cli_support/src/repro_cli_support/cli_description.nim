@@ -711,7 +711,7 @@ proc writeReportFlags(): NimNode {.compileTime.} =
 proc cloneObjectsFlag(): NimNode {.compileTime.} =
   ## Where a clone keeps its git objects.
   quote do:
-    flag cloneObjects is string,
+    flag cloneObjects is Option[string],
       help = "Where new clones keep their objects: `shared` (the default " &
         "shared clone pool), `private=<dir>`, or `none` (also spelt " &
         "`dissociate`)"
