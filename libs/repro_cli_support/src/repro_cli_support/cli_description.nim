@@ -4131,6 +4131,10 @@ proc reproCommandLineDescription*(): NimNode {.compileTime.} =
         flag fromFile is string, perSource = [cli = "from"],
           help = "Read the stream from this file (default, or `-`: stdin)"
         boolFlag tee is bool, help = "Copy the stream to standard output"
+        boolFlag passThrough is bool,
+          help = "Read a MIXED stream (cargo test output among the JSON " &
+            "messages): record the JSON lines and copy every other " &
+            "line to standard output unchanged"
       subcmd "run", help = "Run cargo as a build edge and report its final " &
           "products":
         flag width is int, short = 'j', help = "Passed to cargo as `-j`"
