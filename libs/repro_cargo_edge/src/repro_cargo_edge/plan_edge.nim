@@ -79,8 +79,10 @@ type
       ## The closed environment, `NAME=value` per entry.
     fetchEdges*: seq[string]
       ## The ids of the `cargo.fetch` edges of the workspace's lock.
-    prefixes*: seq[string]
-      ## Their store prefixes.
+    crates*: seq[CratePrefix]
+      ## The crates.io crates of the lock with the store prefixes their
+      ## fetch edges made. The record run serves cargo each one from its
+      ## prefix (`plan_run`, step 3).
 
 proc cargoPlanEdgeId*(name: string): string = CargoPlanEdgePrefix & name
 
@@ -89,6 +91,8 @@ proc cargoPlanArgv*(cfg: CargoPlanEdgeConfig): seq[string] =
     cfg.scratchDir, "--cargo", cfg.cargo, "--rustc", cfg.rustc]
   if cfg.storeRoot.len > 0:
     result.add ["--store-root", cfg.storeRoot]
+  for c in cfg.crates:
+    result.add ["--crate", crateArg(c)]
   result.add "--"
   result.add cfg.cargoArgs
 
@@ -104,12 +108,12 @@ proc cargoPlanEdge*(cfg: CargoPlanEdgeConfig): BuildAction =
     raise newException(ValueError, "cargo plan edge " & cfg.name & ": " &
       problem)
   var inputs = @["Cargo.toml", "Cargo.lock"]
-  inputs.add cfg.prefixes
+  for c in cfg.crates: inputs.add c.prefix
   var anchors: seq[string]
   for tool in [cfg.wrapper, cfg.cargo, cfg.rustc]:
     if tool.isAbsolute: anchors.add parentDir(tool)
   if cfg.storeRoot.len > 0: anchors.add cfg.storeRoot
-  anchors.add cfg.prefixes
+  for c in cfg.crates: anchors.add c.prefix
   if dirExists("/nix/store"): anchors.add "/nix/store"
   result = action(cargoPlanEdgeId(cfg.name), cargoPlanArgv(cfg),
     cwd = cfg.projectRoot,

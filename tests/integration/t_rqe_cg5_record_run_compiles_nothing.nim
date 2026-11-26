@@ -28,13 +28,22 @@
 ## listener through the proxy variables; and the monitor saw the edge read
 ## the workspace's `Cargo.toml` (the edge really ran monitored).
 ##
-## What this case does not cover: registry dependencies. The edge refuses a
-## `Cargo.lock` with packages that have a source, because no source
-## replacement over the fetched store prefixes is written yet; until it is,
-## the workspace holds path members only.
+## REGISTRY CRATES. `app` also depends on two crates.io crates, `regbs` (with
+## a build script that must not run either) and `regleaf`, made by `cargo
+## package` and fetched by the production fetch edges from a mirror directory
+## into a private store root; the edge is given their prefixes. Every unit of
+## theirs must be in the plan, named by its prefix (working directory,
+## manifest directory, a crate root that is a file of the prefix), and each
+## prefix must be exactly as it was (entries, sizes, permissions, times): the
+## vendor directory links to it and nothing writes into it.
 ##
-## Falsifying mutation (applied, observed to fail, reverted; see the change's
-## report): letting the wrapper run rustc for a build-script unit (record
+## Falsifying mutations (applied, observed to fail, reverted; see the
+## change's reports): mapping a vendor entry to a prefix path guessed from
+## the crate's name and version instead of the prefix the run linked it to
+## (the registry checks fail); dropping the mapping (the edge fails on a
+## scratch path); making a prefix writable while the vendor entry is made
+## (the prefix check fails); letting the wrapper run rustc for a build-script
+## unit (record
 ## mode classifying `build_script_*` lines as probes) compiles and runs the
 ## build scripts: the listener counts their connections, the markers appear,
 ## the logger sees non-probe lines, and the edge fails. Refusing again a run
@@ -47,7 +56,7 @@
 import std/[net, os, sequtils, strutils, tempfiles, unittest]
 
 import repro_build_engine
-import repro_cargo_edge/[cargo_plan, plan_edge]
+import repro_cargo_edge/[cargo_plan, plan_edge, record_mode]
 import repro_test_support
 
 import ./rqe_cg5_plan_fixture
@@ -68,10 +77,16 @@ suite "the record-only graph-production edge":
     let realRustc = findExe("rustc")
     require cargo.len > 0 and realRustc.len > 0
     let work = createTempDir("cg5-record-run-", "")
-    defer: removeDir(work)
+    defer: removeTestTree(work)   # the store's prefixes are read-only
     let ws = work / "ws"
     let markers = work / "markers"
-    writePlanWorkspace(ws, smMustNotRun)
+    writePlanWorkspace(ws, smMustNotRun, registry = true)
+    let reg = setupRegistry(work, smMustNotRun)
+    var prefixesBefore: seq[seq[string]]
+    for c in reg.crates:
+      # The fetch publishes a prefix read-only.
+      check fpUserWrite notin getFilePermissions(c.prefix)
+      prefixesBefore.add treeSnapshot(c.prefix)
 
     let listener = startListener()
     defer: listener.stop()
@@ -102,7 +117,8 @@ suite "the record-only graph-production edge":
       require listener.accepted >= 1
       listener.resetCount()
 
-    let lock = runClosed([cargo, "generate-lockfile", "--offline"], ws,
+    let lock = runClosed(@[cargo] & reg.sourceArgs &
+      @["generate-lockfile", "--offline"], ws,
       envPairs & @[("HOME", work / "lock-home"),
         ("CARGO_HOME", work / "lock-home" / ".cargo")])
     checkpoint lock.output
@@ -111,7 +127,7 @@ suite "the record-only graph-production edge":
     # The compiler the edge is given lies under the store root it declares,
     # as the store root's own toolchain does: a plan names its tools by
     # logical root.
-    let toolStore = work / "tool-store"
+    let toolStore = reg.store / "test-tools"
     createDir(toolStore / "bin")
     let rustcLog = work / "rustc.log"
     let logger = toolStore / "bin" / "rustc-logger"
@@ -120,8 +136,10 @@ suite "the record-only graph-production edge":
     let scratchRel = ".repro/build/cargo/app.plan-scratch"
     let edge = cargoPlanEdge(CargoPlanEdgeConfig(name: "app",
       projectRoot: ws, planFile: planRel, scratchDir: scratchRel,
-      wrapper: wrapper, cargo: cargo, rustc: logger, storeRoot: toolStore,
-      devEnv: devEnvOf(envPairs)))
+      wrapper: wrapper, cargo: cargo, rustc: logger, storeRoot: reg.store,
+      crates: reg.crates, devEnv: devEnvOf(envPairs)))
+    for c in reg.crates:
+      check c.prefix in edge.inputs
     check edge.networkMode == netDenied
     check edge.netDestinations.len == 0
     check auditNetworkPolicy(graph([edge])).len == 0
@@ -208,10 +226,42 @@ suite "the record-only graph-production edge":
     for u in plan.units: crates.add u.crateName
     for (crate, count) in [("app", 1), ("app_tool", 1), ("mid", 1),
                            ("sysdep", 1), ("helper", 2), ("pm", 1),
-                           ("bdep", 1), ("build_script_build", 4)]:
+                           ("bdep", 1), ("regleaf", 1), ("regbs", 1),
+                           ("build_script_build", 5)]:
       checkpoint crate
       check crates.countIt(it == crate) == count
-    check plan.runs.len == 4
+    check plan.runs.len == 5
+    # Every registry crate unit is in the plan, named by its store prefix:
+    # its working directory and manifest directory are the prefix it was
+    # fetched into, and its crate root is a file of that prefix.
+    let storeRoots = parseRecordRoots("store=" & reg.store)
+    for c in reg.crates:
+      checkpoint c.name
+      var found = 0
+      for u in plan.units:
+        if u.package != c.name: continue
+        inc found
+        check expandRecorded(storeRoots, u.cwd) == c.prefix
+        var manifestDir = ""
+        for (name, value) in u.env:
+          if name == "CARGO_MANIFEST_DIR": manifestDir = value
+        check expandRecorded(storeRoots, manifestDir) == c.prefix
+        var roots = 0
+        for arg in u.argv:
+          if arg.startsWith("${store}/") and arg.endsWith(".rs"):
+            inc roots
+            check fileExists(expandRecorded(storeRoots, arg))
+            check expandRecorded(storeRoots, arg).startsWith(c.prefix & "/")
+        check roots == 1
+      check found == (if c.name == "regbs": 2 else: 1)
+    for r in plan.runs:
+      if r.package == "regbs":
+        check expandRecorded(storeRoots, r.cwd) == reg.store &
+          r.cwd["${store}".len .. ^1]
+        check r.cwd.startsWith("${store}/")
+    # The prefixes were only read.
+    for i, c in reg.crates:
+      check treeSnapshot(c.prefix) == prefixesBefore[i]
     # A build script whose build-dependency has a build script of its own
     # is fed by that build-dependency's run: cargo put its link-search path
     # on the dependent script's dynamic-library path.

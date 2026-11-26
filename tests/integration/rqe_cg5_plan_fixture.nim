@@ -6,13 +6,21 @@
 ## NOTHING HERE IS A MOCK. The workspaces are planned and built by real cargo
 ## and rustc. The logging `RUSTC` runs the real compiler with the arguments
 ## it was given and changes nothing; the listener is a real TCP socket that
-## only counts who connects.
+## only counts who connects. The registry crates are real `.crate` files made
+## by `cargo package`, put in a mirror directory by their checksum and
+## fetched into a private store root by the production fetch edges
+## (`repro_cargo_fetch`), so their prefixes are exactly what a build's fetch
+## wave leaves. Nothing contacts the network.
 
 import std/[atomics, nativesockets, net, os, osproc, posix, sequtils,
-            strtabs, strutils]
+            strtabs, strutils, tables, times]
 
 import repro_core/process_env
 import repro_core/process_streams
+import nimcrypto/sha2
+
+import repro_cargo_fetch
+import repro_cargo_edge/plan_run
 
 const ArgSeparator* = "\x1f"
 
@@ -49,7 +57,7 @@ proc buildScript(pkg: string; mode: ScriptMode; useHelper = false): string =
       "  println!(\"cargo:rustc-env=BUILT_" & pkg.toUpperAscii &
       "=yes\");\n}\n"
 
-proc writePlanWorkspace*(root: string; mode: ScriptMode) =
+proc writePlanWorkspace*(root: string; mode: ScriptMode; registry = false) =
   ## A five-package workspace with build scripts, `links`, a
   ## build-dependency, a proc-macro and per-unit features:
   ##
@@ -63,20 +71,23 @@ proc writePlanWorkspace*(root: string; mode: ScriptMode) =
   ##     with `a` and for `app` with `b` (resolver 2 keeps them apart);
   ##   - `pm`: a proc-macro;
   ##   - `app`: two binaries and a build script, depending on `mid`, `pm`
-  ##     and `helper` (feature `b`).
+  ##     and `helper` (feature `b`), and, with `registry`, on the crates.io
+  ##     crate `regbs` (`setupRegistry`).
   writeFileIn(root, "Cargo.toml",
     "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n" &
     "build = \"build.rs\"\n\n" &
     "[[bin]]\nname = \"app\"\npath = \"src/main.rs\"\n\n" &
     "[[bin]]\nname = \"app-tool\"\npath = \"src/bin/tool.rs\"\n\n" &
     "[dependencies]\nmid = { path = \"mid\" }\npm = { path = \"pm\" }\n" &
-    "helper = { path = \"helper\", features = [\"b\"] }\n\n" &
+    "helper = { path = \"helper\", features = [\"b\"] }\n" &
+    (if registry: "regbs = \"0.1.0\"\n" else: "") & "\n" &
     "[workspace]\nmembers = [\"sysdep\", \"mid\", \"helper\", \"pm\", " &
     "\"bdep\"]\n")
   writeFileIn(root, "build.rs", buildScript("app", mode))
   writeFileIn(root, "src/main.rs",
     "fn main() { println!(\"{} {} {}\", mid::id(), pm::answer!(), " &
-    "helper::id()); }\n")
+    "helper::id()); " &
+    (if registry: "let _ = regbs::bs(); " else: "") & "}\n")
   writeFileIn(root, "src/bin/tool.rs", "fn main() {}\n")
   writeFileIn(root, "sysdep/Cargo.toml",
     "[package]\nname = \"sysdep\"\nversion = \"0.1.0\"\nedition = \"2021\"\n" &
@@ -218,3 +229,107 @@ proc proxyEnv*(l: ref Listener): seq[(string, string)] =
                "ALL_PROXY", "all_proxy", "CARGO_HTTP_PROXY"]:
     result.add (name, url)
   result.add ("CARGO_NET_RETRY", "0")
+
+# ---------------------------------------------------------------------------
+# Registry crates in a store root.
+
+type RegistrySetup* = object
+  store*: string          ## the store root holding the fetched prefixes
+  crates*: seq[CratePrefix]  ## each crate with its prefix
+  testVendor*: string
+    ## A vendor directory the TEST made by copying each prefix, for the
+    ## lockfile and for a real cargo build: independent of the record run's
+    ## own vendor directory, whose links are what is under test.
+  sourceArgs*: seq[string]
+    ## `--config` values replacing crates.io with `testVendor`.
+
+proc removeTestTree*(dir: string) =
+  ## Remove a test's directory, read-only store prefixes included.
+  if not dirExists(dir): return
+  for path in walkDirRec(dir, yieldFilter = {pcDir}):
+    setFilePermissions(path, getFilePermissions(path) + {fpUserWrite})
+  setFilePermissions(dir, getFilePermissions(dir) + {fpUserWrite})
+  removeDir(dir)
+
+proc packRegistryCrates(work: string;
+                        packages: seq[(string, string, seq[(string, string)])]):
+    Table[string, string] =
+  ## Real `.crate` files (name -> bytes) of `packages` (name, manifest
+  ## tail, files), made by one `cargo package --workspace --offline` over a
+  ## workspace holding them, so one may depend on another by `path` and
+  ## `version` and be published with a registry dependency, as crates.io
+  ## serves it. The packager's cargo home is private and empty.
+  let cargo = findExe("cargo")
+  doAssert cargo.len > 0, "cargo is not on PATH"
+  let ws = work / "workspace"
+  var members: seq[string]
+  for (name, extra, files) in packages:
+    members.add "\"" & name & "\""
+    writeFileIn(ws / name, "Cargo.toml", "[package]\nname = \"" & name &
+      "\"\nversion = \"0.1.0\"\nedition = \"2021\"\n" &
+      "description = \"fixture\"\nlicense = \"MIT\"\n" & extra)
+    for (rel, content) in files: writeFileIn(ws / name, rel, content)
+  writeFileIn(ws, "Cargo.toml", "[workspace]\nmembers = [" &
+    members.join(", ") & "]\nresolver = \"2\"\n")
+  var env: seq[(string, string)]
+  for k, v in envPairs():
+    if k notin ["CARGO_HOME", "CARGO_TARGET_DIR"]: env.add (k, v)
+  env.add [("CARGO_HOME", work / "packager-cargo-home"),
+    ("CARGO_TARGET_DIR", work / "packager-target")]
+  let r = runClosed([cargo, "package", "--workspace", "--no-verify",
+    "--allow-dirty", "--offline", "--quiet"], ws, env)
+  doAssert r.code == 0, "cargo package failed:\n" & r.output
+  for (name, _, _) in packages:
+    result[name] = readFile(work / "packager-target" / "package" /
+      (name & "-0.1.0.crate"))
+
+proc setupRegistry*(work: string; mode: ScriptMode): RegistrySetup =
+  ## Two crates.io crates in a fresh store root under `work`: `regleaf`, a
+  ## plain library, and `regbs`, which has a build script and depends on
+  ## `regleaf`, so the plan has a registry unit, a registry build script and
+  ## a registry run.
+  let packed = packRegistryCrates(work / "pack", @[
+    ("regleaf", "", @[("src/lib.rs", "pub fn leaf() -> u32 { 5 }\n")]),
+    ("regbs", "\n[dependencies]\nregleaf = { path = \"../regleaf\", " &
+        "version = \"0.1.0\" }\n",
+      @[("src/lib.rs", "pub fn bs() -> u32 { regleaf::leaf() }\n"),
+        ("build.rs", buildScript("regbs", mode))])])
+  let mirror = work / "mirror"
+  var rows: seq[CrateRow]
+  for name in ["regleaf", "regbs"]:
+    let bytes = packed[name]
+    let row = CrateRow(name: name, version: "0.1.0",
+      cksum: toLowerAscii($sha256.digest(bytes)))
+    rows.add row
+    createDir(parentDir(mirror / crateObjectPath(row.cksum)))
+    writeFile(mirror / crateObjectPath(row.cksum), bytes)
+  result.store = work / "store"
+  var cfg = defaultCrateFetchConfig(work / "fetch-state",
+    @[parseMirror(mirror)])
+  cfg.storeRoot = result.store
+  cfg.originBase = ""
+  let fetched = fetchLockedCrates(rows, cfg)
+  doAssert fetched.ok, "the fixture's crates were not fetched"
+  result.testVendor = work / "test-vendor"
+  for c in fetched.crates:
+    result.crates.add CratePrefix(name: c.row.name, version: c.row.version,
+      prefix: c.prefix)
+    let dir = result.testVendor / (c.row.name & "-" & c.row.version)
+    copyDir(c.prefix, dir)
+    for path in walkDirRec(dir, yieldFilter = {pcFile, pcDir}):
+      setFilePermissions(path, getFilePermissions(path) + {fpUserWrite})
+    setFilePermissions(dir, getFilePermissions(dir) + {fpUserWrite})
+    writeFile(dir / ".cargo-checksum.json",
+      "{\"files\":{},\"package\":\"" & c.row.cksum & "\"}")
+  result.sourceArgs = @["--config",
+    "source.crates-io.replace-with=\"test-vendor\"", "--config",
+    "source.test-vendor.directory=\"" & result.testVendor & "\""]
+
+proc treeSnapshot*(dir: string): seq[string] =
+  ## Every entry under `dir` (and `dir`) with its kind, size, permissions and
+  ## modification time.
+  for path in @[dir] & toSeq(walkDirRec(dir, yieldFilter = {pcFile, pcDir,
+      pcLinkToFile, pcLinkToDir})):
+    let info = getFileInfo(path, followSymlink = false)
+    result.add path & " " & $info.kind & " " & $info.size & " " &
+      $info.permissions & " " & $info.lastWriteTime.toUnixFloat()

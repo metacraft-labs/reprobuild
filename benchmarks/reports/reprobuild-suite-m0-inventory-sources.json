@@ -15024,7 +15024,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_cargo_edge/tests/t_cargo_plan.nim",
       "sourceSuiteCount": 4,
-      "staticCaseCount": 21,
+      "staticCaseCount": 22,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

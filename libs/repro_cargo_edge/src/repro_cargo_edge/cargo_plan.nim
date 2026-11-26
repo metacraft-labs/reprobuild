@@ -35,6 +35,10 @@
 ## cargo's own `-C extra-filename` value, or, for a run, the hash of the
 ## directory cargo made for it):
 ##
+## - a path under a vendor entry the record run served a crates.io crate
+##   from (`${scratch}/vendor/<name>-<version>`): the same path under the
+##   store prefix the entry links to (`derivePlan`'s `vendorMap`, which the
+##   run builds from the entries it wrote);
 ## - a unit's `--out-dir` and its outputs: `${out}/<unit>/<file>`;
 ## - a unit's `-C incremental=` directory: `${out}/<unit>/incremental`;
 ## - a run's `OUT_DIR`, and every path under it: `${out}/<run>/out/...`;
@@ -705,19 +709,61 @@ proc validatePlan*(plan: CargoPlan) =
     for (_, value) in r.env: checkPlaced(value, where)
     for p in r.providers: checkPlaced(p.provider, where)
 
+proc mapVendor(text: string; vendorMap: openArray[(string, string)]): string =
+  ## `text` with each vendor entry replaced by its prefix, where the entry
+  ## is a whole path: followed by nothing, a `/` or a character that cannot
+  ## continue a file name.
+  result = text
+  for (entry, prefix) in vendorMap:
+    var i = 0
+    var mapped = ""
+    while i < result.len:
+      let at = result.find(entry, i)
+      if at < 0:
+        mapped.add result[i .. ^1]
+        break
+      let after = at + entry.len
+      mapped.add result[i ..< at]
+      if after == result.len or result[after] notin {'a'..'z', 'A'..'Z',
+          '0'..'9', '_', '-', '.', '+'}:
+        mapped.add prefix
+      else:
+        mapped.add entry
+      i = after
+    result = mapped
+
+proc withVendorMapped(rec: RecordedInvocation;
+                      vendorMap: openArray[(string, string)]):
+    RecordedInvocation =
+  result = rec
+  if vendorMap.len == 0: return
+  result.argv = rec.argv.mapIt(mapVendor(it, vendorMap))
+  result.cwd = mapVendor(rec.cwd, vendorMap)
+  result.env = rec.env.mapIt((it[0], mapVendor(it[1], vendorMap)))
+  result.placeholders = rec.placeholders.mapIt(mapVendor(it, vendorMap))
+  result.manifest = mapVendor(rec.manifest, vendorMap)
+  result.provider = mapVendor(rec.provider, vendorMap)
+
 proc derivePlan*(recordings: openArray[RecordedInvocation];
                  baseEnv: openArray[(string, string)];
-                 recordWrapper: string): CargoPlan =
+                 recordWrapper: string;
+                 vendorMap: openArray[(string, string)] = []): CargoPlan =
   ## The plan of a record run. `baseEnv` is the record run's own environment,
   ## logicalized against the same roots as the recordings (`logicalize`);
   ## `recordWrapper` is the record wrapper's path, as `RUSTC_WRAPPER` names it
-  ## in a recording. Raises `CargoPlanError` (see the module docstring).
+  ## in a recording. `vendorMap` pairs each vendor entry the record run
+  ## served a crates.io crate from (`${scratch}/vendor/<name>-<version>`)
+  ## with the store prefix it links to (`${store}/...`), as the run wrote
+  ## them: every path under an entry is rewritten to the same path under the
+  ## prefix, and an entry left unmapped fails the plan as a scratch path.
+  ## Raises `CargoPlanError` (see the module docstring).
   var d = Derivation()
   var base = initTable[string, string]()
   for (name, value) in baseEnv: base[name] = value
-  for rec in recordings:
+  let mapped = recordings.mapIt(withVendorMapped(it, vendorMap))
+  for rec in mapped:
     if rec.kind == rkBuildScriptRun: d.readRun(rec)
-  for rec in recordings:
+  for rec in mapped:
     if rec.kind == rkUnit: d.readUnit(rec)
   for dep in d.deps: d.searchDirs.incl parentOf(dep)
   d.computeClosures()

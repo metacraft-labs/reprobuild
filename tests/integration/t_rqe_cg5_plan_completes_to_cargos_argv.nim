@@ -37,13 +37,21 @@
 ## WHAT IS LEFT for later deliverables: completing the fed units (the slots
 ## filled from the build-script run edges' output by the launcher), the
 ## directive table's real values with `OUT_DIR` paths, `DEP_*` reaching the
-## direct and not the transitive dependent, and the order of slots. Registry dependencies are not in the fixture: the record run does
+## direct and not the transitive dependent, and the order of slots.
+##
+## REGISTRY CRATES. The workspace also depends on two crates.io crates in a
+## store root (`setupRegistry`), one with a build script. The record run is
+## given their prefixes; the real build reads them from the test's own copy
+## of each prefix in a vendor directory, so a prefix in the plan maps back to
+## that copy. Their units compare like any other. Registry dependencies are not in the fixture: the record run does
 ## not serve cargo the fetched store prefixes yet.
 ##
-## Falsifying mutation (applied, observed to fail, reverted; see the change's
-## report): rewriting a `--extern` path by re-deriving the file name (always
-## the `.rmeta`) instead of reading the placeholder cargo named fails the
-## unfed build-script compile of `mid`, which links `helper`'s `.rlib`.
+## Falsifying mutations (applied, observed to fail, reverted; see the
+## change's reports): mapping a vendor entry to a prefix path guessed from
+## the crate's name and version fails the registry units; rewriting a
+## `--extern` path by re-deriving the file name (always the `.rmeta`) instead
+## of reading the placeholder cargo named fails the unfed build-script compile
+## of `mid`, which links `helper`'s `.rlib`.
 ##
 ## NO MOCKS: real cargo and rustc, the real wrapper. The logging wrapper runs
 ## the real compiler with the arguments it was given and changes nothing.
@@ -51,7 +59,7 @@
 import std/[algorithm, os, sequtils, sets, strutils, tables, tempfiles,
             unittest]
 
-import repro_cargo_edge/[cargo_plan, record_mode]
+import repro_cargo_edge/[cargo_plan, plan_run, record_mode]
 import repro_test_support
 
 import ./rqe_cg5_plan_fixture
@@ -139,25 +147,30 @@ suite "the plan of a record run":
     let rustc = findExe("rustc")
     require cargo.len > 0 and rustc.len > 0
     let work = createTempDir("cg5-plan-argv-", "")
-    defer: removeDir(work)
+    defer: removeTestTree(work)   # the store's prefixes are read-only
     let ws = work / "ws"
-    writePlanWorkspace(ws, smReal)
+    writePlanWorkspace(ws, smReal, registry = true)
+    let reg = setupRegistry(work, smReal)
     let devEnv = @[("PATH", storeOnlyPath()),
       ("TMPDIR", getEnv("TMPDIR", work))]
     proc homeEnv(dir: string): seq[(string, string)] =
       createDir(dir / "cargo-home")
       createDir(dir / "home")
       @[("CARGO_HOME", dir / "cargo-home"), ("HOME", dir / "home")]
-    let lock = runClosed([cargo, "generate-lockfile", "--offline"], ws,
+    let lock = runClosed(@[cargo] & reg.sourceArgs &
+      @["generate-lockfile", "--offline"], ws,
       devEnv & homeEnv(work / "lock"))
     checkpoint lock.output
     require lock.code == 0
 
     # The record run, as the edge runs it.
     let planRel = ".plan/app.rbsz"
-    let record = runClosed([wrapper, "--cargo-plan", "--plan", planRel,
-      "--scratch", ".plan/scratch", "--cargo", cargo, "--rustc", rustc, "--"],
-      ws, devEnv)
+    var recordArgv = @[wrapper, "--cargo-plan", "--plan", planRel,
+      "--scratch", ".plan/scratch", "--cargo", cargo, "--rustc", rustc,
+      "--store-root", reg.store]
+    for c in reg.crates: recordArgv.add ["--crate", crateArg(c)]
+    recordArgv.add "--"
+    let record = runClosed(recordArgv, ws, devEnv)
     checkpoint record.output
     require record.code == 0
     let plan = readCargoPlan(ws / planRel)
@@ -169,14 +182,14 @@ suite "the plan of a record run":
     let logger = work / "oracle-logger"
     writeOracleLogger(logger, logDir)
     let oracleEnv = devEnv & homeEnv(work / "oracle")
-    let real = runClosed([cargo,
+    let real = runClosed(@[cargo,
       "--config", "build.rustc=\"" & rustc & "\"",
       "--config", "build.rustc-wrapper=\"" & logger & "\"",
       # The record run's two other `--config` values, which cargo mixes
       # into its unit hashes.
       "--config", "build.rustc-workspace-wrapper=\"\"",
-      "--config", "build.build-dir=\"" & oracleTarget & "\"",
-      "build", "--offline", "--locked", "-j", "1",
+      "--config", "build.build-dir=\"" & oracleTarget & "\""] & reg.sourceArgs &
+      @["build", "--offline", "--locked", "-j", "1",
       "--target-dir", oracleTarget], ws, oracleEnv)
     checkpoint real.output
     require real.code == 0
@@ -201,6 +214,11 @@ suite "the plan of a record run":
       back.add ("${out}/" & u.id, oracleTarget / u.cargoOutDir)
     for r in plan.runs:
       back.add (r.outDir, oracleTarget / r.cargoOutDir)
+    # A registry crate's prefix, in the real build, is the test's own copy
+    # of it in its vendor directory.
+    for c in reg.crates:
+      back.add ("${store}" & c.prefix[reg.store.len .. ^1],
+        reg.testVendor / (c.name & "-" & c.version))
     back.sort(proc (a, b: (string, string)): int = cmp(b[0].len, a[0].len))
     let roots = parseRecordRoots("project=" & ws &
       (if dirExists("/nix/store"): "\nnix=/nix/store" else: ""))
@@ -212,7 +230,7 @@ suite "the plan of a record run":
       oracleTarget / "debug"])
 
     # The same units as the real build.
-    check plan.units.len == 12
+    check plan.units.len == 15
     check oracle.len == plan.units.len
     var matched = initTable[string, OracleUnit]()
     for o in oracle:
@@ -245,7 +263,8 @@ suite "the plan of a record run":
     unfed.sort()
     checkpoint "unfed: " & unfed.join(" ")
     check unfed == @["build_script_build", "build_script_build",
-      "build_script_build", "helper", "helper", "pm"]
+      "build_script_build", "build_script_build", "helper", "helper", "pm",
+      "regleaf"]
     # Every unit, fed or not: for a fed one, the slots are left out of the
     # plan's side and the real build's directive values (the fixture's
     # scripts print exactly `rustc-cfg=built_<pkg>`,

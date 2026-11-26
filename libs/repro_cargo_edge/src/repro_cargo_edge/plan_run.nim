@@ -2,7 +2,8 @@
 ## schedule in record mode, compiling nothing, and write the plan.
 ##
 ##   repro-rustc-wrapper --cargo-plan --plan FILE --scratch DIR
-##       --cargo CARGO --rustc RUSTC [--store-root DIR] -- [CARGO ARGS...]
+##       --cargo CARGO --rustc RUSTC [--store-root DIR]
+##       [--crate NAME@VERSION=PREFIX]... -- [CARGO ARGS...]
 ##
 ## It runs in the workspace root (the edge's working directory) and does, in
 ## order:
@@ -16,10 +17,12 @@
 ##    so the edge checks. cargo never sees the user's `~/.cargo` or home
 ##    directory.
 ## 2. Refuses what it cannot plan from inside the workspace:
-##    - a `Cargo.lock` that holds a package with a `source`: such a package
-##      (a registry or git dependency) would have to reach cargo through a
-##      source replacement over the fetched store prefixes, which this edge
-##      does not write yet;
+##    - a `Cargo.lock` package with a `source` other than crates.io (a git
+##      or alternate-registry dependency), a crates.io package with no
+##      checksum or no `--crate` prefix, a prefix outside the store root, a
+##      `[patch]` or `[replace]` table in the workspace's `Cargo.toml`, and a
+##      `paths` override in its `.cargo/config.toml`: the cases the edge does
+##      not cover yet, which stay with cargo as a whole;
 ##    - a cargo configuration file (`.cargo/config.toml` or `.cargo/config`)
 ##      in any directory above the workspace root: cargo reads every one of
 ##      them, so the plan would depend on a file outside the workspace
@@ -30,7 +33,20 @@
 ##      would be paths of this host only;
 ##    - cargo arguments outside the selection this edge models
 ##      (`validateCargoArgs`).
-## 3. Saves `cargo metadata --offline --locked --format-version 1` for the
+## 3. Serves cargo the crates.io crates from their store prefixes. A
+##    `directory` source needs a `.cargo-checksum.json` in each crate
+##    directory, and a prefix is a read-only extraction without one, so the
+##    edge writes, in its scratch directory, a VENDOR directory with one entry
+##    `<name>-<version>` per locked crate: a symbolic link to each top-level
+##    entry of the crate's prefix and a `.cargo-checksum.json` of
+##    `{"files":{},"package":"<checksum from Cargo.lock>"}`
+##    (`cargo_lock.cargoChecksumJson`; cargo checks the package checksum
+##    against the lock, and an empty `files` map claims nothing per file:
+##    https://doc.rust-lang.org/cargo/reference/source-replacement.html#directory-sources).
+##    Two `--config` values replace `crates-io` with that directory, for
+##    `cargo metadata` and `cargo build` alike, on the command line so that no
+##    configuration file outranks them. The prefixes are only read.
+##    Saves `cargo metadata --offline --locked --format-version 1` for the
 ##    recording stub, which reads each package's targets from it.
 ## 4. Runs `cargo build --offline --locked -j 1 --target-dir <scratch>/target`
 ##    with the given arguments (the build's profile, target and package
@@ -45,8 +61,10 @@
 ##    environment, and the command line outranks configuration files and
 ##    `CARGO_BUILD_*` variables. `-j 1` makes the `NUM_JOBS` cargo gives each
 ##    build script the same on every host.
-## 5. Derives the plan from the recordings (`cargo_plan.derivePlan`) and
-##    writes it to the plan file, the edge's one declared output.
+## 5. Derives the plan from the recordings (`cargo_plan.derivePlan`), with
+##    each vendor entry (`${scratch}/vendor/<name>-<version>`) mapped back
+##    to the prefix it was made from, read from the entries this run wrote,
+##    and writes it to the plan file, the edge's one declared output.
 ##
 ## The recordings name paths against the roots `project` (the working
 ## directory), `target` (the scratch target directory), `scratch`, `store`
@@ -63,7 +81,10 @@
 ## Exit codes: 0 with the plan written, 2 usage, 1 any other failure (the
 ## message names it). POSIX only, as record mode is.
 
-import std/[algorithm, json, os, strutils]
+import std/[algorithm, json, os, strutils, tables]
+
+import toml_serialization
+import toml_serialization/types as toml_types
 when defined(posix):
   import std/posix
 
@@ -83,6 +104,9 @@ const
   CargoHomeSubdir* = "cargo-home"
   HomeSubdir* = "home"
   MetadataFile* = "metadata.json"
+  VendorSubdir* = "vendor"
+  VendorSourceName = "repro-store-crates"
+    ## The name of the replacement source in the record run's configuration.
   OverridingVariables* = ["RUSTC", "RUSTC_WRAPPER", "RUSTC_WORKSPACE_WRAPPER"]
   NixStore = "/nix/store"
   SelectionFlags = ["--release", "--workspace", "--all", "--lib", "--bins",
@@ -93,10 +117,15 @@ const
     ## The cargo options with a value the edge passes through.
 
 type
+  CratePrefix* = object
+    ## A locked crates.io crate and the store prefix its fetch edge made.
+    name*, version*, prefix*: string
+
   PlanRunOptions* = object
     planFile*, scratch*: string
     cargo*, rustc*: string
     storeRoot*: string
+    crates*: seq[CratePrefix]
     cargoArgs*: seq[string]
 
   PlanRunError* = object of CatchableError
@@ -121,6 +150,13 @@ proc parsePlanRunArgs*(args: openArray[string]): PlanRunOptions =
     of "--cargo": result.cargo = value
     of "--rustc": result.rustc = value
     of "--store-root": result.storeRoot = value
+    of "--crate":
+      let at = value.find('@')
+      let eq = value.find('=')
+      if at <= 0 or eq <= at + 1 or eq == value.high:
+        fail("--crate takes NAME@VERSION=PREFIX, not " & value)
+      result.crates.add CratePrefix(name: value[0 ..< at],
+        version: value[at + 1 ..< eq], prefix: value[eq + 1 .. ^1])
     else: fail("unexpected argument '" & a & "'")
     i += 2
   for (name, value) in [("--plan", result.planFile),
@@ -156,6 +192,84 @@ proc validateCargoArgs*(args: openArray[string]): string =
       return "the cargo argument " & a.escape() & " is outside the build " &
         "selection the record run passes through"
   ""
+
+proc crateArg*(c: CratePrefix): string =
+  ## The `--crate` argument naming `c`.
+  c.name & "@" & c.version & "=" & c.prefix
+
+proc tomlTable(path, what: string): TomlValueRef =
+  try:
+    Toml.decode(readFile(path), TomlValueRef)
+  except CatchableError as err:
+    fail(what & " " & path & " does not parse: " & err.msg)
+
+proc hasKey(table: TomlValueRef; key: string): bool =
+  not table.isNil and table.kind in {TomlKind.Table, TomlKind.InlineTable} and
+    table.tableVal[].hasKey(key)
+
+proc checkSources(project, storeRoot: string; crates: openArray[CratePrefix]):
+    seq[(CratePrefix, string)] =
+  ## The locked crates.io crates with their `Cargo.lock` checksums, each
+  ## matched to its `--crate` prefix; raises on what the edge does not cover
+  ## (see the module docstring, step 2).
+  if not fileExists(project / "Cargo.toml"):
+    return   # cargo itself refuses a directory with no manifest
+  let manifest = tomlTable(project / "Cargo.toml", "the workspace manifest")
+  for key in ["patch", "replace"]:
+    if manifest.hasKey(key):
+      fail("the workspace manifest has a [" & key & "] table, which the " &
+        "record run does not model")
+  for name in ["config.toml", "config"]:
+    let config = project / ".cargo" / name
+    if fileExists(config) and
+        tomlTable(config, "the cargo configuration").hasKey("paths"):
+      fail("the cargo configuration " & config & " sets `paths`, which " &
+        "the record run does not model")
+  if not fileExists(project / "Cargo.lock"): return
+  var given = initTable[string, CratePrefix]()
+  for c in crates: given[c.name & "@" & c.version] = c
+  var problems: seq[string]
+  for pkg in parseCargoLock(readFile(project / "Cargo.lock")):
+    if pkg.source.len == 0: continue
+    let label = pkg.name & "@" & pkg.version
+    if not isRegistrySource(pkg.source):
+      problems.add label & " comes from " & pkg.source & ", which is not " &
+        "crates.io"
+    elif pkg.checksum.len == 0:
+      problems.add label & " has no checksum in Cargo.lock"
+    elif label notin given:
+      problems.add label & " was given no store prefix"
+    else:
+      let c = given[label]
+      if not c.prefix.isAbsolute or not dirExists(c.prefix) or
+          not fileExists(c.prefix / "Cargo.toml"):
+        problems.add label & "'s prefix " & c.prefix & " holds no crate"
+      elif storeRoot.len == 0 or
+          not absolutePath(c.prefix).startsWith(absolutePath(storeRoot) & "/"):
+        problems.add label & "'s prefix " & c.prefix & " is outside the " &
+          "store root"
+      else:
+        result.add (c, pkg.checksum)
+  if problems.len > 0:
+    problems.sort()
+    fail("Cargo.lock holds packages the record run cannot serve: " &
+      problems.join("; "))
+
+proc writeVendorDir(vendor: string; crates: openArray[(CratePrefix, string)]):
+    seq[(string, string)] =
+  ## One entry per crate (see the module docstring, step 3); returns each
+  ## entry's directory with the prefix it links to.
+  createDir(vendor)
+  for (c, cksum) in crates:
+    let dir = vendor / (c.name & "-" & c.version)
+    createDir(dir)
+    for kind, path in walkDir(c.prefix):
+      let name = extractFilename(path)
+      if name == ".cargo-checksum.json": continue
+      createSymlink(path, dir / name)
+    writeFile(dir / ".cargo-checksum.json", cargoChecksumJson(VendorEntry(
+      name: c.name, version: c.version, sha256: cksum)))
+    result.add (dir, c.prefix)
 
 proc emptyOrAbsent(dir, what: string) =
   if fileExists(dir) or symlinkExists(dir):
@@ -257,16 +371,15 @@ proc runCargoPlan*(opts: PlanRunOptions): int =
         if up == dir or up.len == 0: break
         dir = up
 
-    if fileExists(project / "Cargo.lock"):
-      var sourced: seq[string]
-      for pkg in parseCargoLock(readFile(project / "Cargo.lock")):
-        if pkg.source.len > 0:
-          sourced.add pkg.name & "@" & pkg.version & " (" & pkg.source & ")"
-      if sourced.len > 0:
-        sourced.sort()
-        fail("Cargo.lock holds packages that are not workspace members: " &
-          sourced.join(", ") & "; the record run serves cargo no source " &
-          "replacement over their store prefixes yet")
+    let served = checkSources(project, opts.storeRoot, opts.crates)
+    let vendor = scratch / VendorSubdir
+    emptyOrAbsent(vendor, "the vendor directory")
+    let vendorEntries = writeVendorDir(vendor, served)
+    let sourceConfig = @[
+      "--config", "source.crates-io.replace-with=" &
+        tomlString(VendorSourceName),
+      "--config", "source." & VendorSourceName & ".directory=" &
+        tomlString(vendor)]
 
     putEnv("CARGO_HOME", cargoHome)
     putEnv("HOME", home)
@@ -289,11 +402,11 @@ proc runCargoPlan*(opts: PlanRunOptions): int =
 
     # The same compiler, and no project wrapper, for the rustc queries
     # `cargo metadata` may make.
-    let metaCode = spawnWait([opts.cargo,
+    let metaCode = spawnWait(@[opts.cargo,
       "--config", "build.rustc=" & tomlString(opts.rustc),
       "--config", "build.rustc-wrapper=" & tomlString(""),
-      "--config", "build.rustc-workspace-wrapper=" & tomlString(""),
-      "metadata", "--offline", "--locked",
+      "--config", "build.rustc-workspace-wrapper=" & tomlString("")] &
+      sourceConfig & @["metadata", "--offline", "--locked",
       "--format-version", "1"], stdoutFile = metadataPath)
     if metaCode != 0:
       fail("cargo metadata failed with exit status " & $metaCode)
@@ -320,8 +433,8 @@ proc runCargoPlan*(opts: PlanRunOptions): int =
       "--config", "build.rustc=" & tomlString(opts.rustc),
       "--config", "build.rustc-wrapper=" & tomlString(wrapper),
       "--config", "build.rustc-workspace-wrapper=" & tomlString(""),
-      "--config", "build.build-dir=" & tomlString(targetDir),
-      "build", "--offline", "--locked", "-j", "1",
+      "--config", "build.build-dir=" & tomlString(targetDir)] & sourceConfig &
+      @["build", "--offline", "--locked", "-j", "1",
       "--target-dir", targetDir]
     build.add opts.cargoArgs
     let code = spawnWait(build)
@@ -332,7 +445,13 @@ proc runCargoPlan*(opts: PlanRunOptions): int =
       fail("the record run's cargo build failed with exit status " & $code)
 
     let recordings = readRecordings(recordDirPath)
-    let plan = derivePlan(recordings, baseEnv, logicalize(roots, wrapper))
+    # Each vendor entry as the recordings name it, mapped to the prefix this
+    # run linked it to.
+    var vendorMap: seq[(string, string)]
+    for (dir, prefix) in vendorEntries:
+      vendorMap.add (logicalize(roots, dir), logicalize(roots, prefix))
+    let plan = derivePlan(recordings, baseEnv, logicalize(roots, wrapper),
+      vendorMap)
     let planPath = absolutePath(opts.planFile)
     createDir(parentDir(planPath))
     writeCargoPlan(planPath, plan)

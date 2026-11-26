@@ -310,6 +310,58 @@ suite "the record run's start-up checks":
     defer: setCurrentDir(saved)
     check "--target-dir" in refusal(options(@["--target-dir", "t"]))
 
+  test "sources the record run does not serve are refused before cargo":
+    const crates = "registry+https://github.com/rust-lang/crates.io-index"
+    proc lockWith(source, checksum: string): string =
+      "version = 4\n\n[[package]]\nname = \"app\"\nversion = \"0.1.0\"\n" &
+        "dependencies = [\"dep\"]\n\n[[package]]\nname = \"dep\"\n" &
+        "version = \"1.0.0\"\nsource = \"" & source & "\"\n" &
+        (if checksum.len > 0: "checksum = \"" & checksum & "\"\n" else: "")
+    let cksum = repeat("ab", 32)
+    for (name, manifestExtra, lock, config, withPrefix, expected) in [
+        ("git source", "", lockWith("git+https://example.invalid/dep?rev=1#" &
+          repeat("c", 40), ""), "", false, "not crates.io"),
+        ("no prefix", "", lockWith(crates, cksum), "", false,
+          "no store prefix"),
+        ("patch", "\n[patch.crates-io]\ndep = { path = \"dep\" }\n",
+          lockWith(crates, cksum), "", true, "[patch]"),
+        ("replace", "\n[replace]\n\"dep:1.0.0\" = { path = \"dep\" }\n",
+          lockWith(crates, cksum), "", true, "[replace]"),
+        ("paths", "", lockWith(crates, cksum), "paths = [\"dep\"]\n", true,
+          "`paths`"),
+        ("served", "", lockWith(crates, cksum), "", true, "")]:
+      let dir = createTempDir("cg5-plan-run-src-", "")
+      defer: removeDir(dir)
+      let saved = getCurrentDir()
+      setCurrentDir(dir)
+      defer: setCurrentDir(saved)
+      writeFile(dir / "Cargo.toml", "[package]\nname = \"app\"\n" &
+        "version = \"0.1.0\"\n" & manifestExtra)
+      writeFile(dir / "Cargo.lock", lock)
+      if config.len > 0:
+        createDir(dir / ".cargo")
+        writeFile(dir / ".cargo" / "config.toml", config)
+      let store = dir / "store"
+      createDir(store / "prefixes" / "dep" / "1.0.0-x")
+      writeFile(store / "prefixes" / "dep" / "1.0.0-x" / "Cargo.toml", "")
+      var opts = options()
+      opts.storeRoot = store
+      if withPrefix:
+        opts.crates = @[CratePrefix(name: "dep", version: "1.0.0",
+          prefix: store / "prefixes" / "dep" / "1.0.0-x")]
+      let msg = refusal(opts)
+      checkpoint name & ": " & msg
+      if expected.len > 0:
+        check expected in msg
+      else:
+        # Served: the run gets as far as starting cargo, with the vendor
+        # entry written: a link per prefix entry and the checksum file.
+        check "cannot start" in msg
+        let entry = dir / "scratch" / VendorSubdir / "dep-1.0.0"
+        check symlinkExists(entry / "Cargo.toml")
+        check readFile(entry / ".cargo-checksum.json") ==
+          "{\"files\":{},\"package\":\"" & cksum & "\"}"
+
   test "an environment variable that outranks the record wrapper is " &
       "refused":
     let dir = createTempDir("cg5-plan-run-env-", "")

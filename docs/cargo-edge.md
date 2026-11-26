@@ -147,7 +147,8 @@ compiled and no build script runs.
 
 ```sh
 repro-rustc-wrapper --cargo-plan --plan FILE --scratch DIR \
-    --cargo CARGO --rustc RUSTC [--store-root DIR] -- [CARGO ARGS...]
+    --cargo CARGO --rustc RUSTC [--store-root DIR] \
+    [--crate NAME@VERSION=PREFIX]... -- [CARGO ARGS...]
 ```
 
 - **The edge.** It runs in the workspace root, monitored, with its inputs
@@ -178,15 +179,26 @@ repro-rustc-wrapper --cargo-plan --plan FILE --scratch DIR \
   it (measured for `RUSTC_WRAPPER` with cargo 1.94), so an environment that
   sets one is refused. `-j 1` makes the `NUM_JOBS` a build script receives
   the same on every host.
+- **Registry crates.** Each crates.io crate of `Cargo.lock` is given with the
+  store prefix its fetch edge made (`--crate`). A `directory` source needs a
+  `.cargo-checksum.json` in every crate directory and a prefix is a read-only
+  extraction without one, so the run writes, in its scratch directory, a
+  vendor directory with one entry `<name>-<version>` per crate: a symbolic
+  link to each top-level entry of the prefix and a `.cargo-checksum.json` of
+  `{"files":{},"package":"<checksum from Cargo.lock>"}`. Two `--config`
+  values replace `crates-io` with it, for `cargo metadata` and `cargo build`.
+  The prefixes are only read, and the derivation maps each vendor entry back
+  to the prefix it links to, from the entries the run wrote.
 - **What it refuses.** Cargo arguments other than the build's selection
   (`--release`, `--profile`, `--target`, `-p`/`--package`, `--workspace`,
   `--exclude`, `--lib`, `--bin`, `--bins`, `--features`, `--all-features`,
   `--no-default-features`); a cargo configuration file in a directory above
   the workspace root, which cargo would read; a workspace package whose
-  manifest lies outside the workspace root; and, for now, a `Cargo.lock`
-  that holds any package with a `source` (registry dependencies would reach
-  cargo through a source replacement over the fetched store prefixes, which
-  the run does not write yet).
+  manifest lies outside the workspace root; a `Cargo.lock` package from a
+  source other than crates.io (git, another registry), or a crates.io package
+  with no checksum, no `--crate` prefix or a prefix outside the store root;
+  and a `[patch]` or `[replace]` table in the workspace's `Cargo.toml` or a
+  `paths` override in its `.cargo/config.toml`.
 
 **The derivation** turns the recordings into the plan, reading every link
 from paths cargo wrote: a unit's `--extern` paths name the units it consumes;
