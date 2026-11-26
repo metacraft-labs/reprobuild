@@ -31,10 +31,11 @@
 ## ``boot-hold-cycle-effective-unchecked``, ``deps-empty-resets``,
 ## ``revert-stopped-not-restarted``, ``timespan-units-partial``.
 ## ``revert-stopped-instances-unrecorded`` and ``revert-stopped-cleared-early``
-## act inside the switch, at a template's running instances and at the end
-## of step 7; no test here or in a VM gate discriminates them yet (the
-## record's selection of instances is ``revertStoppedToStart``, tested
-## below).
+## act in the procedures the switch calls at a template's running instances
+## and around step 7 (``revertUnitsToStop``, ``planRevertStoppedStarts``,
+## ``finishRevertStopped``), and are red in ``t_addon_floor_round22`` (A9
+## review round 22); the record's selection of instances is
+## ``revertStoppedToStart``, tested below.
 ##
 ## *Mocking.* The re-point's file-system probe and the committed ledger's
 ## digests are closures, so a revert's disk state can be stated exactly;
