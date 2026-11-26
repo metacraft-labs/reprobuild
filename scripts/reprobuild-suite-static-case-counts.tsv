@@ -119,6 +119,7 @@ libs/repro_addon/tests/t_addon_secret_declarations.nim	nim	5
 libs/repro_addon/tests/t_addon_secret_files_created_private_and_never_through_symlinks.nim	nim	6
 libs/repro_addon/tests/t_addon_secrets_envelopes_and_rotation.nim	nim	14
 libs/repro_addon/tests/t_addon_service_floor.nim	nim	33
+libs/repro_addon/tests/t_addon_ship_migration_round26.nim	nim	8
 libs/repro_addon/tests/t_addon_state_sets.nim	nim	17
 libs/repro_addon/tests/t_addon_store_custody.nim	nim	7
 libs/repro_addon/tests/t_addon_store_verify.nim	nim	9
@@ -1547,6 +1548,7 @@ tests/e2e/addon/t_e2e_addon_egress_observer.nim	nim	1
 tests/e2e/addon/t_e2e_addon_engine_agent_enforces_a8.nim	nim	1
 tests/e2e/addon/t_e2e_addon_evidence_credential_is_append_only.nim	nim	1
 tests/e2e/addon/t_e2e_addon_evidence_enrol.nim	nim	1
+tests/e2e/addon/t_e2e_addon_evidence_migration.nim	nim	1
 tests/e2e/addon/t_e2e_addon_exclusive_never_overlaps.nim	nim	1
 tests/e2e/addon/t_e2e_addon_fetch_substitutes_only_from_bootstrap_anchors.nim	nim	1
 tests/e2e/addon/t_e2e_addon_fetch_unit_reaches_only_its_origins.nim	nim	1

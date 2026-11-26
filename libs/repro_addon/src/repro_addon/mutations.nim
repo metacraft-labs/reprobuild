@@ -1406,6 +1406,26 @@
 ## ``uninstall-ignores-drop``                 uninstall's queued total leaves
 ##                                            out the drop entries (decision
 ##                                            188, drop, round 26)
+## ``migration-skips-egress-check``          the own-profile migration leaves
+##                                            the egress check unit as it was
+##                                            installed, CAP_DAC_OVERRIDE and
+##                                            all (owner decision 2026-11-26)
+## ``migration-skips-ship-identity``          the own-profile migration renews
+##                                            only the shipping unit's start
+##                                            timeout, so it stays root on a
+##                                            host bootstrapped before
+##                                            decision 181 (2026-11-26)
+## ``legacy-move-unlinks-first``              the legacy (and drop) move
+##                                            removes an entry before handing
+##                                            it over, so a crash loses it
+##                                            (2026-11-26)
+## ``legacy-move-skips-outbox``               the legacy move carries the
+##                                            state files and leaves the
+##                                            legacy outbox's records behind
+##                                            (2026-11-26)
+## ``legacy-ship-ungated``                    a shipping run ships while the
+##                                            legacy move is unfinished
+##                                            (2026-11-26)
 ## ``outbox-listed-by-path``                  the outbox is listed by path,
 ##                                            through a link its dynamic user
 ##                                            planted (decision 181)
@@ -2582,6 +2602,11 @@ const
                           "ship-backoff-ignores-drop",
                           "harvest-failure-fails-step",
                           "uninstall-ignores-drop",
+                          "migration-skips-egress-check",
+                          "migration-skips-ship-identity",
+                          "legacy-move-unlinks-first",
+                          "legacy-move-skips-outbox",
+                          "legacy-ship-ungated",
                           "outbox-listed-by-path",
                           "confined-output-unescaped",
                           "confined-copy-shared",

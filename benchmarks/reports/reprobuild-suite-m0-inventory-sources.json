@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 36,
-    "nimTestBinaries": 3285,
+    "nimTestBinaries": 3287,
     "pureUnitConsolidationGroups": 96,
-    "pureUnitTests": 851,
+    "pureUnitTests": 852,
     "staticallyDetectedRuntimeCompilerFlowTests": 164,
-    "testEntries": 3344
+    "testEntries": 3346
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -75,7 +75,7 @@
       "targetOs": "soAny"
     },
     {
-      "count": 10,
+      "count": 11,
       "defines": [],
       "dependencyShape": [
         "repro_addon"
@@ -91,7 +91,8 @@
         "libs/repro_addon/tests/t_addon_floor_round22.nim",
         "libs/repro_addon/tests/t_addon_image_assembly_cleanup.nim",
         "libs/repro_addon/tests/t_addon_preflight_needs_a_c_compiler.nim",
-        "libs/repro_addon/tests/t_addon_review_round5.nim"
+        "libs/repro_addon/tests/t_addon_review_round5.nim",
+        "libs/repro_addon/tests/t_addon_ship_migration_round26.nim"
       ],
       "targetOs": "soAny"
     },
@@ -1858,9 +1859,9 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 29,
-      "integration": 1861,
+      "integration": 1862,
       "platform/destructive": 206,
-      "pure unit": 851,
+      "pure unit": 852,
       "unclassified": 397
     },
     "graphOwnedTestArtifacts": [
@@ -2081,9 +2082,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 3285,
+    "nimTestBinaryCount": 3287,
     "pythonTestFileCount": 59,
-    "testEntryCount": 3344
+    "testEntryCount": 3346
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -11548,6 +11549,23 @@
       "source": "libs/repro_addon/tests/t_addon_service_floor.nim",
       "sourceSuiteCount": 7,
       "staticCaseCount": 33,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_addon_ship_migration_round26",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_addon"
+      ],
+      "owner": "libs/repro_addon",
+      "requiresReproBinary": false,
+      "source": "libs/repro_addon/tests/t_addon_ship_migration_round26.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 8,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -37916,6 +37934,24 @@
       "owner": "tests/e2e",
       "requiresReproBinary": false,
       "source": "tests/e2e/addon/t_e2e_addon_evidence_enrol.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_e2e_addon_evidence_migration",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_peer_cache",
+        "repro_test_support"
+      ],
+      "owner": "tests/e2e",
+      "requiresReproBinary": false,
+      "source": "tests/e2e/addon/t_e2e_addon_evidence_migration.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
       "staticallyDetectedRuntimeCompilerFlow": false,
