@@ -31,13 +31,15 @@
 ##
 ## The third test kills the revert at ``revert:step-7``: its hold and its
 ## record are written, no ledger names them, and nothing replays it (no
-## reboot). Uninstall claims the hold and the directory as a ledger write
-## would -- the hold text on a unit the ledger installs, the directory the
-## record shows the revert made -- and removes both, and step 4 holds. The
-## killed revert leaves the generation's unit files half-rewritten, which
-## uninstall reports as drift and keeps its state for (as for any switch
-## nobody finished), so that case does not assert step 3's exit 0 and base
-## identity.
+## reboot), so its switch's pending marker stays. Uninstall is refused
+## (§6.4 step 0, §13 decision 122: ``EAddOnSwitchPending``) and changes
+## nothing: the fingerprint is identical and the hold is still there.
+## ``repro system addon recover`` then replays the revert to its commit,
+## and its ledger records the hold and the directory (step 2), so steps 3
+## and 4 hold as in the first test. Uninstall's own claim of holds no
+## ledger names (``unledgeredRevertHolds``) is not reachable through
+## uninstall while step 0 refuses the host that would have them, and is
+## covered by ``t_addon_revert_hold_ledger``.
 ##
 ## The revert makes the directory under a staging name and renames it into
 ## place, recording each step first, so an operator's directory made at
@@ -52,9 +54,18 @@
 ## it behind, empty; ``revert-hold-not-synced`` (red on the second test
 ## only): the hold reaches the disk empty and the held unit starts at the
 ## boot; ``recovery-starts-held-units`` (red on the second test only): the
-## recovery starts the held unit and reports it started;
-## ``uninstall-ignores-unledgered-holds`` (red on the third test only):
-## uninstall leaves the killed revert's hold and directory.
+## recovery starts the held unit and reports it started. The second test
+## reads the hold's bytes on disk at the reset's boot before anything can
+## rewrite it: a gate-owned probe unit (``a9r-holdprobe.service``, ordered
+## before ``sysinit.target`` and so before the re-assertion's replay)
+## prints its size and digest. Without it ``revert-hold-not-synced`` was
+## not red here: a floored unit starts only after the re-assertion, whose
+## replay writes the hold again first, so the unit stayed down whether or
+## not the hold reached the disk. Measured 2026-11-26 at 6bb692ed20 with the
+## re-assertion masked for that boot: the hold read back 182 bytes in the
+## product build and 0 in ``revert-hold-not-synced``, whose unit then
+## started. ``uninstall-ignores-unledgered-holds`` is
+## red in ``t_addon_revert_hold_ledger`` (see the third test).
 ##
 ## Opt-in: ``REPRO_ADDON_VM_GATES=1``. The second test pauses a switch and
 ## resets a QEMU guest, so it needs the seam build, which
@@ -74,6 +85,28 @@ const Pending = "/var/lib/repro/system/addon/pending"
 const HoldDir = "/etc/systemd/system/a9r-st.service.d"
 const Hold = HoldDir & "/zz-repro-addon-revert-hold.conf"
 const RecordPath = "/var/lib/repro/system/addon/revert-hold-dirs"
+const Probe = "/etc/systemd/system/a9r-holdprobe.service"
+
+proc installHoldProbe(g: Guest) =
+  ## The gate's own probe: at every boot, before ``sysinit.target`` (so
+  ## before the boot-hold unit's reload and the re-assertion's replay could
+  ## rewrite the hold), print the hold's size and SHA-256 as the disk has
+  ## them. Written, enabled and synced before the reset, removed by the gate
+  ## before the base comparison.
+  let unit = "[Unit]\nDescription=a9r hold probe\nDefaultDependencies=no\n" &
+    "After=local-fs.target\nBefore=sysinit.target repro-addon-boot-hold.service " &
+    "repro-addon-reassert.service\n\n[Service]\nType=oneshot\n" &
+    "ExecStart=/bin/sh -c 'if [ -e " & Hold & " ]; then echo a9r-holdprobe " &
+    "size=$$(stat -c %%s " & Hold & ") sha=$$(sha256sum < " & Hold &
+    " | cut -c1-64); else echo a9r-holdprobe absent; fi'\n\n[Install]\n" &
+    "WantedBy=sysinit.target\n"
+  discard g.run("printf '%s' " & quoteShell(unit) & " > " & Probe &
+                " && systemctl daemon-reload && systemctl enable a9r-holdprobe.service " &
+                "&& sync")
+
+proc removeHoldProbe(g: Guest) =
+  discard g.run("systemctl disable a9r-holdprobe.service 2>/dev/null; rm -f " &
+                Probe & "; systemctl daemon-reload; true")
 
 proc unitResource(name, service, binary: string; description: string): string =
   ## A floored oneshot unit that stays active, enabled.
@@ -160,6 +193,25 @@ proc runBase(b: BaseImage; record: JsonNode; resetAt = "";
       step("the revert is killed, its switch left pending",
            "gone" in alive and g.exec("test -e " & Pending).exitCode == 0, alive)
       discard g.run("rm -f " & SeamDir & "/test-pause-at; true")
+      # §6.4 step 0 (§13 decision 122): uninstall refuses while the killed
+      # revert's marker exists, and changes nothing.
+      let fBefore = g.takeFingerprint(repro)
+      let refused = g.exec(repro & " system addon uninstall", timeoutSec = 1200)
+      let said = refused.stdout & refused.stderr
+      record["uninstallOverMarker"] = %said
+      step("uninstall is refused while the killed revert's switch is pending",
+           refused.exitCode != 0 and "EAddOnSwitchPending" in said and
+           Pending in said, "exit " & $refused.exitCode & "\n" & tail(said))
+      let same = identityReport(fBefore, g.takeFingerprint(repro))
+      step("the refused uninstall changed nothing: the fingerprint, the hold " &
+           "and the marker are as they were",
+           same.ok and g.exec("test -f " & Hold).exitCode == 0 and
+           g.exec("test -e " & Pending).exitCode == 0, same.text)
+      let rec = g.exec(repro & " system addon recover", timeoutSec = 1200)
+      record["recover"] = %(rec.stdout & rec.stderr)
+      step("recover replays the revert to its commit, nothing pending",
+           rec.exitCode == 0 and g.exec("test -e " & Pending).exitCode != 0,
+           tail(rec.stdout & rec.stderr))
     elif resetAt.len == 0:
       r = g.applyProfile(repro, "u2", st("u2"))
       let out2 = r.stdout & r.stderr
@@ -172,6 +224,7 @@ proc runBase(b: BaseImage; record: JsonNode; resetAt = "";
       # "Not synced" means "not on the disk" at the reset
       # (``holdWriteback``), so a hold written without a sync comes back
       # empty every time, not when the kernel happens to be slow.
+      g.installHoldProbe()
       g.holdWriteback()
       let paused = g.startSwitchPausedAt(repro, "u2", st("u2"), resetAt)
       step("the refused apply's revert paused at " & resetAt,
@@ -193,6 +246,16 @@ proc runBase(b: BaseImage; record: JsonNode; resetAt = "";
       g.boot()
       let journal = g.waitReasserted()
       record["reassert"] = %journal
+      # What the disk held at this boot, before anything rewrote it.
+      let probe = g.exec("journalctl -b -o cat --no-pager -u a9r-holdprobe.service").stdout
+      record["holdProbe"] = %probe
+      # The hold as the replay left it is the hold text (the step below
+      # checks the hold is there); the probe must have read the same bytes.
+      let want = "a9r-holdprobe " & g.exec("echo size=$(stat -c %s " & Hold &
+                 ") sha=$(sha256sum < " & Hold & " | cut -c1-64)").stdout.strip()
+      step("the hold was on the disk, whole, at the reset's boot",
+           want in probe, probe & "\nwant: " & want)
+      g.removeHoldProbe()
       let pending = g.exec("test -e " & Pending & " && cat " & Pending & "; true").stdout
       # The hold was on the disk, whole, so the held unit did not start at
       # the boot, before the recovery ran either.
@@ -211,7 +274,7 @@ proc runBase(b: BaseImage; record: JsonNode; resetAt = "";
     step("the revert's hold is written under /etc",
          g.exec("test -f " & Hold).exitCode == 0,
          g.exec("ls -la " & HoldDir & " 2>&1").stdout)
-    if killAt.len == 0:
+    block:
       let ledger = g.ledgerOf()
       record["ledgerAfterRevert"] = %ledger
       var holdLine, dirLine = false
@@ -228,19 +291,7 @@ proc runBase(b: BaseImage; record: JsonNode; resetAt = "";
            g.exec("cat " & RecordPath & " 2>&1").stdout)
     let un = g.exec(repro & " system addon uninstall", timeoutSec = 1200)
     let left = g.exec("ls -la " & HoldDir & " 2>&1; ls /etc/systemd/system/a9r-st.service 2>&1").stdout
-    if killAt.len > 0:
-      # The killed revert was rewriting the generation's unit files when it
-      # died, so they differ from the ledger copy (the refused switch's):
-      # uninstall leaves them as drift and keeps the state, as it must for
-      # a switch nobody finished (§6.4; step 0 refuses such a host). What
-      # this case holds it to is the hold: removed, with the directory the
-      # revert's record shows it made, though no ledger names either.
-      step("uninstall removes the hold and its directory though no ledger names them",
-           g.exec("test -e " & HoldDir).exitCode != 0 and
-           ("removed " & Hold) in un.stdout & un.stderr,
-           tail(un.stdout & un.stderr) & "\n" & left)
-      discard g.run("rm -f /etc/systemd/system/a9r-st.service; systemctl daemon-reload")
-    else:
+    block:
       step("uninstall exits 0 and leaves neither the hold nor its directory",
            un.exitCode == 0 and g.exec("test -e " & HoldDir).exitCode != 0,
            tail(un.stdout & un.stderr) & "\n" & left)

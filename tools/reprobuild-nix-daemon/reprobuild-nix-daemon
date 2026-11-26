@@ -33,9 +33,11 @@ HOST_DYNAMIC_LOADER_ENV = (
 )
 
 
-def is_mutable_local_nix_selector(selector: str) -> bool:
-    # Same policy as repro_core/nix_evaluation_policy; the cross-language
-    # regression exercises this helper and the Nim cache layers together.
+def is_mutable_local_nix_selector_text(selector: str) -> bool:
+    # The TEXT half of ``is_mutable_local_nix_selector``: what the selector
+    # string alone proves local. Same policy as repro_core/nix_evaluation_
+    # policy's ``isMutableLocalNixSelectorText``; the cross-language corpus
+    # tests/fixtures/nix-evaluation-policy.json keeps the two aligned.
     # Local is decided by where the source is read from, not by a list of
     # flake types (Foreign-Provisioning-And-Nix-Evaluation-Daemon.md §3
     # item 4). Nix tries each reading of a reference in turn and, when the
@@ -62,6 +64,103 @@ def is_mutable_local_nix_selector(selector: str) -> bool:
         return True
     return (selector.count("#") > 1
             or NIX_URL_REFERENCE.fullmatch(selector) is None)
+
+
+def nix_path_fallback_candidates(selector: str) -> list[str]:
+    # The workspace-relative paths Nix could read ``selector`` as, whatever
+    # its text looks like. Mirrors ``nixPathFallbackCandidates`` in
+    # repro_core/nix_evaluation_policy.
+    #
+    # A selector the text checks call remote can still be read as a path:
+    # - WITH A URL SCHEME: Nix 2.34's ``parseURLFlakeRef`` falls back to a
+    #   path when the URL parser OR the input scheme's ``fromParsedURL``
+    #   rejects the string (``github:o#x``, ``https://h:0/x#x``,
+    #   ``github:o%zz#x``, ...); later Nix versions fall back only on the URL
+    #   parser's rejection. Either way the path is the text before the first
+    #   ``?`` or ``#`` (``parsePathFlakeRefWithFragment``'s regex
+    #   ``([^?#]*)...``), taken relative to Nix's working directory:
+    #   https://github.com/NixOS/nix/blob/master/src/libflake/flakeref.cc
+    #   Without a scheme, a selector the text checks call remote is a whole-
+    #   string registry reference, which ``parseFlakeIdRef`` accepts before
+    #   any path reading and without looking at the filesystem, so this
+    #   candidate does not apply to it (``nixpkgs#bash`` beside a
+    #   ``nixpkgs`` directory stays remote).
+    # - ANY SELECTOR: before any flake parse, ``nix build`` hands a prefix
+    #   containing ``/`` to ``followLinksToStorePath``, relative to the same
+    #   directory, so a workspace symlink named like the whole prefix
+    #   (``tools/stable``, ``github:o/r#x``) wins:
+    #   https://github.com/NixOS/nix/blob/master/src/libcmd/installables.cc
+    #   (``SourceExprCommand::parseInstallables``).
+    # Both paths are taken from the prefix: the selector without its
+    # ``^outputs`` suffix, which ``ExtendedOutputsSpec::parse`` splits off at
+    # the LAST ``^``
+    # (https://github.com/NixOS/nix/blob/master/src/libstore/outputs-spec.cc).
+    # When that suffix is not a valid outputs spec Nix refuses the selector
+    # ("invalid extended outputs specifier", measured with Nix 2.34.8) and
+    # reads no path at all, so the unsplit string is never a candidate.
+    has_scheme = NIX_SELECTOR_SCHEME.match(selector) is not None
+    caret = selector.rfind("^")
+    prefix = selector[:caret] if caret >= 0 else selector
+    url_fallback = NIX_PATH_FLAKE_PATH.match(prefix).group(0) if has_scheme else ""
+    candidates: list[str] = []
+    for candidate in (url_fallback, prefix if "/" in prefix else ""):
+        if candidate and candidate not in candidates:
+            candidates.append(candidate)
+    return candidates
+
+
+NIX_PATH_FLAKE_PATH = re.compile(r"[^?#]*")
+
+
+def workspace_entry_may_exist(workspace_root: Path, candidate: str) -> bool:
+    # Whether Nix's ``lstat`` of ``candidate``, relative to
+    # ``workspace_root`` (an absolute candidate stays absolute), could find
+    # something. The final component is NOT followed: a dangling symlink
+    # exists to Nix's ``lstat``. Nix reads a candidate containing ``..``
+    # both ways: the flake-path fallback resolves symlinks before ``..``
+    # (physically, as the kernel does), while ``followLinksToStorePath``
+    # canonicalises lexically. Both spellings are tested; ``os.path.join``
+    # does not fold ``..``, so ``joined`` is the physical one.
+    #
+    # FAIL SAFE: only "does not exist" (ENOENT, ENOTDIR) proves absence. Any
+    # other error (EACCES, ENAMETOOLONG, ELOOP, an embedded NUL, ...) means
+    # this helper cannot prove Nix will not read a local path, and a
+    # selector that cannot be proven remote is never cached: it answers
+    # "may exist". On Windows, where the helper never serves, a name the
+    # filesystem cannot hold (``ERROR_INVALID_NAME``, e.g. a ``:``) cannot
+    # exist either.
+    joined = os.path.join(str(workspace_root), candidate)
+    for path in dict.fromkeys((joined, os.path.normpath(joined))):
+        try:
+            os.lstat(path)
+            return True
+        except OSError as exc:
+            if exc.errno in (errno.ENOENT, errno.ENOTDIR):
+                continue
+            if getattr(exc, "winerror", None) in (2, 3, 123):
+                continue
+            return True
+        except ValueError:
+            return True
+    return False
+
+
+def is_mutable_local_nix_selector(selector: str, workspace_root: Path) -> bool:
+    # Whether ``selector``, evaluated by ``nix`` with ``workspace_root`` as
+    # its working directory, may read mutable local source -- and so is
+    # never answered from the cache (Foreign-Provisioning-And-Nix-
+    # Evaluation-Daemon.md §3 item 4). Same rule as repro_core/
+    # nix_evaluation_policy's ``isMutableLocalNixSelector``.
+    #
+    # Local when the text says so (``is_mutable_local_nix_selector_text``),
+    # and ALSO when a path Nix could fall back to exists in the workspace
+    # (``nix_path_fallback_candidates``): the text alone cannot tell, since
+    # Nix's fallback depends on whether its fetcher accepts the URL and on
+    # what the workspace holds.
+    if is_mutable_local_nix_selector_text(selector):
+        return True
+    return any(workspace_entry_may_exist(workspace_root, candidate)
+               for candidate in nix_path_fallback_candidates(selector))
 
 
 # A URL scheme; Nix's flake-registry reference (its flake-id regex, an
@@ -417,7 +516,8 @@ def response_for(line: bytes, cache: "ResolveCache", cached_only: bool = False):
                 "error": f"Nix expression file does not exist: {expression_file}",
             }
     dependencies = dependencies_for(workspace_root, expression_file)
-    if expression_file is not None or is_mutable_local_nix_selector(selector):
+    if (expression_file is not None
+            or is_mutable_local_nix_selector(selector, workspace_root)):
         # Explicit local flakes have mutable imported source too. The known
         # top-level files cannot establish their complete evaluation identity.
         # NEVER CACHED (owner decision 2026-10-14, Edge-Derived-Identities.md

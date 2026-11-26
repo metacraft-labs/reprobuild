@@ -34,6 +34,7 @@ import std/[os, osproc, strutils, unittest]
 import repro_build_engine
 from repro_test_support import prepareMonitorTools
 import repro_test_support/reasoned_skip
+import repro_core/target_object_check
 import repro_dsl_stdlib/packaging/producers/installed_prefix
 
 proc missingTool(): string =
@@ -118,7 +119,7 @@ suite "the installed-prefix assembly is recorded":
           "-o libs/libbar.so.1 bar.c")
         cc(work, "-o built/bin/app app.c -Llibs -l:libbar.so.1 " &
           "-Wl,-rpath-link,libs")
-        let spec = InstalledPrefixSpec(name: "probe", triple: "native",
+        let spec = InstalledPrefixSpec(name: "probe", triple: hostTriple(),
           output: work / "prefix",
           entries: @[PrefixEntry(source: work / "built" / "bin" / "app",
             dest: "bin/app")],

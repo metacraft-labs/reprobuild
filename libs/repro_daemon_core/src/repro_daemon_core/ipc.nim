@@ -860,6 +860,24 @@ proc ipcListenerIdentity*(conn: IpcConn): IpcPeerIdentity =
     except OSError as err:
       raise newException(IpcPeerIdentityError, err.msg)
 
+proc ipcPeerPid*(conn: IpcConn): int =
+  ## The pid of the process at the other end of ``conn``, an ACCEPTED
+  ## connection, as the kernel recorded it when that process connected
+  ## (Linux ``SO_PEERCRED``). -1 where the platform does not report one
+  ## (``getpeereid`` carries no pid; Windows pipes are not asked), or when it
+  ## cannot be obtained. The daemon uses it to find the caller's cgroup
+  ## (``caller_cgroup``); it is the kernel's answer, never the peer's.
+  when defined(linux):
+    if conn.socket == nil:
+      return -1
+    try:
+      socketPeerCredentials(SocketHandle(conn.socket.getFd())).pid
+    except OSError:
+      -1
+  else:
+    discard conn
+    -1
+
 proc requireIpcListener*(conn: IpcConn; endpoint, daemonName: string;
                          expected: IpcPeerIdentity; expectedLabel: string) =
   ## Refuse ``conn`` unless the account listening at ``endpoint`` is

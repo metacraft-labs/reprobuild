@@ -300,7 +300,7 @@ nim-stackable-hooks
 # commits behind the pin.
 # Private auto-start requires the explicit endpoint policy in this revision;
 # keep release archives and CI overrides on the same API as the Nix pin.
-runquota=f766cf21f2ccfb7f7904446f04888d92520d9644
+runquota=ee9860b61680c6ee307bbb2228378f8cfb59536b
 nim-shm-queue
 # Moved to 803a4fa (2026-11-22), nim-shm-gset's `agents` tip, with
 # `nim-shm-gset-src` in flake.nix and flake.lock: a reader handle stops
@@ -331,7 +331,7 @@ nim-confutils=f85c716c50f29344d9d28747632897c1ebc03ada
 # Moved e3254b7 -> 22e3100 (2026-10-20) with the runquota pin above, whose
 # flake.lock names it; e3254b7 is an ancestor. Moved 22e3100 -> 08a3f50 (2026-11-16)
 # with the runquota pin above, for the same reason; 22e3100 is an ancestor.
-nim-shm-lease=08a3f50a391b32b053598f64c670d5232e1eb051
+nim-shm-lease=c0ba8f799658d483906db3da82482117ae73ce11
 
 # The shared-actions repo, declared here as an ordinary sibling (GitHub
 # materialises a `uses: metacraft-labs/metacraft-github-actions/...@dev`

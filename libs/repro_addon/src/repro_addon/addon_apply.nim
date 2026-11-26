@@ -342,6 +342,11 @@ type
     failedAtFloor*: seq[string]
       ## Non-empty when the switch failed after its flip and the rollback
       ## floor kept it in place: what failed (spec §7.5, ``failed-at-floor``).
+    ownMigrated*: seq[string]
+      ## Generation 0's units this engine renders differently and the switch
+      ## rewrites (``own_profile.migrateOwnProfile``), for the operator's
+      ## review: the plan lists them. Each only narrows the unit (the owner's
+      ## decision of 2026-11-26 for the shipping and egress check units).
     repointSkipped*: string
       ## Non-empty when the engine units were not re-pointed because the
       ## running engine is not the static add-on image and no matching
@@ -5976,6 +5981,10 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
       "not an add-on host: " & ownProfilePath(stateDir) & " is missing")
   let migratedOwn =
     if replaying: targetOwn else: migrateOwnProfile(targetOwn)
+  for u in MigratedOwnUnits:
+    let was = unitContentOf(targetOwn, u)
+    if was.len > 0 and was != unitContentOf(migratedOwn, u):
+      result.ownMigrated.add(u)
   # The objects this build added to generation 0 are installed by every
   # switch that finds them missing (§13 decision 159: a host bootstrapped
   # by an earlier engine gets the boot-hold unit at its next apply). Here,
@@ -6026,6 +6035,17 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
     if sel.skipped.len > 0:
       result.repointSkipped = sel.skipped
       stderr.writeLine("repro-addon: re-point skipped: " & sel.skipped)
+    # The shipping and egress check units in the shape this build's
+    # migration renders run only on an engine with §13 decisions 181 and
+    # 188 (the owner's decision of 2026-11-26): an apply that cannot
+    # re-point at its own static image keeps them as they are installed,
+    # and a later apply with the static binary migrates them.
+    if engineExe.len == 0:
+      ownText = keepUnitsFrom(ownText, targetOwn, ShapeMigratedUnits)
+      var kept: seq[string]
+      for u in result.ownMigrated:
+        if u notin ShapeMigratedUnits: kept.add(u)
+      result.ownMigrated = kept
     try:
       let rp = repointEngine(ownText, engineExe, known, ownPathProbe,
         proc (path: string): string =
