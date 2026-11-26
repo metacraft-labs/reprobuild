@@ -145,7 +145,7 @@ proc migrateOwnProfile*(own: string): string =
   result = refreshEgressUnit(result)
   # The shipping unit as this build renders it, whole (the owner's decision
   # of 2026-11-26, "migrate existing hosts"): its dynamic user and
-  # confinement (§13 decision 181), its harvest step (decision 188) and its
+  # confinement (§13 decision 181), its harvest step for the egress drop directory (decision 188) and its
   # start timeout (A11 review round 2). Rendered from what the installed
   # text names: its engine (``ExecStart=``) and the sink's address (its
   # ``IPAddressAllow=``, the only input the unit takes); one that names
