@@ -23728,6 +23728,9 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     cmp(idToIndex[a], idToIndex[b])
 
   var running: seq[RunningAction] = @[]
+  # Ready actions consulted while their launch was blocked and found to need
+  # one: not consulted again until they can launch (the ready scan's head).
+  var consultedWhileBlocked = initHashSet[string]()
   # Canonical work trees (`BuildAction.canonicalWorkKey`): the lease each
   # keyed action holds from the moment it is admitted to launch until it is
   # terminal, the refusals the launch reports, and what was traced once.
@@ -25226,10 +25229,25 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       var stagedInlineLaunches: seq[StagedInlineLaunch] = @[]
       var builtinBatch: seq[PendingConcurrentBuiltin] = @[]
       var i = 0
-      while i < ready.len and
-          uint32(running.len + stagedInlineLaunches.len) < maxParallel and
-          (not inlineRunQuotaSessionOpen or
-            pendingInlineCount() + stagedInlineLaunches.len < frontier.width):
+      # LAUNCH CAPACITY GATES LAUNCHES, NOT CACHE CONSULTATION. The
+      # parallel slots, the RunQuota frontier, a named pool's capacity and
+      # the site-table first-run hold all bound what may LAUNCH. A ready
+      # action the cache serves launches nothing, so none of them may keep
+      # it waiting. This scan used to stop at the first of them, and every
+      # action behind that point waited for a launch to finish or a lease to
+      # be granted -- the hits included. On a busy host the frontier shrinks
+      # to two queued candidates, so a 91%-hit ``.#test-builds`` served its
+      # hits at the rate RunQuota granted its misses: about 25 actions a
+      # minute, with most slots idle.
+      #
+      # So the scan runs over the whole ready queue. An action whose launch
+      # is blocked is consulted ONCE (``consultedWhileBlocked``): a hit or an
+      # up-to-date action settles there, and one that would have to launch
+      # is DEFERRED -- its result entry is restored and it goes back into the
+      # queue -- and is not consulted again until it can launch. That bounds
+      # the extra work to one extra consultation per miss, and keeps a long
+      # ready queue of misses from being re-consulted on every pass.
+      while i < ready.len:
         raiseIfCancelled()
         let id = ready[i]
         var action = actionsById[id]
@@ -25237,6 +25255,10 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         let cap = poolCapacity.getOrDefault(poolName, maxParallel)
         let used = poolRunning.getOrDefault(poolName, 0'u32)
         let units = if action.poolUnits == 0'u32: 1'u32 else: action.poolUnits
+        let slotsFull =
+          uint32(running.len + stagedInlineLaunches.len) >= maxParallel or
+          (inlineRunQuotaSessionOpen and
+            pendingInlineCount() + stagedInlineLaunches.len >= frontier.width)
         # RA-13: the local pool gate is authoritative ONLY for the default
         # frontier pool ("") and for NAMED pools on the bypass path. When
         # RunQuota is the authority for this launch, a NAMED pool's capacity is
@@ -25249,18 +25271,25 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         # pool, but for a RunQuota-gated named pool it is only a
         # non-authoritative ordering hint, never a second gate.
         let localPoolGateActive = poolName.len == 0 or willBypassRunQuota()
-        if localPoolGateActive and used + units > cap:
-          inc i
-          continue
+        let poolFull = localPoolGateActive and used + units > cap
         # The first run of a toolchain image tells the engine which images
         # its driver execs; wait for it, so this action launches with their
         # site tables instead of decoding them (`inline_site_tables`).
+        var siteTableHold = false
         if siteTables.firstRunPending(isRunning):
           if not siteTableRoots.hasKey(id):
             siteTableRoots[id] = siteTableRootImage(action, unsafeAddr config)
-          if siteTables.holdsLaunch(siteTableRoots[id], isRunning):
+          siteTableHold = siteTables.holdsLaunch(siteTableRoots[id], isRunning)
+        let launchBlocked = slotsFull or poolFull or siteTableHold
+        if launchBlocked:
+          # Consulted once while blocked (see above). An action with a
+          # canonical work tree is not consulted early: taking its tree is
+          # the first step of leaving the queue, and holding one while the
+          # action waits for capacity would keep it from another build.
+          if id in consultedWhileBlocked or action.canonicalWorkKey.len > 0:
             inc i
             continue
+          consultedWhileBlocked.incl(id)
         # A canonical work tree is taken here, before the action leaves the
         # ready queue, so a key another build holds DEFERS this action (the
         # queue moves on to the next one) instead of running it elsewhere:
@@ -25289,6 +25318,11 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           completed = terminalCount()
           continue
         action = actionsById[id]
+        # What the consultation below may change in this action's result
+        # entry is put back if the action is deferred, so the consultation it
+        # gets when it can launch starts from the same entry.
+        let resultBeforeConsult =
+          runResult.results[idToIndex.resultIndex(id)]
         runResult.trace(id, "ready", "pool=" & poolName)
         runResult.trace(id, "dependency-policy", $action.dependencyPolicy.kind)
 
@@ -25975,6 +26009,25 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             false, reason)
           inc completed
           launchedAny = true
+          continue
+
+        # From here on the action launches. Nothing above has launched it or
+        # taken anything a launch takes, so an action whose launch is blocked
+        # (see the scan's head) goes back into the queue here, its result
+        # entry as it was, and waits for capacity.
+        if launchBlocked:
+          let deferredIdx = idToIndex.resultIndex(id)
+          # Except the corrupt blobs the consultation DROPPED from the content
+          # store (`dropUnservablePayloads`, a failed restore): that removal
+          # is not undone, and the consultation at launch finds the blobs
+          # gone and cannot report them, so the fact is carried across.
+          let dropped = runResult.results[deferredIdx].droppedCorruptPayloads
+          runResult.results[deferredIdx] = resultBeforeConsult
+          runResult.results[deferredIdx].droppedCorruptPayloads = dropped
+          runResult.trace(id, "deferred",
+            "launch capacity is taken; the cache could not serve it")
+          ready.insert(id, i)
+          inc i
           continue
 
         # The canonical work tree, placed and locked when the action left the

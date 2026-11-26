@@ -3,6 +3,8 @@
 ##   1. repro.paths, .gitignore, and config.nims are generated/updated.
 ##   2. Rebuilds occur and update paths when dependencies change.
 ##   3. Early cut-off rules preserve file mtimes when dependencies remain unchanged.
+##   4. A sibling directory named like a used (non-`nimble:`) dependency
+##      reaches repro.paths without a recorded develop override.
 
 import std/[os, osproc, strutils, times, unittest]
 
@@ -217,3 +219,27 @@ created_at = "2026-07-02T00:00:00Z"
       # Verify modification time has updated
       let pathsMtime3 = getLastModificationTime(reproPaths)
       check pathsMtime3 > pathsMtime2
+
+      # ---- RUN 4: A sibling no override records, found by its name ----
+      # `sibling_dep_2` is still used, and still a directory beside the
+      # project, but no develop override names it any more. A Reprobuild
+      # workspace package is matched by the directory's name, as before
+      # Nimble-Package-Catalog NPC-AREQ27, which takes that matching away
+      # from `nimble:` catalog packages only.
+      writeFile(projRoot / ".repro" / "develop-overrides.toml", """
+schema = "reprobuild.workspace.develop-overrides.v1"
+
+[[override]]
+package = "sibling_dep"
+local_path = "../sibling_dep"
+state = "editable"
+created_at = "2026-07-02T00:00:00Z"
+""")
+      checkpoint("RUN 4 (Unrecorded sibling): " & buildCmd)
+      let (code4, out4) = run(buildCmd, repoRoot)
+      checkpoint(out4)
+      check code4 == 0
+      let pathsContent4 = readFile(reproPaths)
+      checkpoint(pathsContent4)
+      check "switch(\"path\", \"" & expectedPath1 & "\")" in pathsContent4
+      check "switch(\"path\", \"" & expectedPath2 & "\")" in pathsContent4

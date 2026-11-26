@@ -2451,6 +2451,66 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
          $latestPerKey & ", restore epoch " & $restoreEpoch &
          (if progressed: "" else: "\n" & chainStart))
 
+    # --- 5b. §13 decision 195 (the owner's "add a retire step", 2026-11-25):
+    # after the successful restore, `repro system state retire` removes the
+    # marker, every restore requirement and the restore unit, so the profile
+    # decision 192 refused above (a drop-in over sshd.service) now applies,
+    # and sshd still accepts a connection. Falsifier: the engine build
+    # retire-leaves-requirements (a generation's requirement drop-in
+    # stays). The protection is then installed again for the boot-path
+    # steps below: install-unit, and an apply that gives the generation's
+    # units their requirement back.
+    block:
+      let reqsCmd = "ls /etc/systemd/system/*.d/*-repro-state-restore.conf " &
+        "2>/dev/null || true"
+      let reqsBefore = nw.exec(reqsCmd).stdout.strip()
+      let ret = nw.exec(eng & " system state retire", timeoutSec = 600)
+      let retOut = ret.stdout & ret.stderr
+      let markerLeft = nw.exec("test -e /var/lib/repro/system/carried.installed " &
+        "&& echo yes || true").stdout.strip()
+      let unitLeft = nw.exec("test -e /etc/systemd/system/" & RestoreUnit &
+        " && echo yes || true").stdout.strip()
+      let reqsAfter = nw.exec(reqsCmd).stdout.strip()
+      let manifestKept = nw.exec("test -f " & CarriedDir &
+        "/state-set.json && echo yes || true").stdout.strip()
+      let sd = nw.exec(env & eng & " infra apply --profile " & RefDir &
+        "/system_sshd.nim --host " & AgentTarget & " --no-preview",
+        timeoutSec = 3600)
+      let sdOut = sd.stdout & sd.stderr
+      let conn = nw.exec("echo a13-connected").stdout.strip()
+      let retired = ret.exitCode == 0 and reqsBefore.len > 0 and
+        markerLeft.len == 0 and unitLeft.len == 0 and reqsAfter.len == 0 and
+        manifestKept == "yes"
+      let applied = sd.exitCode == 0 and "decision 192" notin sdOut
+      record["carriedRetired"] = %*{"exit": ret.exitCode,
+        "requirementsBefore": reqsBefore, "requirementsAfter": reqsAfter,
+        "markerLeft": markerLeft, "unitLeft": unitLeft,
+        "manifestKept": manifestKept, "applyExit": sd.exitCode,
+        "connected": conn, "ok": retired and applied and conn == "a13-connected"}
+      step("decision 195: after a successful restore, retire removes the " &
+           "marker, every restore requirement and the restore unit, and the " &
+           "profile decision 192 refused applies with sshd still reachable",
+           retired and applied and conn == "a13-connected",
+           retOut & "\nrequirements before:\n" & reqsBefore & "\nafter:\n" &
+           reqsAfter & "\nmarker left: " & markerLeft & ", unit left: " &
+           unitLeft & "\n" & sdOut & "\nconnection: " & conn)
+      # The protection again, for the boot-path steps: the drop-in over sshd
+      # goes with the next generation, the restore unit and marker come back,
+      # and the apply after them writes the requirements again.
+      let back1 = nw.exec(env & eng & " infra apply --profile " & RefDir &
+        "/system_next.nim --host " & AgentTarget & " --no-preview",
+        timeoutSec = 3600)
+      let reinst = nw.exec(eng & " system state install-unit --from " & CarriedDir)
+      let back2 = nw.exec(env & eng & " infra apply --profile " & RefDir &
+        "/system_next.nim --host " & AgentTarget & " --no-preview",
+        timeoutSec = 3600)
+      let reqsAgain = nw.exec(reqsCmd).stdout.strip()
+      step("decision 195: the protection installed again for the boot-path " &
+           "steps (install-unit, then an apply)",
+           back1.exitCode == 0 and reinst.exitCode == 0 and
+             back2.exitCode == 0 and reqsAgain.len > 0,
+           back1.stdout & back1.stderr & "\n" & reinst.stdout & reinst.stderr &
+           "\n" & back2.stdout & back2.stderr & "\nrequirements:\n" & reqsAgain)
     # --- 6. The kept disk is required.
     discard nw.run("systemctl stop vaultwarden.service; umount " & KeepDir &
       "; sed -i 's#^LABEL=repro-keep .*#LABEL=repro-missing " & KeepDir &

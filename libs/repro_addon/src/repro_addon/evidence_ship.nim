@@ -228,21 +228,42 @@ proc harvestHookWrapperEvents*(site: ShipSite; host: string): int =
     writeOutboxRecord(site.outbox, r, parts[1])
     inc result
 
-proc harvestDropEntries*(dropDir, outbox: string): int =
+proc escapeControl*(s: string): string
+
+const DropLeftName* = "drop-left"
+  ## Under ``<shipping state>/harvest``: how many of the egress check's drop
+  ## entries the last harvest could not move into the outbox. The shipping
+  ## run counts them as queued for its backoff (``shipRunWait``), since it
+  ## cannot see the root drop directory itself.
+
+proc dropLeftPath*(stateDir: string): string = stateDir / "harvest" / DropLeftName
+
+proc harvestDropEntries*(dropDir, outbox: string; stateDir = ""): DropHarvest =
   ## The egress check's entries in its root drop directory, each moved into
   ## the outbox (§13 decision 188): run as root, by the shipping unit's
   ## privileged first step and by a root caller before its confined run.
   ## ``takeDropEntries`` follows no link, takes regular files only, each
-  ## under ``DropEntryMaxBytes``, and removes anything else unread, which
-  ## is printed. Returns the count moved.
+  ## under ``DropEntryMaxBytes``, and moves anything else aside unread. What
+  ## was moved aside and what could not be moved is printed, every name
+  ## escaped (it is a name the writer chose). With ``stateDir`` (the shipping
+  ## unit's state as root sees it), the count left behind is written there
+  ## for the shipping run's backoff (``dropLeftPath``).
   if dropDir.len == 0: return
-  var moved = 0
-  for refused in takeDropEntries(dropDir, DropEntryMaxBytes,
-      take = proc (e: DropEntry) =
-        writeOutboxEntry(outbox, e.name, e.bytes)
-        inc moved):
-    stderr.write("repro-addon evidence: drop entry " & refused & "\n")
-  moved
+  result = takeDropEntries(dropDir, DropEntryMaxBytes,
+    take = proc (e: DropEntry) = writeOutboxEntry(outbox, e.name, e.bytes))
+  for r in result.asideNames & result.left:
+    stderr.write("repro-addon evidence: drop entry " & escapeControl(r) & "\n")
+  if stateDir.len > 0:
+    try:
+      writeDelegatedEntry(stateDir / "harvest", DropLeftName,
+                          $result.left.len & "\n", mode = 0o644)
+    except CatchableError as e:
+      stderr.write("repro-addon evidence: cannot record the drop entries " &
+        "left: " & escapeControl(e.msg) & "\n")
+
+proc dropLeft(stateDir: string): int =
+  try: parseInt(readFile(dropLeftPath(stateDir)).strip())
+  except CatchableError: 0
 
 const
   StaleOutboxMs* = 60_000'i64
@@ -460,7 +481,12 @@ proc shipRunWait*(site: ShipSite; heartbeatSec: int): int =
   except CatchableError: discard
   when mutated("ship-no-backoff"):
     return 0
-  if outboxBusy(site.outbox):
+  # Drop entries the privileged harvest could not move count as queued
+  # too (A11 round 26): the path unit's DirectoryNotEmpty= on the drop
+  # directory would otherwise restart the unit at once, for ever.
+  let dropBusy = when mutated("ship-backoff-ignores-drop"): false
+                 else: dropLeft(site.stateDir) > 0
+  if outboxBusy(site.outbox) or dropBusy:
     inc failures
     try:
       createDir(site.stateDir)
@@ -634,11 +660,22 @@ proc shipFor*(site: ShipSite; conf: EvidenceConf; host: string;
     s.confined = false
     return runEvidenceShip(s, conf, host, forceHeartbeat)
   result.hookEvents = harvestHookWrapperEvents(site, host)
-  discard harvestDropEntries(site.dropDir, site.outbox)
+  var dropLeftOver = 0
+  try:
+    dropLeftOver = harvestDropEntries(site.dropDir, site.outbox,
+                                      site.stateDir).left.len
+  except CatchableError as e:
+    # A drop directory that cannot be opened (a link or a file in its
+    # place) ships nothing from it, and says so; the outbox still ships.
+    stderr.write("repro-addon evidence: the egress check's drop directory " &
+      escapeControl(site.dropDir) & ": " & escapeControl(e.msg) & "\n")
   var cmd = @["evidence-ship", "--no-backoff"]
   if forceHeartbeat: cmd.add("--heartbeat")
   let r = runConfined(conf, cmd)
   result.pending = outboxEntries(site.outbox).len
+  # Drop entries still not moved are queued records too (uninstall's gate).
+  when not mutated("uninstall-ignores-drop"):
+    result.pending += dropEntryNames(site.dropDir).len
   if r.exitCode != 0:
     result.error = "the confined shipping run (" & confinedReproExe() &
       ") exited " & $r.exitCode & ": " & r.output.strip()
@@ -651,24 +688,44 @@ proc inConfinedRun(): bool =
   ## runs (``EvidenceShipConfinedEnv``).
   getEnv(EvidenceShipConfinedEnv) == "1"
 
+proc runHarvest*(site: ShipSite; host: string): int
+
 proc runEvidenceHarvestCommand*(): int =
   ## ``repro system addon evidence-harvest``: the shipping unit's
   ## privileged ``ExecStartPre=+`` step. Turns the apt hook wrapper's
   ## events in root's log into outbox entries, and moves the egress check's
   ## entries from its root drop directory into the outbox (§13 decision
   ## 188); reads nothing from the network.
+  runHarvest(defaultShipSite(), readHost())
+
+proc runHarvest*(site: ShipSite; host: string): int =
+  ## ``evidence-harvest`` for ``site``. Each half's failure is reported and
+  ## does not fail the step (A11 round 26): an ``ExecStartPre=+`` that
+  ## failed would stop the shipping run, and with it every record already
+  ## in the outbox.
+  var failed = false
   try:
-    let site = defaultShipSite()
-    let n = harvestHookWrapperEvents(site, readHost())
+    let n = harvestHookWrapperEvents(site, host)
     if n > 0: stdout.write("evidence: " & $n & " apt hook event(s)\n")
-    # The egress check's entries (§13 decision 188).
-    let m = harvestDropEntries(site.dropDir, site.outbox)
-    if m > 0: stdout.write("evidence: " & $m & " egress check entr" &
-                           (if m == 1: "y" else: "ies") & "\n")
-    0
   except CatchableError as e:
-    stderr.write("repro system addon evidence-harvest: " & e.msg & "\n")
-    2
+    failed = true
+    stderr.write("repro system addon evidence-harvest: the apt hook's " &
+      "events: " & escapeControl(e.msg) & "\n")
+  try:
+    # The egress check's entries (§13 decision 188).
+    let h = harvestDropEntries(site.dropDir, site.outbox, site.stateDir)
+    if h.moved > 0: stdout.write("evidence: " & $h.moved & " egress check entr" &
+                                 (if h.moved == 1: "y" else: "ies") & "\n")
+  except CatchableError as e:
+    failed = true
+    stderr.write("repro system addon evidence-harvest: the egress check's " &
+      "drop directory " & escapeControl(site.dropDir) & ": " &
+      escapeControl(e.msg) & "\n")
+  when mutated("harvest-failure-fails-step"):
+    return (if failed: 2 else: 0)     # FALSIFYING BUILD: the step fails
+  else:
+    discard failed
+    0
 
 proc runEvidenceShipCommand*(heartbeat, noBackoff: bool): int =
   ## ``repro system addon evidence-ship [--heartbeat]`` (the shipping unit);

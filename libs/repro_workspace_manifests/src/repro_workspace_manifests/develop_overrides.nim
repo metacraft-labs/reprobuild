@@ -16,6 +16,12 @@
 ##   state = "editable"                      # required: editable/pinned/detached
 ##   created_at = "2026-06-02T10:14:33Z"     # required: ISO-8601 timestamp
 ##   # provenance = "repro develop cairo"    # optional: how it was selected
+##   # replaces = "<origin>#<commit> blake3:<tree>"  # optional: the locked
+##   #                                       # identity it replaces (v2)
+##
+## Schema v2 is v1 whose entries may carry `replaces`. The writer labels a
+## file v2 exactly when an entry carries it, and v1 otherwise; the reader
+## reads both and refuses any other schema id.
 ##
 ## The file is workspace-local metadata: it lives under ``.repro/`` (NOT
 ## under ``.repo/``) and is never committed. M21 reads it to shadow
@@ -154,6 +160,18 @@ proc removeOverride*(file: DevelopOverrides;
 
 # ---- serializer -----------------------------------------------------------
 
+proc carriesReplaces*(entry: DevelopOverrideEntry): bool =
+  entry.replaces.isSome and entry.replaces.get().len > 0
+
+proc developOverridesSchemaFor*(file: DevelopOverrides): string =
+  ## The schema a writer labels ``file`` with (Workspace-Manifests.md
+  ## §"Develop-Mode Override File"): v2 exactly when an entry carries
+  ## `replaces`, v1 otherwise, so a file with no such entry keeps its bytes
+  ## and stays readable by a reader of v1 only.
+  for entry in file.`override`:
+    if entry.carriesReplaces: return schemaDevelopOverridesV2
+  schemaDevelopOverridesV1
+
 proc serializeDevelopOverridesToToml*(file: DevelopOverrides): string =
   ## Render ``file`` to the canonical TOML form documented in
   ## ``Workspace-Manifests.md`` §"Develop-Mode Override File":
@@ -182,7 +200,7 @@ proc serializeDevelopOverridesToToml*(file: DevelopOverrides): string =
 
   result = newStringOfCap(96 + sorted.len * 160)
   result.add("schema = \"")
-  result.add(schemaDevelopOverridesV1)
+  result.add(developOverridesSchemaFor(file))
   result.add("\"\n")
 
   for entry in sorted:
@@ -214,6 +232,8 @@ proc serializeDevelopOverridesToToml*(file: DevelopOverrides): string =
     emitKv(result, "created_at", entry.created_at)
     if entry.provenance.isSome and entry.provenance.get().len > 0:
       emitKv(result, "provenance", entry.provenance.get())
+    if entry.replaces.isSome and entry.replaces.get().len > 0:
+      emitKv(result, "replaces", entry.replaces.get())
 
 # ---- reader (workspace-rooted) --------------------------------------------
 

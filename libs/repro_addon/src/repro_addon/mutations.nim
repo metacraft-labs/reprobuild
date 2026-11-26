@@ -638,6 +638,12 @@
 ##                                           hold (decisions 171 and 177)
 ## ``restart-success-by-exit-code``        a restart's exit code is taken as
 ##                                           its outcome (round 11, H1)
+## ``retire-without-confirmed-restore``
+##     a retire goes ahead without a confirmed restore (round 15, decision 195)
+## ``retire-leaves-requirements``
+##     a retire leaves the generations' requirement drop-ins behind (round 15, decision 195)
+## ``retire-requirements-first``
+##     a retire removes the requirements before the marker (round 15, decision 195)
 ## ``secret-put-user-profile-only``
 ##     a secret put judges its consumers in the user profile alone (round 15, decision 190)
 ## ``secret-put-unjudged``
@@ -1386,6 +1392,20 @@
 ##                                            by path, following a planted
 ##                                            link (decision 188, drop
 ##                                            directory)
+## ``egress-drop-leaves-dirs``                 the drop harvest leaves a planted
+##                                            directory in the drop directory
+##                                            (decision 188, drop, round 26)
+## ``ship-backoff-ignores-drop``              the shipping run's backoff does
+##                                            not count drop entries the
+##                                            harvest could not move (decision
+##                                            188, drop, round 26)
+## ``harvest-failure-fails-step``             a harvest that cannot read the
+##                                            drop directory fails the shipping
+##                                            unit's first step (decision 188,
+##                                            drop, round 26)
+## ``uninstall-ignores-drop``                 uninstall's queued total leaves
+##                                            out the drop entries (decision
+##                                            188, drop, round 26)
 ## ``outbox-listed-by-path``                  the outbox is listed by path,
 ##                                            through a link its dynamic user
 ##                                            planted (decision 181)
@@ -2288,6 +2308,9 @@ const
                           "dropin-refusal-before-writes-skipped",
                           "secret-put-unjudged",
                           "secret-put-user-profile-only",
+                          "retire-without-confirmed-restore",
+                          "retire-leaves-requirements",
+                          "retire-requirements-first",
                           "restore-holds-sysinit",
                           "restore-removes-filled-placeholder",
                           "restore-unbounded",
@@ -2555,6 +2578,10 @@ const
                           "egress-check-unlocked",
                           "egress-check-dac-override",
                           "egress-drop-follows-links",
+                          "egress-drop-leaves-dirs",
+                          "ship-backoff-ignores-drop",
+                          "harvest-failure-fails-step",
+                          "uninstall-ignores-drop",
                           "outbox-listed-by-path",
                           "confined-output-unescaped",
                           "confined-copy-shared",
