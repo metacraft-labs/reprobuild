@@ -1544,6 +1544,7 @@ flag	repro build	--json
 flag	repro build	--list-targets
 flag	repro build	--list-targets-json
 flag	repro build	--lock
+flag	repro build	--locked
 flag	repro build	--log
 flag	repro build	--measure
 flag	repro build	--monitor-hosting
@@ -1616,6 +1617,7 @@ flag	repro bench	--json
 flag	repro bench	--list-targets
 flag	repro bench	--list-targets-json
 flag	repro bench	--lock
+flag	repro bench	--locked
 flag	repro bench	--log
 flag	repro bench	--measure
 flag	repro bench	--monitor-hosting
@@ -1687,6 +1689,7 @@ flag	repro lint	--json
 flag	repro lint	--list-targets
 flag	repro lint	--list-targets-json
 flag	repro lint	--lock
+flag	repro lint	--locked
 flag	repro lint	--log
 flag	repro lint	--measure
 flag	repro lint	--monitor-hosting
@@ -1771,6 +1774,7 @@ flag	repro test	--json
 flag	repro test	--list-targets
 flag	repro test	--list-targets-json
 flag	repro test	--lock
+flag	repro test	--locked
 flag	repro test	--log
 flag	repro test	--measure
 flag	repro test	--monitor-hosting
@@ -1858,6 +1862,7 @@ flag	repro certify	--json
 flag	repro certify	--list-targets
 flag	repro certify	--list-targets-json
 flag	repro certify	--lock
+flag	repro certify	--locked
 flag	repro certify	--log
 flag	repro certify	--measure
 flag	repro certify	--monitor-hosting
@@ -2534,3 +2539,14 @@ env	repro tool realize	REPRO_TOOL_PROVISIONING
 command	repro nimble check
 flag	repro nimble check	--lock
 flag	repro nimble check	--store
+command	repro nimble develop
+flag	repro nimble develop	--dry-run
+flag	repro nimble develop	--lock
+flag	repro nimble develop	--relock
+flag	repro nimble develop	--source
+flag	repro nimble develop	--workspace-root
+command	repro nimble gitlink-audit
+flag	repro nimble gitlink-audit	--at
+flag	repro nimble gitlink-audit	--json
+flag	repro nimble gitlink-audit	--lock
+flag	repro nimble gitlink-audit	--platform
