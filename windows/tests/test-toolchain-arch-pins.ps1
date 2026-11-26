@@ -537,6 +537,21 @@ try {
       Assert-Throws { Copy-WindowsImportClosure @icArgs } 'libarm\.dll is a PE image for machine 0xAA64, not the x64 machine 0x8664'
     } finally { Remove-Item -LiteralPath $w, (Join-Path $icGcc "libarm.dll") -ErrorAction SilentlyContinue }
   }
+  Check "an image that ships from lib/ has its imports staged into bin/" {
+    $l = Join-Path $ic "lib"
+    New-Item -ItemType Directory -Path $l | Out-Null
+    # As librepro_project_dsl_runtime.dll does on x64: it imports libgcc_s,
+    # which nothing in bin/ imports, and it reaches the archive at packaging.
+    New-TestPeImage -Path (Join-Path $l "librepro_project_dsl_runtime.dll") -Machine $x64 -Imports @("KERNEL32.dll", "libgcc_s_seh-1.dll")
+    $lb = Join-Path $ic "libbin"
+    New-Item -ItemType Directory -Path $lb | Out-Null
+    New-TestPeImage -Path (Join-Path $lb "repro.exe") -Machine $x64 -Imports @("KERNEL32.dll")
+    try {
+      $copied = @(Copy-WindowsImportClosure -BinDir $lb -SourceDirs @($icVc, $icGcc) -Arch x64 -SystemDir $icSys -OsDlls @("KERNEL32.dll") -ExtraImageDirs @($l))
+      if ((($copied | Sort-Object) -join ",") -ne "libgcc_s_seh-1.dll,libwinpthread-1.dll") { throw "copied '$(($copied | Sort-Object) -join ",")'" }
+      if (Test-Path -LiteralPath (Join-Path $l "libgcc_s_seh-1.dll")) { throw "staged into lib/ instead of bin/" }
+    } finally { Remove-Item -LiteralPath $l, $lb -Recurse }
+  }
   Check "the first source that holds a DLL wins" {
     $both = Join-Path $ic "both"
     New-Item -ItemType Directory -Path $both | Out-Null
