@@ -47,7 +47,7 @@ import runquota_core/measurement
 import runquota_exec
 import runquota_process
 import runquota_protocol
-import ./[rustc_args, wrapper_env]
+import ./[record_mode, rustc_args, wrapper_env]
 
 const
   WrapperLogEnv* = "REPRO_RUSTC_WRAPPER_LOG"
@@ -278,6 +278,22 @@ when defined(posix):
 proc runWrapper*(args: seq[string]): int =
   ## `args` are cargo's: the rustc path and its arguments. Returns the exit
   ## code to end with; it does not return when the compiler is exec'd in place.
+  ##
+  ## In record mode (`record_mode.RecordDirEnv` set) this image is also the
+  ## build-script stub, which cargo runs under a build script's name, and a
+  ## compile unit is recorded instead of compiled. Record mode returns before
+  ## the reporting path: it never connects to RunQuota, takes no sub-lease
+  ## and starts no measurement, whatever `RUNQUOTA_MEASUREMENT` says, because
+  ## there is no compile to measure.
+  if recordModeOn():
+    if isStubImage([getAppFilename(), paramStr(0)]):
+      return runRecordStub(@[paramStr(0)] & args)
+    if args.len > 0:
+      let parsed = rustcUnitOf(args[1 .. ^1])
+      if parsed.isUnit:
+        noteOutcome(parsed.unit.crateName, "recorded")
+        return recordUnit(args, getAppFilename())
+      # A probe: it compiles nothing, and cargo needs its answer.
   if args.len == 0:
     stderr.writeLine "usage: " & WrapperClientName & " <rustc> [rustc args...]"
     return 2

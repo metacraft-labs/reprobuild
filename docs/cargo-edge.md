@@ -68,3 +68,51 @@ the resource manager's budget yet. The engine installs it into sized cargo
 actions when `REPRO_RUSTC_WRAPPER=on` and the wrapper executable sits beside
 the engine (or is named by `REPRO_RUSTC_WRAPPER_PATH`).
 `REPRO_RUSTC_WRAPPER=off` turns it off.
+
+## Record mode: cargo's plan without a compile
+
+Stable cargo has no interface that prints, before it builds, the command line,
+working directory and environment it would give each `rustc` call and each
+build-script run (`--unit-graph` is unstable and carries no command lines;
+`--build-plan` was removed). The wrapper's **record mode** learns them by
+letting cargo run its whole schedule while every step does nothing but record
+what cargo asked for. It is switched on by `REPRO_RUSTC_WRAPPER_RECORD`, set to
+the directory the recordings go into; it is independent of
+`REPRO_RUSTC_WRAPPER`, and it never takes a sub-lease or starts a
+measurement, because nothing is compiled.
+
+- **A compile unit is recorded and not run.** The wrapper writes an empty file
+  for each output the unit's `--emit` asks for, with the names `rustc` would
+  have used (under `--out-dir`, with `-C extra-filename`), and exits 0. Cargo
+  finds the files it expects and starts the dependents.
+- **Probes pass through.** `rustc -vV`, `--print …` and cargo's target-info
+  call run the real compiler: they compile nothing, and cargo needs their
+  answers (a build script's `TARGET`, `HOST` and `CARGO_CFG_*` come from them).
+- **A build script is replaced by a recording stub.** For a build script's
+  compile the wrapper writes a copy of itself as the executable. When cargo
+  runs it, it records the argv, working directory and environment cargo gave
+  the build script, prints one *sentinel* directive of each kind a build
+  script can pass to a compile (`rustc-cfg`, `rustc-check-cfg`, `rustc-env`,
+  `rustc-link-lib`, a `rustc-link-search` inside and one outside `OUT_DIR`,
+  and the `rustc-link-arg*` variants for the targets the package has), and
+  exits 0. Each sentinel's value is `__repro_slot.<kind>.<run>`, where `<run>`
+  is the directory cargo made for that build-script run, so the recordings of
+  the compiles show where cargo itself placed each kind of directive. A
+  package with `links` also prints `cargo:__repro_provider=<provider>`, and
+  cargo hands it to its immediate dependents' build scripts as
+  `DEP_<LINKS>___REPRO_PROVIDER`. The stub reads its package's targets from
+  the output of `cargo metadata --offline --format-version 1`, saved to the
+  file `REPRO_RUSTC_WRAPPER_RECORD_METADATA` names, because cargo refuses a
+  `rustc-link-arg-bin` for a binary the package does not have.
+- **Paths are recorded against logical roots.** `REPRO_RUSTC_WRAPPER_RECORD_ROOTS`
+  holds `<label>=<absolute path>` lines (the checkout, the store, the scratch
+  target directory). A path under one of them is written as `${<label>}` and
+  the rest of the path, and a literal `$` as `$$`, so a recording names no
+  physical path of the machine that made it.
+
+Each recorded process writes one JSON file (`"format": "repro-rustc-record-v1"`)
+with its `kind` (`unit` or `build-script-run`), `argv`, `cwd` and `env`; a unit
+adds the placeholders it wrote, a run the manifest it matched and the lines it
+printed. Use a scratch target directory for a record run, never the project's
+`target/`: the placeholders would enter cargo's freshness state and a later
+real build would trust them.
