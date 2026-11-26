@@ -128,6 +128,9 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
   var unset = newJArray()
   for (u, k, why) in UnsetByDesign: unset.add(%*{"unit": u, "setting": k, "why": why})
   record["unsetByDesign"] = unset
+  var pending = newJArray()
+  for (u, k, why) in UnsetPendingOwner: pending.add(%*{"unit": u, "setting": k, "why": why})
+  record["unsetPendingOwner"] = pending
   # The root units confined by ``privilegedConfinement`` set every setting
   # the table tries: a row that does not apply there is a setting the unit
   # lost (``apply-unit-without-protect-system``), not a row to skip.

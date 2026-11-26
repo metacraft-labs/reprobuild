@@ -189,7 +189,8 @@ const
   GateUnits* = ["repro-agent-apply.service", "repro-addon-reassert.service",
     "repro-addon-boot-confirm.service", "repro-addon-secrets.service",
     "repro-addon-store-verify.service", "repro-addon-boot-hold.service",
-    "repro-agent-fetch.service", "repro-addon-evidence.service"]
+    "repro-agent-fetch.service", "repro-addon-evidence.service",
+    "repro-addon-egress.service", "repro-addon-egress-check.service"]
     ## The units ``t_e2e_addon_confinement_settings_each_hold`` runs, one
     ## list for the gate and the unit tests that check its table against
     ## the rendered units (A9 review round 22).
@@ -197,6 +198,10 @@ const
     "repro-addon-boot-confirm.service", "repro-addon-secrets.service",
     "repro-addon-store-verify.service"]
     ## The units ``generation0.privilegedConfinement`` confines.
+
+const EgressFinding = "the egress units carry no MemoryDenyWriteExecute=, " &
+  "SystemCallFilter= or SystemCallErrorNumber= and state no reason for it: " &
+  "a finding for the units' owner, who sets the key or states why not"
 
 const UnsetByDesign* = [
   ("repro-addon-boot-hold.service", "PrivateTmp",
@@ -207,11 +212,40 @@ const UnsetByDesign* = [
     "IPAddressDeny= with its allow-list and RestrictAddressFamilies= bound it"),
   ("repro-addon-evidence.service", "PrivateNetwork",
     "it ships records to the Evidence sink over the network; IPAddressDeny= " &
-    "with the sink's address alone and RestrictAddressFamilies= bound it")]
+    "with the sink's address alone and RestrictAddressFamilies= bound it"),
+  # A11's egress observer (G55 scope, decided 2026-11-25 by the operator,
+  # Zahary Karadjov: "Include it").
+  ("repro-addon-egress.service", "PrivateNetwork",
+    "it loads the observer's nftables table into the host's network " &
+    "namespace, which every egress packet passes; in a private namespace " &
+    "it would load a table no packet of the host reaches. " &
+    "RestrictAddressFamilies=AF_NETLINK and IPAddressDeny=any bound it"),
+  ("repro-addon-egress-check.service", "PrivateNetwork",
+    "it reads the observer table's counters in the host's network " &
+    "namespace; a private one has no such table. " &
+    "RestrictAddressFamilies=AF_NETLINK and IPAddressDeny=any bound it"),
+  ("repro-addon-egress.service", "ProtectProc",
+    "it runs as root, which =invisible does not affect (systemd.exec(5)): " &
+    "the setting would hold nothing here"),
+  ("repro-addon-egress-check.service", "ProtectProc",
+    "it runs as root, which =invisible does not affect (systemd.exec(5)): " &
+    "the setting would hold nothing here")]
   ## The settings a unit the gate runs does not set, each with its reason
   ## (A9 review round 21, M1). Every other key the table tries is expected
   ## in every unit: a unit that does not set one fails the gate, whatever
-  ## the unit (``missingSettings``).
+  ## the unit (``missingSettings``), but those ``UnsetPendingOwner`` names.
+
+const UnsetPendingOwner* = [
+  ("repro-addon-egress.service", "MemoryDenyWriteExecute", EgressFinding),
+  ("repro-addon-egress.service", "SystemCallFilter", EgressFinding),
+  ("repro-addon-egress.service", "SystemCallErrorNumber", EgressFinding),
+  ("repro-addon-egress-check.service", "MemoryDenyWriteExecute", EgressFinding),
+  ("repro-addon-egress-check.service", "SystemCallFilter", EgressFinding),
+  ("repro-addon-egress-check.service", "SystemCallErrorNumber", EgressFinding)]
+  ## Settings a unit does not set and gives no reason for: findings filed
+  ## with the unit's owner, recorded by the gate in a list of their own
+  ## (``unsetPendingOwner``) so they are visible and not silently excused.
+  ## Each entry goes when the owner sets the key or states why not.
 
 proc expectedSettings*(unit: string): seq[string] =
   ## Every key ``ProbeRows`` tries, but those ``UnsetByDesign`` gives
@@ -219,6 +253,8 @@ proc expectedSettings*(unit: string): seq[string] =
   for row in ProbeRows:
     var excused = false
     for (u, k, _) in UnsetByDesign:
+      if u == unit and k == row.setting: excused = true
+    for (u, k, _) in UnsetPendingOwner:
       if u == unit and k == row.setting: excused = true
     if not excused and row.setting notin result: result.add(row.setting)
 
