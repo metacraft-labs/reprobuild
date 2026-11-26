@@ -1,5 +1,51 @@
+## repro-cmake-dyndep-fragment: turns CMake's module scanner output into a
+## ``repro-dynamic-graph-v1`` fragment.
+##
+## The Reprobuild CMake generator's dyndep wrapper runs it, after
+## ``cmake -E cmake_ninja_dyndep``, as
+##
+##   repro-cmake-dyndep-fragment --out <fragment> --map <map> <ddi>...
+##
+## ``<map>`` holds one ``<primary-output>\t<action-id>`` line per compile
+## action; each ``<ddi>`` is one scanner output (P1689 JSON, version 0 or
+## 1). The fragment names, for each compile, the module files it writes
+## (``output``) and the compiles of the modules it imports (``dep``).
+##
+## The command line is the ``cli:`` section of this executable in
+## reprobuild's root ``repro.nim``. The program imports that file with no
+## mode define, so it compiles in the project DSL's thin mode, which keeps
+## only the ``cli:`` sections and none of the engine. It instantiates the
+## section with nim-entrypoints' ``cliProgramWithEntryPoint`` and registers
+## the self-description entries (``describeProgram``), so
+## ``--entrypoint=list`` names them and a package build writes its shell
+## completion files from the description. Reprobuild's ``config.nims``
+## defines ``reproEvalMode`` for every compile in the tree; the
+## ``repro_cmake_dyndep_fragment.nims`` beside this file removes it for this
+## program's compiles, and the ``static`` check below refuses a compile in
+## any other mode before ``repro.nim`` is imported.
+##
+## Exit codes: 0 when the fragment is written; 1 when an input is missing or
+## malformed (the message on stderr names it); clispec's usage code (2) for
+## a command line it rejects, with clispec's error block on stderr; 0 for
+## ``--help``, printed on stdout. A successful run prints nothing.
+
 import std/[json, os, strutils, tables]
+import repro_project_dsl/mode
+
+static:
+  doAssert reproDslMode == rdmThin,
+    "repro-cmake-dyndep-fragment must import reprobuild's repro.nim in the " &
+    "DSL's thin mode, but this compile is in " & $reproDslMode & ": remove " &
+    "the mode define (reprobuild's config.nims defines reproEvalMode; " &
+    "repro_cmake_dyndep_fragment.nims undefines it)"
+
+import clispec, entrypoints, entrypoints/[clispec, describe]
+import ../../repro
 from repro_core/paths import extendedPath
+
+reproCmakeDyndepFragmentCliDescription(cliProgramWithEntryPoint, DyndepArgs)
+
+describeProgram(DyndepArgs)
 
 type
   ScanInfo = object
@@ -20,8 +66,29 @@ proc fail(message: string) {.noreturn.} =
   stderr.writeLine("repro-cmake-dyndep-fragment: " & message)
   quit 1
 
-proc usage() {.noreturn.} =
-  fail("usage: repro-cmake-dyndep-fragment --out <fragment> --map <map> <ddi>...")
+proc parseCommandLine(): DyndepArgs =
+  ## The process's command line, parsed from the description. Help is
+  ## printed on stdout and ends the process with 0; a usage error is printed
+  ## as clispec's error block and ends it with the error's code.
+  try:
+    result = DyndepArgs.load()
+    # `required` makes clispec insist on a value, not on a non-empty one;
+    # an empty path is a usage error too, as it always was.
+    for (spelling, value) in [("--out", result.out), ("--map", result.map)]:
+      if value.len == 0:
+        let e = newCliUsageError(cekInvalidValue,
+          "repro-cmake-dyndep-fragment", @[], -1, spelling, value,
+          "a non-empty path")
+        # The usage line and the help hint of the root command (index 0),
+        # as the parser adds them to the errors it raises.
+        cliAddErrorContext(e, DyndepArgs.cliGrammar, 0)
+        raise e
+  except CliHelpRequest as e:
+    DyndepArgs.printHelp(e)
+    quit 0
+  except CliUsageError as e:
+    DyndepArgs.printError(e)
+    quit e.exitCode
 
 proc parseMap(path: string): Table[string, string] =
   if path.len == 0 or not fileExists(extendedPath(path)):
@@ -98,32 +165,10 @@ proc parseDdi(path: string; actionForOutput: Table[string, string]): ScanInfo =
       fail(path & ": requires item must be an object")
     result.requires.add(stringField(item, "logical-name", path))
 
-proc main() =
-  var outPath = ""
-  var mapPath = ""
-  var ddiPaths: seq[string] = @[]
-  var i = 1
-  while i <= paramCount():
-    let arg = paramStr(i)
-    case arg
-    of "--out":
-      inc i
-      if i > paramCount():
-        usage()
-      outPath = paramStr(i)
-    of "--map":
-      inc i
-      if i > paramCount():
-        usage()
-      mapPath = paramStr(i)
-    else:
-      if arg.startsWith("--"):
-        usage()
-      ddiPaths.add(arg)
-    inc i
-  if outPath.len == 0 or mapPath.len == 0 or ddiPaths.len == 0:
-    usage()
-
+proc writeFragment(outPath, mapPath: string; ddiPaths: openArray[string]) =
+  ## Reads the action map and the scanner outputs and writes the fragment
+  ## to ``outPath``; ends the process with 1, naming the input, on the first
+  ## one that is missing or malformed.
   let actionForOutput = parseMap(mapPath)
   var scans: seq[ScanInfo] = @[]
   var providerForModule = initTable[string, string]()
@@ -155,4 +200,6 @@ proc main() =
   createDir(extendedPath(parentDir(outPath)))
   writeFile(extendedPath(outPath), text)
 
-main()
+main:
+  let args = parseCommandLine()
+  writeFragment(args.out, args.map, args.ddi)

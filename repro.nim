@@ -640,8 +640,22 @@ package reprobuild:
   executable reproPeerCacheMintCert:
     name: "repro-peer-cache-mint-cert"
 
+  # The program parses this command line itself: it imports this file (the
+  # DSL's thin mode keeps only this section) and instantiates
+  # `reproCmakeDyndepFragmentCliDescription` with nim-entrypoints'
+  # `cliProgramWithEntryPoint` (see the program's header). The argv the
+  # Reprobuild CMake generator's dyndep wrapper writes is `--out <fragment>
+  # --map <map> <ddi>...`.
   executable reproCmakeDyndepFragment:
     name: "repro-cmake-dyndep-fragment"
+    cli:
+      help "Writes the dynamic graph fragment of CMake's module scanner output"
+      flag out is string, required = true, valueName = "fragment",
+        help = "The repro-dynamic-graph-v1 fragment to write"
+      flag map is string, required = true, valueName = "map",
+        help = "The action map: one '<primary-output>\\t<action-id>' per line"
+      pos ddi is seq[string], repeated = true, valueName = "ddi",
+        help = "The scanner outputs (.ddi) to convert"
 
   executable reproTestsFragment:
     name: "repro-tests-fragment"

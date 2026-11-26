@@ -1376,18 +1376,16 @@ static int repro_hcr_lx_code_page_is_dual(uint64_t exec_base) {
  * returns immediately, so at most one mutation of the map happens while it is
  * being read.
  *
- * WHEN THIS RUNS, because the answer constrains what it may do. Unlike sled
- * discovery — which opens and maps the target's own ELF file and therefore runs
- * BEFORE `quiesce_begin` — this is reached from inside the publication path,
- * i.e. with every other thread parked under tier 2. So: no `malloc`, no
- * `dl_iterate_phdr` (which takes the loader lock a parked thread may hold), a
- * static buffer, and `openat`/`read`/`close` issued as RAW syscalls rather than
- * through libc. Since HLX-M9 the CODE-page path is raw too — `memfd_create`,
- * `ftruncate`, both `mmap`s, `munmap`, `fcntl` and `close` — so the only libc
- * call left on this path is the `mmap` inside `repro_hcr_lx_map_anonymous`,
- * which now serves the anonymous FALLBACK and the near-DATA page rather than
- * the body page. It is also only reached when the outward probe has already
- * failed, so the common case pays nothing for it.
+ * WHEN THIS RUNS, because the answer constrains what it may do. It runs in
+ * the transaction prepare, which since 2026-11-18 completes BEFORE
+ * `quiesce_begin` (design §6.2 "Deadlock hazards", §11.2), so every thread is
+ * running. It used to be reached with every other thread parked under tier 2,
+ * which is why it keeps its conservative shape: no `malloc`, no
+ * `dl_iterate_phdr`, a static buffer, and `openat`/`read`/`close` issued as RAW
+ * syscalls. Since HLX-M9 the CODE-page path is raw too — `memfd_create`,
+ * `ftruncate`, both `mmap`s, `munmap`, `fcntl` and `close`. The anonymous
+ * FALLBACK and the near-DATA page go through `repro_hcr_lx_map_anonymous`,
+ * which is libc outside the window and a raw system call inside it.
  */
 #define REPRO_HCR_LX_GAP_CHUNK 8192u
 
@@ -2133,6 +2131,10 @@ typedef struct repro_hcr_lx_transaction {
   int unregister_attempts;
   int refusal;
   int failed_site;   /* index of the site that refused, -1 when none */
+  /* A commit failed under tier 2, its published sites were restored with the
+   * threads still parked, and the rest of the rollback (unregistration, claim
+   * release, unmapping) is owed once the caller has released them (§11.2). */
+  int cleanup_pending;
   repro_hcr_lx_prepared_site sites[REPRO_HCR_LX_MAX_TXN_SITES];
 } repro_hcr_lx_transaction;
 
@@ -2180,6 +2182,17 @@ static int (*repro_hcr_lx_unregister_eh_frame_hook)(uint64_t) = NULL;
  */
 static int repro_hcr_lx_fail_patch_page_alloc = 0;
 static int repro_hcr_lx_commit_fault_site = -1;
+
+/*
+ * Design §6.2 "Deadlock hazards" and §11.2: the transaction prepare runs with
+ * every thread RUNNING and ends by acquiring quiescence, because it claims the
+ * window (§10.1) and allocates, and a thread parked holding the claim map's
+ * lock or the allocator's would deadlock it. So prepare cannot ask "is
+ * quiescence held?" for the SYNC_CORE substitution below; the caller that will
+ * take quiescence once prepare returns says so here, and commit re-checks the
+ * real thing before it writes a byte.
+ */
+static int repro_hcr_lx_quiesce_planned = 0;
 static int repro_hcr_lx_restore_fault_site = -1;
 
 static repro_hcr_lx_transaction repro_hcr_lx_last_txn;
@@ -2601,7 +2614,8 @@ static int repro_hcr_lx_txn_prepare(repro_hcr_lx_transaction *txn) {
    * Checked HERE, in prepare, before the claim and before any mapping, so the
    * refusal costs nothing and cannot leave state behind.
    */
-  if (!repro_hcr_lx_sync_core_available() && !repro_hcr_lx_quiesce_is_held()) {
+  if (!repro_hcr_lx_sync_core_available() && !repro_hcr_lx_quiesce_is_held() &&
+      !repro_hcr_lx_quiesce_planned) {
     memset(&repro_hcr_lx_last_report, 0, sizeof(repro_hcr_lx_last_report));
     txn->refusal = REPRO_HCR_LX_REFUSED_SYNC_CORE_UNAVAILABLE;
     repro_hcr_lx_last_report.refusal = txn->refusal;
@@ -3126,12 +3140,14 @@ static int repro_hcr_lx_txn_restore_site(repro_hcr_lx_transaction *txn,
  * N with its claim held. Published bodies and every island are RETAINED — see
  * the header comment.
  */
-static int repro_hcr_lx_txn_rollback(repro_hcr_lx_transaction *txn) {
+/*
+ * The half of a rollback that touches target text: re-publish the saved word
+ * of every published site, in reverse. Raw system calls only (§5.1), so under
+ * tier 2 it is the one rollback step that runs with the threads parked.
+ */
+static int repro_hcr_lx_txn_restore_published(repro_hcr_lx_transaction *txn) {
   int i;
   int rc = REPRO_HCR_LX_OK;
-  if (txn == NULL) {
-    return REPRO_HCR_LX_REFUSED_INVALID_ARGUMENT;
-  }
   for (i = txn->site_count - 1; i >= 0; --i) {
     repro_hcr_lx_prepared_site *ps = &txn->sites[i];
     /* A site an earlier rollback of this transaction already restored holds
@@ -3144,6 +3160,20 @@ static int repro_hcr_lx_txn_rollback(repro_hcr_lx_transaction *txn) {
       rc = REPRO_HCR_LX_REFUSED_TEXT_PROTECTION_FAILED;
     }
   }
+  return rc;
+}
+
+/*
+ * The other half: unregister JIT symfiles and `.eh_frame` sections (the
+ * unwinder's global lock), release claims (the claim map, which may take a
+ * recorder lock), and unmap unpublished bodies. Design §11.2 runs this only
+ * after the threads are released (§6.2 step 7): a thread parked holding any of
+ * those locks would deadlock it. It never writes target text, so a site whose
+ * restore failed keeps its published word, its slot and its claim.
+ */
+static void repro_hcr_lx_txn_release_rolled_back(
+    repro_hcr_lx_transaction *txn) {
+  int i;
   for (i = txn->site_count - 1; i >= 0; --i) {
     repro_hcr_lx_prepared_site *ps = &txn->sites[i];
     if (ps->jit_entry_address != 0) {
@@ -3236,8 +3266,18 @@ static int repro_hcr_lx_txn_rollback(repro_hcr_lx_transaction *txn) {
     }
   }
   txn->rolled_back = 1;
+  txn->cleanup_pending = 0;
   repro_hcr_lx_last_report.rolled_back = 1;
   repro_hcr_lx_last_report.restored_sites = txn->restored_count;
+}
+
+static int repro_hcr_lx_txn_rollback(repro_hcr_lx_transaction *txn) {
+  int rc;
+  if (txn == NULL) {
+    return REPRO_HCR_LX_REFUSED_INVALID_ARGUMENT;
+  }
+  rc = repro_hcr_lx_txn_restore_published(txn);
+  repro_hcr_lx_txn_release_rolled_back(txn);
   return rc;
 }
 
@@ -3246,10 +3286,32 @@ static int repro_hcr_lx_txn_rollback(repro_hcr_lx_transaction *txn) {
  * from its saved word. A failure at site k restores sites 0..k-1 in reverse
  * and leaves the target running the code it was running before.
  */
-static int repro_hcr_lx_txn_commit(repro_hcr_lx_transaction *txn) {
+/*
+ * `defer_cleanup` is set by a caller that holds tier-2 quiescence. On a
+ * failure the commit then restores the published sites and stops: the caller
+ * releases the threads and calls `repro_hcr_lx_txn_rollback`, which skips the
+ * sites already restored and does the rest (§11.2). With `defer_cleanup` 0 the
+ * whole rollback runs here, as it always has for tier 1 and for the gates.
+ */
+static int repro_hcr_lx_txn_commit_ex(repro_hcr_lx_transaction *txn,
+                                      int defer_cleanup) {
   int i;
   if (txn == NULL || !txn->prepare_complete) {
     return REPRO_HCR_LX_REFUSED_INVALID_ARGUMENT;
+  }
+  /* Prepare accepted a missing SYNC_CORE on the promise of quiescence
+   * (`repro_hcr_lx_quiesce_planned`). Hold the caller to it before the first
+   * write; nothing is published yet, so this refusal changes no text. */
+  if (!repro_hcr_lx_sync_core_available() && !repro_hcr_lx_quiesce_is_held()) {
+    txn->refusal = REPRO_HCR_LX_REFUSED_SYNC_CORE_UNAVAILABLE;
+    txn->failed_site = 0;
+    txn->cleanup_pending = defer_cleanup;
+    if (!defer_cleanup) {
+      (void)repro_hcr_lx_txn_rollback(txn);
+    }
+    repro_hcr_lx_last_report.refusal = txn->refusal;
+    repro_hcr_lx_last_report.commit_complete = 0;
+    return txn->refusal;
   }
   for (i = 0; i < txn->site_count; ++i) {
     int fault_now = (repro_hcr_lx_commit_fault_site == i);
@@ -3276,7 +3338,12 @@ static int repro_hcr_lx_txn_commit(repro_hcr_lx_transaction *txn) {
       repro_hcr_lx_last_report.commit_complete = 0;
       return rc;
 #endif
-      (void)repro_hcr_lx_txn_rollback(txn);
+      if (defer_cleanup) {
+        (void)repro_hcr_lx_txn_restore_published(txn);
+        txn->cleanup_pending = 1;
+      } else {
+        (void)repro_hcr_lx_txn_rollback(txn);
+      }
       repro_hcr_lx_last_report.refusal = rc;
       repro_hcr_lx_last_report.commit_complete = 0;
       repro_hcr_lx_last_report.published_sites = 0;
@@ -3288,6 +3355,10 @@ static int repro_hcr_lx_txn_commit(repro_hcr_lx_transaction *txn) {
   repro_hcr_lx_last_report.published_sites = txn->published_count;
   repro_hcr_lx_last_report.prepare_complete = 1;
   return REPRO_HCR_LX_OK;
+}
+
+REPRO_HCR_LX_MAYBE_UNUSED static int repro_hcr_lx_txn_commit(repro_hcr_lx_transaction *txn) {
+  return repro_hcr_lx_txn_commit_ex(txn, 0);
 }
 
 /*
@@ -3349,12 +3420,38 @@ static int repro_hcr_lx_prepare_direct_patch_at(uint64_t entry_address,
 
 /* Phase G.  Returns the live patch-body address, or NULL with
  * `repro_hcr_lx_last_report` carrying a named refusal. */
-static void *repro_hcr_lx_commit_direct_patch(void) {
+static void *repro_hcr_lx_commit_direct_patch_ex(int defer_cleanup) {
   repro_hcr_lx_transaction *txn = &repro_hcr_lx_last_txn;
-  if (repro_hcr_lx_txn_commit(txn) != REPRO_HCR_LX_OK) {
+  if (repro_hcr_lx_txn_commit_ex(txn, defer_cleanup) != REPRO_HCR_LX_OK) {
     return NULL;
   }
   return (void *)(uintptr_t)txn->sites[0].dispatch_address;
+}
+
+static void *repro_hcr_lx_commit_direct_patch(void) {
+  return repro_hcr_lx_commit_direct_patch_ex(0);
+}
+
+/*
+ * The tier-2 caller's half of §11.2, called AFTER `repro_hcr_lx_quiesce_
+ * release`: finish a rollback whose text half `repro_hcr_lx_commit_direct_
+ * patch_ex(1)` already did, or discard a transaction that prepared and then
+ * could not acquire quiescence. A no-op when nothing is owed — in particular
+ * after a successful commit, and under the HLX-M3 no-rollback falsifier, whose
+ * commit returns before it marks anything pending.
+ */
+REPRO_HCR_LX_MAYBE_UNUSED static void repro_hcr_lx_finish_direct_patch_cleanup(void) {
+  repro_hcr_lx_transaction *txn = &repro_hcr_lx_last_txn;
+  if (txn->cleanup_pending) {
+    repro_hcr_lx_txn_release_rolled_back(txn);
+  }
+}
+
+REPRO_HCR_LX_MAYBE_UNUSED static void repro_hcr_lx_discard_direct_patch(void) {
+  repro_hcr_lx_transaction *txn = &repro_hcr_lx_last_txn;
+  if (txn->prepare_complete && !txn->commit_complete && !txn->rolled_back) {
+    (void)repro_hcr_lx_txn_rollback(txn);
+  }
 }
 
 REPRO_HCR_LX_MAYBE_UNUSED static void *repro_hcr_lx_apply_direct_patch_at(
