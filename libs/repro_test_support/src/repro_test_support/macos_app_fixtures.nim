@@ -71,6 +71,16 @@ proc removeFixtureTree*(path: string) =
     discard runArgv("/bin/chmod", ["-R", "u+w", path])
     removeDir(path)
 
+proc makeFixtureSleeper*(dest: string) =
+  ## A program that runs until it is killed, at ``dest``: a copy of
+  ## ``/bin/sleep`` signed ad hoc. The copy of a system binary is killed by
+  ## the kernel at exec (its platform signature does not hold at another
+  ## path), so it is signed again; started as ``dest 120`` it then stays up,
+  ## and ``processesRunningFrom`` finds it by its own path.
+  copyFile("/bin/sleep", dest)
+  setFilePermissions(dest, {fpUserRead, fpUserWrite, fpUserExec})
+  runChecked("/usr/bin/codesign", ["--force", "-s", "-", dest])
+
 proc makeFixtureApp*(dir, name, bundleId, version: string;
                      teamId = FixtureTeamId; sign = true;
                      declareExecutable = true;

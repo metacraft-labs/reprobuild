@@ -611,13 +611,21 @@ when defined(macosx):
       # launched from its prefix does. The staged-copy check is the second look.
       discard execCmdEx("/bin/chmod -R u+w " & quoteShell(storeBundle))
       let sleeper = storeBundle / "Contents" / "MacOS" / "sleeper"
-      copyFile("/bin/sleep", sleeper)
-      setFilePermissions(sleeper, {fpUserRead, fpUserWrite, fpUserExec})
+      makeFixtureSleeper(sleeper)
       let running = startProcess(sleeper, args = @["300"])
       defer:
         running.terminate()
         discard running.waitForExit()
         running.close()
+      # Positive control: the program is visible to the libproc scan before
+      # the apply runs (a freshly started program is not, for a moment).
+      var visible = false
+      for _ in 0 ..< 100:
+        if processesRunningFrom(storeBundle).len > 0:
+          visible = true
+          break
+        sleep(100)
+      check visible
       withApplyEnv(second):
         writeProfile(second, ["gm4cbase", "gm4capp"])
         var opts = applyOptions(second, 2000)
