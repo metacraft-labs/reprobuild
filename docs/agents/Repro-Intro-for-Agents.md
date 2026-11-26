@@ -66,6 +66,13 @@ Practical consequences when you are working in this repo:
   stderr not a terminal, no `--daemon`/`REPRO_DAEMON`, none of
   `ClientHandledFlags`. Anything else hands over and pays ~1–3 ms extra. An
   interactive `repro build` always hands over.
+- A routed build runs under **the caller's** resource limits. On Linux the
+  daemon's worker for the request moves itself into the requesting process's
+  cgroup before it starts any action, so a `systemd-run --user --scope -p
+  MemoryMax=…` around `repro build` caps the build's actions, not just the
+  client. If the worker cannot join that cgroup and the limits differ, the
+  daemon declines the request and the build runs in the caller's process
+  (`libs/repro_daemon_core/src/repro_daemon_core/caller_cgroup.nim`).
 - `libs/repro_core/src/repro_core/cli_images.nim` holds the three names and
   the rationale for them.
 
