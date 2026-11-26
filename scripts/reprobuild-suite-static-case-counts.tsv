@@ -906,7 +906,7 @@ libs/repro_nimble_generator/tests/test_npc_m15_full_history_check_sees_release_b
 libs/repro_nimble_generator/tests/test_npc_m4_ambiguous_commit_abbreviation_refused.nim	nim	1
 libs/repro_nimble_generator/tests/test_npc_m4_cooldown_withholds_new_version.nim	nim	1
 libs/repro_nimble_generator/tests/test_npc_m4_gitlink_urls_obey_origin_policy.nim	nim	1
-libs/repro_nimble_generator/tests/test_npc_m4_origin_fetch_egress_policy.nim	nim	3
+libs/repro_nimble_generator/tests/test_npc_m4_origin_fetch_egress_policy.nim	nim	4
 libs/repro_nimble_generator/tests/test_npc_m4_probe_off_by_default.nim	nim	1
 libs/repro_nimble_generator/tests/test_npc_m4_symlink_out_of_tree_never_followed.nim	nim	1
 libs/repro_nimble_generator/tests/test_npc_m4_warm_run_rereads_only_changed.nim	nim	1

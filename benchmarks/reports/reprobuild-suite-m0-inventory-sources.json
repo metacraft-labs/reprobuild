@@ -26354,7 +26354,7 @@
       "requiresReproBinary": true,
       "source": "libs/repro_nimble_generator/tests/test_npc_m4_origin_fetch_egress_policy.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 3,
+      "staticCaseCount": 4,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
