@@ -20,12 +20,24 @@
 ## NO MOCKS: real cargo, real rustc, the real shim binary; the terminal cases
 ## use a real pseudo-terminal (python's `pty`).
 ##
-## Falsifying mutation of `test_rqe_cg2_shim_leaves_run_and_foreign_verbs_alone`
-## (applied once to shim.nim, observed to fail, reverted): add `run` to the
-## compiling verbs. The program's standard output is then a pipe and the pty
-## case reads `tty=false`.
+## Falsifying mutations (each applied once to shim.nim, observed to fail,
+## reverted; the observed failure text is in the commit message):
+##   leaves_run_and_foreign_verbs_alone  add `run` to the compiling verbs: the
+##                                       program's standard output is then a
+##                                       pipe and the pty case reads `tty=false`
+##   byte_identical                      inject plain `json` instead of
+##                                       `json-render-diagnostics`: the
+##                                       diagnostics leave standard error
+##   byte_identical (--no-run)           drop the `--no-run` rule: the
+##                                       `Executable ...` lines are missing
+##   forwards_a_signal                   forwardSignal does nothing: the shim
+##                                       outlives the SIGTERM sent to it
+##   one_file_for_both_streams           stop recognising `2>&1`: a test run
+##                                       into one file is recorded, not passed
+##                                       through
 
-import std/[os, strutils, unittest]
+import std/[os, osproc, strutils, unittest]
+from std/posix import Pid, SIGKILL, kill
 
 import repro_test_support
 import rqe_cg2_shim_fixture
@@ -69,6 +81,10 @@ suite "the cargo shim changes nothing the caller can see":
       "--test-threads=1"), "test --nocapture")
     check nocapture.stdout.contains("stdout from the test")
     check nocapture.stderr.contains("stderr from the test")
+    # `--no-run` makes cargo name the test executables on standard error, which
+    # it does not do in a JSON message format: the shim leaves that to cargo.
+    let noRun = rig.identical(arguments("test", "--no-run"), "test --no-run")
+    check noRun.stderr.contains("Executable")
     # The caller's own JSON format, in each spelling: forwarded unchanged.
     let json = rig.identical(arguments("build", "--message-format=json"),
       "build --message-format=json")
@@ -176,3 +192,113 @@ suite "the cargo shim changes nothing the caller can see":
       rig.project, timeoutMs = 1_500_000)
     check nested.code == 0
     check liveSetFiles(rig.target).len == 1
+
+  test "test_rqe_cg2_shim_is_byte_identical_on_a_terminal":
+    ## with a terminal on both streams (colour on, as a person sees it) a
+    ## recorded build or check prints what bare cargo prints
+    ## CARGO_TERM_PROGRESS_WHEN=never: the progress bar is redrawn on a timer,
+    ## so two bare runs differ from each other; nothing else is normalised
+    ## but the elapsed time.
+    let rig = newShimRig("terminal")
+    defer: rig.cleanup()
+    let env = [("CARGO_TERM_PROGRESS_WHEN", "never")]
+    for verb in ["build", "check"]:
+      let args = @[verb, "--offline", "--jobs", "1"]
+      rig.freshTarget()
+      let bare = rig.runUnderPty(rig.realCargo, args, env)
+      rig.freshTarget()
+      let shimmed = rig.runUnderPty(rig.shim, args, env)
+      checkpoint verb & " bare:\n" & bare.output & "\nshim:\n" & shimmed.output
+      check bare.code == 0
+      check shimmed.code == bare.code
+      check "\27[" in bare.output # colour was on: the terminal was seen
+      check normalizeTimings(shimmed.output) == normalizeTimings(bare.output)
+      check liveSetFiles(rig.target).len == 1 # recorded on a terminal too
+
+  test "test_rqe_cg2_shim_test_into_one_file_is_passed_through":
+    ## `cargo test ... 2>&1` (one file for both streams) prints what bare cargo
+    ## prints, including the order of the two streams, because the shim does not
+    ## stand between the test binary and the file
+    let rig = newShimRig("merged")
+    defer: rig.cleanup()
+    # `runShell` gives the child ONE pipe for both streams, as `2>&1` does.
+    let testArgs = arguments("test", "--", "--nocapture", "--test-threads=1")
+    rig.freshTarget()
+    let bare = runShell(shellCommand(@[rig.realCargo] & testArgs, rig.cargoEnv),
+      rig.project, timeoutMs = 1_500_000)
+    rig.freshTarget()
+    let shimmed = runShell(shellCommand(@[rig.shim] & testArgs, rig.cargoEnv),
+      rig.project, timeoutMs = 1_500_000)
+    check bare.code == 0
+    check shimmed.code == 0
+    check "stdout from the test" in bare.output
+    check "stderr from the test" in bare.output
+    check normalizeTimings(shimmed.output) == normalizeTimings(bare.output)
+    check liveSetFiles(rig.target).len == 0
+    # The control: a build into one file IS recorded (nothing of its own
+    # reaches standard output, so there is no order to disturb).
+    rig.freshTarget()
+    let build = runShell(shellCommand(@[rig.shim] & arguments("build"),
+      rig.cargoEnv), rig.project, timeoutMs = 1_500_000)
+    check build.code == 0
+    check liveSetFiles(rig.target).len == 1
+
+  test "test_rqe_cg2_shim_forwards_a_signal_and_leaves_no_orphan":
+    ## SIGTERM sent to the shim ends it with the status bare cargo has under
+    ## the same signal (128+15), and the cargo it started is gone
+    let rig = newShimRig("signal")
+    defer: rig.cleanup()
+    let marker = rig.root / "build-script-running"
+    # A build script that says who it is and who started it (cargo), then
+    # waits for as long as the case needs to signal.
+    writeFile(rig.project / "build.rs",
+      "fn main() {\n" &
+      "    let ppid = std::os::unix::process::parent_id();\n" &
+      "    std::fs::write(std::env::var(\"CG2_MARKER\").unwrap(), " &
+      "format!(\"{} {}\", ppid, std::process::id())).unwrap();\n" &
+      "    std::thread::sleep(std::time::Duration::from_secs(600));\n}\n")
+    putEnv("CG2_MARKER", marker)
+    defer:
+      for name in ["CG2_MARKER", "CARGO_HOME", "CARGO_TARGET_DIR",
+                   "REPRO_CARGO_REAL"]:
+        delEnv(name)
+    proc alive(pid: int): bool = kill(Pid(pid), 0) == 0
+    proc signalled(viaShim: bool): tuple[code: int; cargoPid, scriptPid,
+                                         shimPid: int; exited: bool] =
+      rig.freshTarget()
+      removeFile(marker)
+      for (n, v) in rig.cargoEnv: putEnv(n, v)
+      let p = startProcess(if viaShim: rig.shim else: rig.realCargo,
+        workingDir = rig.project, args = arguments("build"), options = {})
+      result.shimPid = p.processID
+      var waited = 0
+      while not fileExists(marker) or readFile(marker).split(' ').len < 2:
+        sleep 500
+        waited += 500
+        if waited > 1_200_000 or not p.running: break
+      doAssert fileExists(marker), "the build script never started"
+      let ids = readFile(marker).split(' ')
+      result.cargoPid = parseInt(ids[0])
+      result.scriptPid = parseInt(ids[1])
+      p.terminate() # SIGTERM to what the caller started
+      for i in 0 ..< 120:
+        if not p.running: break
+        sleep 500
+      result.exited = not p.running
+      result.code = if result.exited: p.peekExitCode else: -1
+      for i in 0 ..< 40: # the cargo the shim started must be going too
+        if not alive(result.cargoPid) or result.cargoPid == result.shimPid: break
+        sleep 250
+      if not result.exited: discard kill(Pid(result.shimPid), SIGKILL)
+      p.close()
+    let bare = signalled(false)
+    discard kill(Pid(bare.scriptPid), SIGKILL) # the orphaned build script
+    let shimmed = signalled(true)
+    discard kill(Pid(shimmed.scriptPid), SIGKILL)
+    discard kill(Pid(shimmed.cargoPid), SIGKILL) # only matters if the case failed
+    check bare.exited
+    check bare.code == 128 + 15
+    check shimmed.exited
+    check shimmed.code == bare.code
+    check shimmed.cargoPid != shimmed.shimPid # a cargo of its own was started
+    check not alive(shimmed.cargoPid)

@@ -146,10 +146,12 @@ proc normalizeTimings*(text: string): string =
   ## `finished in 0.00s`). Nothing else is rewritten.
   var lines: seq[string]
   for line in text.split('\n'):
-    if ("Finished `" in line or "test result:" in line) and " in " in line:
+    # `Finished` is matched without its backtick: on a terminal cargo colours
+    # the word, and the escape code sits between it and the profile name.
+    if ("Finished" in line or "test result:" in line) and " in " in line:
       let at = line.rfind(" in ")
       let tail = line[at + 4 .. ^1]
-      if tail.len > 0 and tail.allIt(it in {'0'..'9', '.', 's', 'm', ' '}):
+      if tail.len > 0 and tail.allIt(it in {'0'..'9', '.', 's', 'm', ' ', '\r'}):
         lines.add line[0 ..< at] & " in <time>"
         continue
     lines.add line
