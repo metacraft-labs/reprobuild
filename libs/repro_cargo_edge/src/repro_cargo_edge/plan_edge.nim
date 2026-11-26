@@ -28,8 +28,23 @@
 ## - **Network.** Denied (the default for a process edge, which no argument
 ##   here changes): it downloads nothing.
 ##
-## Relative paths in the argv and the outputs keep the physical path of the
-## checkout out of the edge's command line.
+## - **Relocatable.** The edge computes the same plan wherever the workspace
+##   lies, given the same content at the same workspace-relative places (the
+##   plan names the workspace only as `${project}`). So it is declared
+##   relocatable, with the workspace root as its working directory: its key
+##   holds the depth of the working directory instead of its spelling, its
+##   argv and recorded inputs are named relative to the workspace, and two
+##   checkouts of one workspace share its record. The tools and stores it
+##   reaches by absolute path (the wrapper's, cargo's and rustc's
+##   directories, the store root, the fetched prefixes and the Nix store
+##   where it exists) are its relocation anchors, named by absolute path.
+##   Relative paths in the argv and outputs keep the checkout's path off the
+##   command line.
+## - **Cargo arguments** are the build's selection only
+##   (`plan_run.validateCargoArgs`); anything else is refused when the edge
+##   is declared.
+
+import std/os
 
 import repro_build_engine
 import repro_core/dependency_gathering
@@ -84,8 +99,18 @@ proc cargoPlanEdge*(cfg: CargoPlanEdgeConfig): BuildAction =
       cfg.scratchDir.len == 0:
     raise newException(ValueError, "a cargo plan edge needs a name, a " &
       "workspace root, a plan file and a scratch directory")
+  let problem = validateCargoArgs(cfg.cargoArgs)
+  if problem.len > 0:
+    raise newException(ValueError, "cargo plan edge " & cfg.name & ": " &
+      problem)
   var inputs = @["Cargo.toml", "Cargo.lock"]
   inputs.add cfg.prefixes
+  var anchors: seq[string]
+  for tool in [cfg.wrapper, cfg.cargo, cfg.rustc]:
+    if tool.isAbsolute: anchors.add parentDir(tool)
+  if cfg.storeRoot.len > 0: anchors.add cfg.storeRoot
+  anchors.add cfg.prefixes
+  if dirExists("/nix/store"): anchors.add "/nix/store"
   result = action(cargoPlanEdgeId(cfg.name), cargoPlanArgv(cfg),
     cwd = cfg.projectRoot,
     deps = cfg.fetchEdges,
@@ -97,5 +122,7 @@ proc cargoPlanEdge*(cfg: CargoPlanEdgeConfig): BuildAction =
     dependencyPolicy = automaticMonitorGatheringPolicy(),
     isolateHostEnvironment = true,
     env = cfg.devEnv,
+    relocatable = true,
+    relocationAnchors = anchors,
     governingLockIdentity = lockIdentityOutsideSolvedGraph())
   result.scratchDirs = @[cfg.scratchDir]

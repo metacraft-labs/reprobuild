@@ -28,7 +28,8 @@ type ScriptMode* = enum
     ## Each build script runs and prints directives.
 
 proc buildScript(pkg: string; mode: ScriptMode; useHelper = false): string =
-  let helper = if useHelper: "  let _ = helper::id();\n" else: ""
+  let helper = if useHelper: "  let _ = helper::id();\n  let _ = bdep::id();\n"
+               else: ""
   case mode
   of smMustNotRun:
     "fn main() {\n" & helper &
@@ -54,7 +55,10 @@ proc writePlanWorkspace*(root: string; mode: ScriptMode) =
   ##
   ##   - `sysdep`: `links = "sysdep"` and a build script;
   ##   - `mid`: depends on `sysdep` (its immediate dependent); its build
-  ##     script has `helper` (feature `a`) as a build-dependency;
+  ##     script has `helper` (feature `a`) and `bdep` as build-dependencies;
+  ##   - `bdep`: a library with a build script of its own, so cargo puts its
+  ##     link-search paths on the dynamic-library path of `mid`'s build
+  ##     script when it runs it;
   ##   - `helper`: features `a` and `b`; built twice, for the build script
   ##     with `a` and for `app` with `b` (resolver 2 keeps them apart);
   ##   - `pm`: a proc-macro;
@@ -67,7 +71,8 @@ proc writePlanWorkspace*(root: string; mode: ScriptMode) =
     "[[bin]]\nname = \"app-tool\"\npath = \"src/bin/tool.rs\"\n\n" &
     "[dependencies]\nmid = { path = \"mid\" }\npm = { path = \"pm\" }\n" &
     "helper = { path = \"helper\", features = [\"b\"] }\n\n" &
-    "[workspace]\nmembers = [\"sysdep\", \"mid\", \"helper\", \"pm\"]\n")
+    "[workspace]\nmembers = [\"sysdep\", \"mid\", \"helper\", \"pm\", " &
+    "\"bdep\"]\n")
   writeFileIn(root, "build.rs", buildScript("app", mode))
   writeFileIn(root, "src/main.rs",
     "fn main() { println!(\"{} {} {}\", mid::id(), pm::answer!(), " &
@@ -82,9 +87,15 @@ proc writePlanWorkspace*(root: string; mode: ScriptMode) =
     "[package]\nname = \"mid\"\nversion = \"0.1.0\"\nedition = \"2021\"\n" &
     "build = \"build.rs\"\n\n[dependencies]\nsysdep = { path = \"../sysdep\" }\n" &
     "\n[build-dependencies]\n" &
-    "helper = { path = \"../helper\", features = [\"a\"] }\n")
+    "helper = { path = \"../helper\", features = [\"a\"] }\n" &
+    "bdep = { path = \"../bdep\" }\n")
   writeFileIn(root, "mid/build.rs", buildScript("mid", mode, useHelper = true))
   writeFileIn(root, "mid/src/lib.rs", "pub fn id() -> u32 { sysdep::id() }\n")
+  writeFileIn(root, "bdep/Cargo.toml",
+    "[package]\nname = \"bdep\"\nversion = \"0.1.0\"\nedition = \"2021\"\n" &
+    "build = \"build.rs\"\n")
+  writeFileIn(root, "bdep/build.rs", buildScript("bdep", mode))
+  writeFileIn(root, "bdep/src/lib.rs", "pub fn id() -> u32 { 3 }\n")
   writeFileIn(root, "helper/Cargo.toml",
     "[package]\nname = \"helper\"\nversion = \"0.1.0\"\nedition = \"2021\"\n" &
     "\n[features]\na = []\nb = []\n")
@@ -189,6 +200,15 @@ proc stop*(l: ref Listener) =
   stopListening.store(true)
   joinThread(l.thread)
   l.socket.close()
+
+proc storeOnlyPath*(): string =
+  ## This process's `PATH` with only its Nix store entries: the closed
+  ## development environment a record run is given names its tools by store
+  ## path, and a plan refuses a host path under no logical root.
+  var parts: seq[string]
+  for entry in getEnv("PATH").split(':'):
+    if entry.startsWith("/nix/store/") and entry notin parts: parts.add entry
+  parts.join(":")
 
 proc proxyEnv*(l: ref Listener): seq[(string, string)] =
   ## Every proxy variable cargo (and the HTTP library under it) reads, all

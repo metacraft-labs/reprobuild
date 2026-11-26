@@ -12,7 +12,8 @@
 ## files.
 ##
 ## HOW IT IS OBSERVED. A five-package workspace (`rqe_cg5_plan_fixture`:
-## `links`, a build-dependency, a proc-macro, per-unit features) whose build
+## `links`, a build-dependency with a build script of its own, a proc-macro,
+## per-unit features) whose build
 ## scripts, if they ever run, connect to a loopback listener, leave a marker
 ## and panic. The edge runs through the real engine with the graph-built
 ## monitor, in a closed environment whose proxy variables all name the same
@@ -36,7 +37,9 @@
 ## report): letting the wrapper run rustc for a build-script unit (record
 ## mode classifying `build_script_*` lines as probes) compiles and runs the
 ## build scripts: the listener counts their connections, the markers appear,
-## the logger sees non-probe lines, and the edge fails.
+## the logger sees non-probe lines, and the edge fails. Refusing again a run
+## whose environment carries a slot (the derivation before the fix of a
+## build-dependency with a build script) fails the edge on `mid`'s run.
 ##
 ## NO MOCKS: real cargo and rustc, the real wrapper, engine and monitor. The
 ## logging `RUSTC` is an observer that runs the real compiler unchanged.
@@ -80,7 +83,7 @@ suite "the record-only graph-production edge":
       require listener.accepted == 1
       listener.resetCount()
 
-    var envPairs = @[("PATH", getEnv("PATH")),
+    var envPairs = @[("PATH", storeOnlyPath()),
       ("TMPDIR", getEnv("TMPDIR", work)),
       ("CG5_NET_PROBE", listener.address), ("CG5_MARKER_DIR", markers)]
     envPairs.add listener.proxyEnv
@@ -105,14 +108,19 @@ suite "the record-only graph-production edge":
     checkpoint lock.output
     require lock.code == 0
 
+    # The compiler the edge is given lies under the store root it declares,
+    # as the store root's own toolchain does: a plan names its tools by
+    # logical root.
+    let toolStore = work / "tool-store"
+    createDir(toolStore / "bin")
     let rustcLog = work / "rustc.log"
-    let logger = work / "rustc-logger"
+    let logger = toolStore / "bin" / "rustc-logger"
     writeRustcLogger(logger, realRustc, rustcLog)
     let planRel = ".repro/build/cargo/app.plan.rbsz"
     let scratchRel = ".repro/build/cargo/app.plan-scratch"
     let edge = cargoPlanEdge(CargoPlanEdgeConfig(name: "app",
       projectRoot: ws, planFile: planRel, scratchDir: scratchRel,
-      wrapper: wrapper, cargo: cargo, rustc: logger,
+      wrapper: wrapper, cargo: cargo, rustc: logger, storeRoot: toolStore,
       devEnv: devEnvOf(envPairs)))
     check edge.networkMode == netDenied
     check edge.netDestinations.len == 0
@@ -120,6 +128,7 @@ suite "the record-only graph-production edge":
     check edge.scratchDirs == @[scratchRel]
     check edge.outputs == @[planRel]
     check edge.isolateHostEnvironment
+    check edge.relocatable
 
     let tools = prepareMonitorTools(repoRoot, work / "monitor",
       "cg5-record-run")
@@ -199,10 +208,21 @@ suite "the record-only graph-production edge":
     for u in plan.units: crates.add u.crateName
     for (crate, count) in [("app", 1), ("app_tool", 1), ("mid", 1),
                            ("sysdep", 1), ("helper", 2), ("pm", 1),
-                           ("build_script_build", 3)]:
+                           ("bdep", 1), ("build_script_build", 4)]:
       checkpoint crate
       check crates.countIt(it == crate) == count
-    check plan.runs.len == 3
+    check plan.runs.len == 4
+    # A build script whose build-dependency has a build script of its own
+    # is fed by that build-dependency's run: cargo put its link-search path
+    # on the dependent script's dynamic-library path.
+    var midRun, bdepRun = ""
+    for r in plan.runs:
+      if r.package == "mid": midRun = r.id
+      if r.package == "bdep": bdepRun = r.id
+    require midRun.len > 0 and bdepRun.len > 0
+    check plan.runById(midRun).fedBy == @[bdepRun]
+    check plan.runById(midRun).isFed
+    check not plan.runById(bdepRun).isFed
     for r in plan.runs:
       check r.compileUnit.len > 0
       check plan.unitById(r.compileUnit).buildScriptCompile

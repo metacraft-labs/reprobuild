@@ -9,39 +9,61 @@
 ##
 ## 1. Prepares the edge-private directories inside the scratch directory
 ##    (which the engine empties before the edge runs): the record directory,
-##    an empty `CARGO_HOME` and an empty `HOME`. Each must be absent or empty:
-##    a recording left by an earlier run would enter this run's plan, and no
-##    single wrapper process can tell where a run starts, so the edge checks.
-##    cargo never sees the user's `~/.cargo` or home directory.
-## 2. Refuses a `Cargo.lock` that holds a package with a `source`: such a
-##    package (a registry or git dependency) would have to reach cargo through
-##    a source replacement over the fetched store prefixes, which this edge
-##    does not write yet.
+##    the scratch target directory, an empty `CARGO_HOME` and an empty `HOME`.
+##    Each must be absent or empty, and the saved metadata must not exist
+##    yet: a recording or placeholder left by an earlier run would enter this
+##    run's plan, and no single wrapper process can tell where a run starts,
+##    so the edge checks. cargo never sees the user's `~/.cargo` or home
+##    directory.
+## 2. Refuses what it cannot plan from inside the workspace:
+##    - a `Cargo.lock` that holds a package with a `source`: such a package
+##      (a registry or git dependency) would have to reach cargo through a
+##      source replacement over the fetched store prefixes, which this edge
+##      does not write yet;
+##    - a cargo configuration file (`.cargo/config.toml` or `.cargo/config`)
+##      in any directory above the workspace root: cargo reads every one of
+##      them, so the plan would depend on a file outside the workspace
+##      (Cargo Book, "Configuration", "Hierarchical structure":
+##      https://doc.rust-lang.org/cargo/reference/config.html#hierarchical-structure);
+##    - a workspace package (one with no source) whose manifest is outside
+##      the workspace root, read from the saved `cargo metadata`: its paths
+##      would be paths of this host only;
+##    - cargo arguments outside the selection this edge models
+##      (`validateCargoArgs`).
 ## 3. Saves `cargo metadata --offline --locked --format-version 1` for the
 ##    recording stub, which reads each package's targets from it.
 ## 4. Runs `cargo build --offline --locked -j 1 --target-dir <scratch>/target`
 ##    with the given arguments (the build's profile, target and package
-##    selection), the record wrapper as `build.rustc-wrapper` and the given
-##    rustc as `build.rustc`, both through `--config` so that neither reaches
-##    a compile unit's environment as a variable of this run. `-j 1` makes the
-##    `NUM_JOBS` cargo gives each build script the same on every host.
+##    selection) and four `--config` values: the record wrapper as
+##    `build.rustc-wrapper`, the given rustc as `build.rustc`, an empty
+##    `build.rustc-workspace-wrapper` (a project's own workspace wrapper would
+##    otherwise run between the record wrapper and rustc, for probes too),
+##    and `build.build-dir` set to the scratch target directory (a project's
+##    `build.build-dir` would otherwise move cargo's intermediate files,
+##    placeholders and stubs included, outside the scratch directory).
+##    Passing them on the command line keeps them out of a unit's
+##    environment, and the command line outranks configuration files and
+##    `CARGO_BUILD_*` variables. `-j 1` makes the `NUM_JOBS` cargo gives each
+##    build script the same on every host.
 ## 5. Derives the plan from the recordings (`cargo_plan.derivePlan`) and
 ##    writes it to the plan file, the edge's one declared output.
 ##
 ## The recordings name paths against the roots `project` (the working
-## directory), `target` (the scratch target directory), `scratch`, and, when
-## given, `store`. Only the plan leaves the edge; the scratch directory, the
-## recordings with it, is the engine's to empty.
+## directory), `target` (the scratch target directory), `scratch`, `store`
+## when given, and `nix` (`/nix/store`) where that store exists. Only the
+## plan leaves the edge; the scratch directory, the recordings with it, is
+## the engine's to empty.
 ##
-## A variable that would make cargo run another compiler or wrapper than the
-## record wrapper (`RUSTC`, `RUSTC_WRAPPER`, `RUSTC_WORKSPACE_WRAPPER` and
-## their `CARGO_BUILD_*` spellings) is refused: an environment variable
-## outranks `--config`, so the record run would compile for real.
+## `RUSTC`, `RUSTC_WRAPPER` and `RUSTC_WORKSPACE_WRAPPER` in the environment
+## are refused: cargo lets those three outrank its configuration, the command
+## line's included (measured for `RUSTC_WRAPPER` with cargo 1.94: the
+## variable's wrapper ran and the `--config` one did not), so the record run
+## would compile for real.
 ##
 ## Exit codes: 0 with the plan written, 2 usage, 1 any other failure (the
 ## message names it). POSIX only, as record mode is.
 
-import std/[algorithm, os, strutils]
+import std/[algorithm, json, os, strutils]
 when defined(posix):
   import std/posix
 
@@ -61,9 +83,14 @@ const
   CargoHomeSubdir* = "cargo-home"
   HomeSubdir* = "home"
   MetadataFile* = "metadata.json"
-  OverridingVariables* = ["RUSTC", "RUSTC_WRAPPER", "RUSTC_WORKSPACE_WRAPPER",
-    "CARGO_BUILD_RUSTC", "CARGO_BUILD_RUSTC_WRAPPER",
-    "CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER"]
+  OverridingVariables* = ["RUSTC", "RUSTC_WRAPPER", "RUSTC_WORKSPACE_WRAPPER"]
+  NixStore = "/nix/store"
+  SelectionFlags = ["--release", "--workspace", "--all", "--lib", "--bins",
+    "--all-features", "--no-default-features"]
+    ## The cargo flags without a value the edge passes through.
+  SelectionOptions = ["--profile", "--target", "--package", "-p",
+    "--exclude", "--bin", "--features", "-F"]
+    ## The cargo options with a value the edge passes through.
 
 type
   PlanRunOptions* = object
@@ -100,6 +127,35 @@ proc parsePlanRunArgs*(args: openArray[string]): PlanRunOptions =
       ("--scratch", result.scratch), ("--cargo", result.cargo),
       ("--rustc", result.rustc)]:
     if value.len == 0: fail(name & " is required")
+
+proc validateCargoArgs*(args: openArray[string]): string =
+  ## "" when `args` hold only the build selection this edge models (the
+  ## profile, the target, the packages, binaries and features), else why
+  ## not. Anything else (`--config`, `--target-dir`, `--manifest-path`, `-j`,
+  ## `-Z`, test or example targets, ...) would change what the edge itself
+  ## sets or plan units this edge does not cover.
+  var i = 0
+  while i < args.len:
+    let a = args[i]
+    if a in SelectionFlags:
+      inc i
+      continue
+    var known = false
+    for opt in SelectionOptions:
+      if a == opt:
+        if i + 1 >= args.len or args[i + 1].startsWith("-"):
+          return "the cargo option " & a & " takes a value"
+        i += 2
+        known = true
+        break
+      if opt.startsWith("--") and a.startsWith(opt & "="):
+        inc i
+        known = true
+        break
+    if not known:
+      return "the cargo argument " & a.escape() & " is outside the build " &
+        "selection the record run passes through"
+  ""
 
 proc emptyOrAbsent(dir, what: string) =
   if fileExists(dir) or symlinkExists(dir):
@@ -181,6 +237,25 @@ proc runCargoPlan*(opts: PlanRunOptions): int =
     let home = scratch / HomeSubdir
     emptyOrAbsent(home, "the edge-private HOME")
     let targetDir = scratch / TargetSubdir
+    emptyOrAbsent(targetDir, "the scratch target directory")
+    let metadataPath = scratch / MetadataFile
+    if fileExists(metadataPath) or symlinkExists(metadataPath) or
+        dirExists(metadataPath):
+      fail("the saved metadata " & metadataPath & " exists at the start of " &
+        "the run")
+    let argsProblem = validateCargoArgs(opts.cargoArgs)
+    if argsProblem.len > 0: fail(argsProblem)
+    block ancestors:
+      var dir = parentDir(project)
+      while dir.len > 0:
+        for name in ["config.toml", "config"]:
+          let config = dir / ".cargo" / name
+          if fileExists(config):
+            fail("cargo would read the configuration file " & config &
+              ", which is outside the workspace")
+        let up = parentDir(dir)
+        if up == dir or up.len == 0: break
+        dir = up
 
     if fileExists(project / "Cargo.lock"):
       var sourced: seq[string]
@@ -200,6 +275,8 @@ proc runCargoPlan*(opts: PlanRunOptions): int =
       ScratchRootLabel & "=" & scratch]
     if opts.storeRoot.len > 0:
       rootLines.add "store=" & absolutePath(opts.storeRoot)
+    if dirExists(NixStore):
+      rootLines.add "nix=" & NixStore
     let roots = withResolvedSpellings(parseRecordRoots(rootLines.join("\n")))
 
     # The record run's own environment, as the recordings will name it: the
@@ -210,11 +287,30 @@ proc runCargoPlan*(opts: PlanRunOptions): int =
         baseEnv.add (name, logicalize(roots, value))
     baseEnv.sort(proc (a, b: (string, string)): int = cmp(a[0], b[0]))
 
-    let metadataPath = scratch / MetadataFile
-    let metaCode = spawnWait([opts.cargo, "metadata", "--offline", "--locked",
+    # The same compiler, and no project wrapper, for the rustc queries
+    # `cargo metadata` may make.
+    let metaCode = spawnWait([opts.cargo,
+      "--config", "build.rustc=" & tomlString(opts.rustc),
+      "--config", "build.rustc-wrapper=" & tomlString(""),
+      "--config", "build.rustc-workspace-wrapper=" & tomlString(""),
+      "metadata", "--offline", "--locked",
       "--format-version", "1"], stdoutFile = metadataPath)
     if metaCode != 0:
       fail("cargo metadata failed with exit status " & $metaCode)
+    block outsideMembers:
+      let metadata = parseFile(metadataPath)
+      var outside: seq[string]
+      for pkg in metadata{"packages"}.getElems():
+        let source = pkg{"source"}
+        if not source.isNil and source.kind != JNull: continue
+        let manifest = pkg{"manifest_path"}.getStr
+        if not logicalize(roots, manifest).startsWith("${project}/"):
+          outside.add pkg{"name"}.getStr & " (" & manifest & ")"
+      if outside.len > 0:
+        outside.sort()
+        fail("workspace packages outside the workspace root: " &
+          outside.join(", ") & "; their paths would name files of this " &
+          "host only")
 
     let wrapper = getAppFilename()
     putEnv(RecordDirEnv, recordDirPath)
@@ -223,6 +319,8 @@ proc runCargoPlan*(opts: PlanRunOptions): int =
     var build = @[opts.cargo,
       "--config", "build.rustc=" & tomlString(opts.rustc),
       "--config", "build.rustc-wrapper=" & tomlString(wrapper),
+      "--config", "build.rustc-workspace-wrapper=" & tomlString(""),
+      "--config", "build.build-dir=" & tomlString(targetDir),
       "build", "--offline", "--locked", "-j", "1",
       "--target-dir", targetDir]
     build.add opts.cargoArgs

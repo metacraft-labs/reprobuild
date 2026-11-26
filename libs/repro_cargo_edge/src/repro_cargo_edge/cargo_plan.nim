@@ -46,7 +46,12 @@
 ## A `${target}` path that none of these rules places, a `${scratch}` path,
 ## or a sentinel left anywhere fails the derivation (`CargoPlanError`): a plan
 ## that still named the record run's own files would point the edges that
-## read it at files that no longer exist.
+## read it at files that no longer exist. So does an absolute path under no
+## logical root, in an argument, a working directory or an environment
+## difference: a plan naming one would hold a file of one host, which no
+## other checkout or host can resolve. Only `-L dependency=` directories
+## under the target directory are rewritten into the closure; any other is
+## left as cargo wrote it (and an absolute one is refused like any path).
 ##
 ## SLOTS. Each sentinel cargo placed becomes a SLOT, written
 ## `${slot:<kind>:<run>}` (with `:<bin>` for `rustc-link-arg-bin`). In an
@@ -55,24 +60,42 @@
 ## it stands for the entry. A root label holds no `:`, so a slot never reads
 ## as a root token. The `rustc-env` sentinel variable becomes an entry of the
 ## unit's `envSlots`, and a run's `DEP_<LINKS>___REPRO_PROVIDER` variable an
-## entry of its `providers`; both variables are removed. A unit with a slot
-## is FED by the runs its slots name; one with none is complete as it stands.
+## entry of its `providers`; both variables are removed. A unit is FED when
+## it carries a slot or receives an `OUT_DIR`; one that is not is complete as
+## it stands. A build-script RUN can be fed too: cargo puts a
+## build-dependency's `rustc-link-search` paths inside its `OUT_DIR` on the
+## dynamic-library path of the dependent build script it runs, so those
+## entries become slots in the run's environment and the run is fed by the
+## build-dependency's run (`PlanRun.fedBy`). Only those two link-search kinds
+## may feed a run.
 ##
 ## THE ENVIRONMENT. A unit's or run's environment is stored as its DIFFERENCE
 ## from the record run's own environment (the closed environment the edge was
 ## launched with): what cargo set or changed for it, plus the names cargo
-## removed. The record run's own variables are dropped from the difference:
-## `RUSTC_WRAPPER` when it names the record wrapper, `CARGO_MAKEFLAGS`, and a
-## `MAKEFLAGS`/`MFLAGS` that carries jobserver descriptors.
+## removed. The variables cargo documents setting for a crate or a build
+## script (`cargoSetsVariable`) are kept even when their value equals the
+## record run's own, because the edge that runs the unit is not launched from
+## that environment. Dropped from the difference: the record run's own
+## variables (`RUSTC_WRAPPER` when it names the record wrapper,
+## `CARGO_MAKEFLAGS`, and a `MAKEFLAGS`/`MFLAGS` that carries jobserver
+## descriptors), and the variables cargo's own process sets for itself and
+## its children inherit (`CargoProcessVariables`: the certificate locations
+## its TLS library probes for when the environment names none).
 ##
 ## THE FORMAT. A fixed-schema binary record: a length-prefixed magic
 ## (`CargoPlanMagic`), a `u16` schema version, a `u32` payload length, and the
 ## SSZ-encoded payload (`encodeCargoPlan`, `decodeCargoPlan`), the envelope
 ## the repository uses for fixed-schema records it writes and reads back. It
 ## is not JSON: the recordings are JSON scratch files read once inside the
-## edge, and the plan does not inherit their format.
+## edge, and the plan does not inherit their format. Every list is
+## bounds-checked before it is encoded, and a decoded plan is checked as the
+## derivation checks the one it writes (`validatePlan`): unique ids, every
+## reference resolved, every output under its unit's directory, no path of
+## the record run left. Schema version 2 added `PlanRun.fedBy`.
 
 import std/[algorithm, os, sequtils, sets, strutils, tables]
+when defined(posix):
+  import std/posix
 
 import ssz_serialization
 import repro_core/codec
@@ -81,7 +104,7 @@ import ./record_mode
 
 const
   CargoPlanMagic* = "reprobuild.cargoPlan.v1"
-  CargoPlanSchemaVersion* = 1'u16
+  CargoPlanSchemaVersion* = 2'u16
   OutRootLabel* = "out"
     ## The root every rewritten target-directory path is under.
   TargetRootLabel* = "target"
@@ -143,6 +166,8 @@ type
     manifest*, manifestFrom*: string
     provider*: string     ## its own `links` provider, or ""
     providers*: seq[PlanProvider]  ## the providers cargo gave it
+    fedBy*: seq[string]
+      ## the runs whose link-search slots its dynamic-library path carries
 
   CargoPlan* = object
     units*: seq[PlanUnit]  ## sorted by id
@@ -167,6 +192,28 @@ const
     "rustc-link-arg-tests", "rustc-link-arg-examples",
     "rustc-link-arg-benches", "rustc-link-arg-cdylib"]
   FlagsTakingAValue = ["--cfg", "--check-cfg", "-l", "-L", "-C", "--codegen"]
+  RunSlotKinds = ["rustc-link-search-in-out-dir",
+    "rustc-link-search-outside-out-dir"]
+    ## The only slots a build-script run can carry: a build-dependency's
+    ## link-search paths on its dynamic-library path.
+  CargoProcessVariables* = ["SSL_CERT_FILE", "SSL_CERT_DIR"]
+    ## Variables cargo's own process sets when the environment lacks them
+    ## (its TLS library's probe for the system's certificate locations), so
+    ## every process it starts inherits them; they describe the host cargo
+    ## ran on, not the unit.
+  CrateVariables = ["CARGO", "CARGO_MANIFEST_DIR", "CARGO_MANIFEST_PATH",
+    "CARGO_CRATE_NAME", "CARGO_BIN_NAME", "CARGO_PRIMARY_PACKAGE",
+    "CARGO_TARGET_TMPDIR", "CARGO_RUSTC_CURRENT_DIR", "OUT_DIR"]
+    ## What cargo sets for a crate's compile (Cargo Book, "Environment
+    ## variables Cargo sets for crates"), besides `CARGO_PKG_*` and
+    ## `CARGO_BIN_EXE_*`.
+  BuildScriptVariables = ["CARGO", "CARGO_MANIFEST_DIR",
+    "CARGO_MANIFEST_PATH", "CARGO_MANIFEST_LINKS", "CARGO_ENCODED_RUSTFLAGS",
+    "OUT_DIR", "TARGET", "HOST", "NUM_JOBS", "OPT_LEVEL", "DEBUG", "PROFILE",
+    "RUSTC", "RUSTDOC", "RUSTC_LINKER", "RUSTC_WORKSPACE_WRAPPER"]
+    ## What cargo sets for a build script (Cargo Book, "Environment
+    ## variables Cargo sets for build scripts"), besides `CARGO_PKG_*`,
+    ## `CARGO_FEATURE_*`, `CARGO_CFG_*` and `DEP_*`.
 
 # ---------------------------------------------------------------------------
 # Reading the recordings.
@@ -251,6 +298,13 @@ proc codegenValue(args: openArray[string]; key: string): string =
 proc readUnit(d: var Derivation; rec: RecordedInvocation) =
   if rec.argv.len < 2:
     fail("a recorded unit has no rustc command line")
+  if not rec.argv[1].startsWith("-"):
+    # Cargo runs `<wrapper> <rustc> <args>`; a program between the two (a
+    # workspace wrapper chained after the record wrapper) shows up here as a
+    # second program before the arguments, and would run in place of rustc.
+    fail("a recorded unit's command line runs " & rec.argv[0] & " " &
+      rec.argv[1] & ": another program stands between the record wrapper " &
+      "and rustc's arguments")
   let args = rec.argv[1 .. ^1]
   var u = PlanUnit(buildScriptCompile: rec.buildScriptCompile)
   u.crateName = unitFlag(args, "--crate-name")
@@ -306,7 +360,7 @@ proc readUnit(d: var Derivation; rec: RecordedInvocation) =
     var dep = ""
     if arg == "-L" and i + 1 < args.len: dep = args[i + 1]
     elif arg.startsWith("-L"): dep = arg[2 .. ^1]
-    if dep.startsWith("dependency="):
+    if dep.startsWith("dependency=" & TargetToken):
       d.deps.incl dep["dependency=".len .. ^1]
     inc i
   d.unitIndex[u.id] = d.units.len
@@ -389,13 +443,16 @@ proc closureDirs(d: Derivation; unitId: string): seq[string] =
   for c in d.closures[unitId]: result.add OutToken & "/" & c
 
 proc mapPathList(d: Derivation; value, ownerId, where: string;
-                 fed: var HashSet[string]): string =
+                 isRun: bool; fed: var HashSet[string]): string =
   ## A `:`-separated path list (the dynamic-library search path): each entry
   ## mapped, a `deps` directory expanded into the closure's directories.
   var parts: seq[string]
   for entry in value.split(':'):
     if SentinelMarker in entry:
       let slot = d.parseSentinel(entry, where)
+      if isRun and slot.kind notin RunSlotKinds:
+        fail(where & " carries a " & slot.kind & " slot; a build-script " &
+          "run can be fed only link-search paths")
       fed.incl slot.run
       parts.add slotToken(slot)
     elif entry in d.deps or entry in d.searchDirs:
@@ -408,12 +465,23 @@ proc mapPathList(d: Derivation; value, ownerId, where: string;
   parts.join(":")
 
 proc recordRunVariable(name, value: string; wrapper: string): bool =
-  ## The record run's own variables, dropped from every difference.
+  ## The record run's own variables, and those cargo's own process sets for
+  ## itself, dropped from every difference.
   case name
   of "CARGO_MAKEFLAGS": true
   of "MAKEFLAGS", "MFLAGS": "jobserver" in value
   of "RUSTC_WRAPPER": value == wrapper
-  else: false
+  else: name in CargoProcessVariables
+
+proc cargoSetsVariable*(name: string; isRun: bool): bool =
+  ## Whether cargo documents setting `name` for a crate's compile (`isRun`
+  ## false) or a build script's run.
+  if name.startsWith("CARGO_PKG_"): return true
+  if isRun:
+    name in BuildScriptVariables or name.startsWith("CARGO_FEATURE_") or
+      name.startsWith("CARGO_CFG_") or name.startsWith("DEP_")
+  else:
+    name in CrateVariables or name.startsWith("CARGO_BIN_EXE_")
 
 proc diffEnv(d: Derivation; rec: RecordedInvocation;
              base: Table[string, string]; wrapper, ownerId, where: string;
@@ -424,8 +492,10 @@ proc diffEnv(d: Derivation; rec: RecordedInvocation;
   var seen = initHashSet[string]()
   for (name, value) in rec.env:
     seen.incl name
-    if name in base and base[name] == value: continue
     if recordRunVariable(name, value, wrapper): continue
+    if name in base and base[name] == value and
+        not cargoSetsVariable(name, isRun):
+      continue
     let at = where & " (variable " & name & ")"
     if name == SentinelEnvName:
       let slot = d.parseSentinel(value, at)
@@ -454,7 +524,7 @@ proc diffEnv(d: Derivation; rec: RecordedInvocation;
       result.env.add (name, OutToken & "/" & outDirRun & "/out")
       continue
     if TargetToken in value or SentinelMarker in value:
-      result.env.add (name, d.mapPathList(value, ownerId, at, fed))
+      result.env.add (name, d.mapPathList(value, ownerId, at, isRun, fed))
     else:
       result.env.add (name, value)
   for name in base.keys:
@@ -495,8 +565,8 @@ proc rewriteUnitArgv(d: Derivation; raw: RawUnit;
       continue
     var dep = ""
     var glued = false
-    if arg == "-L" and next.startsWith("dependency="): dep = next
-    elif arg.startsWith("-Ldependency="):
+    if arg == "-L" and next.startsWith("dependency=" & TargetToken): dep = next
+    elif arg.startsWith("-Ldependency=" & TargetToken):
       dep = arg[2 .. ^1]
       glued = true
     if dep.len > 0:
@@ -563,6 +633,78 @@ proc checkPlaced(text, where: string) =
   if SentinelMarker in text:
     fail(where & " still carries a sentinel: " & text)
 
+proc absolutePathStartsAt(text: string; i: int): bool =
+  ## Whether the `/` at `text[i]` begins an absolute path: at the start of
+  ## `text`; after a separator (`=`, `:`, a space, a comma, a quote, `(`);
+  ## or glued to a leading flag or argument-file sign (`-L/x`, `@/x`). Not
+  ## inside a relative path (`src/lib.rs`) and not right after a root
+  ## token's `}` (`${project}/x` is a logical path).
+  if i == 0: return true
+  let prev = text[i - 1]
+  if prev in {'=', ':', ' ', ',', '"', '\'', '(', ';', '\t'}: return true
+  if prev == '}' or prev == '/': return false
+  var j = i - 1
+  while j > 0 and text[j - 1] notin {'/', '=', ':', ' ', ','}: dec j
+  j == 0 and text[0] in {'-', '@'}
+
+proc checkNoPhysicalPath(text, where: string) =
+  ## Refuse an absolute path under no logical root anywhere in `text`: a `/`
+  ## that begins a path (`absolutePathStartsAt`) and is not a URL's `//`.
+  var i = 0
+  while i < text.len:
+    if text[i] == '/' and absolutePathStartsAt(text, i):
+      if i + 1 < text.len and text[i + 1] == '/':
+        i += 2
+        continue
+      fail(where & " names an absolute path under no logical root: " & text)
+    inc i
+
+proc validatePlan*(plan: CargoPlan) =
+  ## The checks every plan passes, written or read: unique ids, every
+  ## reference resolved, outputs under their unit's directory, no path of
+  ## the record run and no sentinel left. Raises `CargoPlanError`.
+  var units = initHashSet[string]()
+  var runs = initHashSet[string]()
+  for u in plan.units:
+    if u.id.len == 0 or u.id in units:
+      fail("a cargo plan with a missing or repeated unit id " & u.id.escape())
+    units.incl u.id
+  for r in plan.runs:
+    if r.id.len == 0 or r.id in runs or r.id in units:
+      fail("a cargo plan with a missing or repeated run id " & r.id.escape())
+    runs.incl r.id
+  proc refs(ids: openArray[string]; known: HashSet[string]; what: string) =
+    for id in ids:
+      if id notin known:
+        fail("a cargo plan whose " & what & " names " & id.escape() &
+          ", which it does not hold")
+  for u in plan.units:
+    let where = "the unit " & u.id
+    if u.argv.len == 0: fail(where & " has no command line")
+    refs(u.consumes, units, where & "'s consumes")
+    refs(u.closure, units, where & "'s closure")
+    refs(u.fedBy, runs, where & "'s fedBy")
+    if u.outDirRun.len > 0: refs([u.outDirRun], runs, where & "'s OUT_DIR")
+    for s in u.envSlots: refs([s.run], runs, where & "'s slots")
+    for o in u.outputs:
+      if not o.startsWith(OutToken & "/" & u.id & "/"):
+        fail(where & " has an output outside its directory: " & o)
+    if u.buildScriptCompile and u.executable notin u.outputs:
+      fail(where & " is a build-script compile whose executable is not " &
+        "one of its outputs")
+    for s in u.argv & u.outputs & @[u.cwd, u.executable]:
+      checkPlaced(s, where)
+    for (_, value) in u.env: checkPlaced(value, where)
+  for r in plan.runs:
+    let where = "the build-script run " & r.id
+    refs([r.compileUnit], units, where & "'s compile unit")
+    refs(r.fedBy, runs, where & "'s fedBy")
+    if r.outDir != OutToken & "/" & r.id & "/out":
+      fail(where & " has an OUT_DIR outside its directory: " & r.outDir)
+    for s in r.argv & @[r.cwd, r.manifest, r.provider]: checkPlaced(s, where)
+    for (_, value) in r.env: checkPlaced(value, where)
+    for p in r.providers: checkPlaced(p.provider, where)
+
 proc derivePlan*(recordings: openArray[RecordedInvocation];
                  baseEnv: openArray[(string, string)];
                  recordWrapper: string): CargoPlan =
@@ -610,6 +752,13 @@ proc derivePlan*(recordings: openArray[RecordedInvocation];
       fail(where & " runs " & rec.argv[0] & ", which no recorded " &
         "build-script compile wrote")
     r.compileUnit = d.units[compile].unit.id
+    if d.units[compile].unit.package != r.package or
+        d.units[compile].unit.version != r.version:
+      fail(where & " runs the build script of " &
+        d.units[compile].unit.package & "@" & d.units[compile].unit.version &
+        ", another package")
+    if r.id in d.unitIndex:
+      fail(where & " would share its directory with the unit " & r.id)
     r.argv = @[result.units[compile].executable]
     for arg in rec.argv[1 .. ^1]:
       r.argv.add(if TargetToken in arg: d.mapEmbedded(arg, where) else: arg)
@@ -621,9 +770,13 @@ proc derivePlan*(recordings: openArray[RecordedInvocation];
     var fed = initHashSet[string]()
     let diff = d.diffEnv(rec, base, recordWrapper, r.compileUnit, where,
       true, slots, r.providers, outDirRun, fed)
-    if slots.len > 0 or fed.len > 0:
-      fail(where & " received a slot; a build-script run is fed by no " &
-        "other run's directives")
+    if slots.len > 0:
+      fail(where & " received a rustc-env slot, which cargo gives compiles " &
+        "only")
+    if r.id in fed:
+      fail(where & " would be fed by its own directives")
+    r.fedBy = toSeq(fed)
+    r.fedBy.sort()
     if outDirRun != r.id:
       fail(where & " received the OUT_DIR of another run")
     r.env = diff.env
@@ -633,15 +786,17 @@ proc derivePlan*(recordings: openArray[RecordedInvocation];
   result.units.sort(proc (a, b: PlanUnit): int = cmp(a.id, b.id))
   result.runs.sort(proc (a, b: PlanRun): int = cmp(a.id, b.id))
   # Fail closed: nothing of the record run's own may remain.
+  if result.units.len == 0:
+    fail("the record run recorded no unit: cargo planned nothing to compile")
   for u in result.units:
     let where = "the unit " & u.id
-    for s in u.argv & u.outputs & @[u.cwd]: checkPlaced(s, where)
-    for (_, value) in u.env: checkPlaced(value, where)
+    for s in u.argv & @[u.cwd]: checkNoPhysicalPath(s, where)
+    for (_, value) in u.env: checkNoPhysicalPath(value, where)
   for r in result.runs:
     let where = "the build-script run " & r.id
-    for s in r.argv & @[r.cwd, r.manifest, r.provider]: checkPlaced(s, where)
-    for (_, value) in r.env: checkPlaced(value, where)
-    for p in r.providers: checkPlaced(p.provider, where)
+    for s in r.argv & @[r.cwd]: checkNoPhysicalPath(s, where)
+    for (_, value) in r.env: checkNoPhysicalPath(value, where)
+  validatePlan(result)
 
 proc unitById*(plan: CargoPlan; id: string): PlanUnit =
   for u in plan.units:
@@ -655,8 +810,13 @@ proc runById*(plan: CargoPlan; id: string): PlanRun =
 
 proc isFed*(u: PlanUnit): bool =
   ## Whether the unit takes part of its command line or environment from a
-  ## build-script run, so the plan alone does not complete it.
-  u.fedBy.len > 0 or u.envSlots.len > 0
+  ## build-script run (a slot, or its `OUT_DIR`), so the plan alone does not
+  ## complete it.
+  u.fedBy.len > 0 or u.envSlots.len > 0 or u.outDirRun.len > 0
+
+proc isFed*(r: PlanRun): bool =
+  ## Whether the run's environment carries another run's link-search slot.
+  r.fedBy.len > 0
 
 # ---------------------------------------------------------------------------
 # The binary record.
@@ -694,6 +854,7 @@ type
     envRemoved: SszTextList
     outDir, cargoOutDir, manifest, manifestFrom, provider: SszText
     providers: List[ProviderSsz, MaxPlanListItems]
+    fedBy: SszTextList
 
   CargoPlanSsz = object
     units: List[PlanUnitSsz, MaxPlanListItems]
@@ -705,6 +866,11 @@ proc toText(s: string): SszText =
   SszText.init(toBytes(s))
 
 proc fromText(t: SszText): string = fromBytes(t.asSeq())
+
+proc checkCount(n: int; what: string) =
+  if n > MaxPlanListItems:
+    fail("a cargo plan's " & what & " exceeds " & $MaxPlanListItems &
+      " items")
 
 proc toTextList(items: openArray[string]): SszTextList =
   if items.len > MaxPlanListItems:
@@ -718,6 +884,7 @@ proc fromTextList(list: SszTextList): seq[string] =
 
 proc toEnv(env: openArray[(string, string)]): List[EnvPairSsz,
     MaxPlanListItems] =
+  checkCount(env.len, "environment")
   var parts: seq[EnvPairSsz]
   for (name, value) in env:
     parts.add EnvPairSsz(name: toText(name), value: toText(value))
@@ -729,6 +896,7 @@ proc fromEnv(list: List[EnvPairSsz, MaxPlanListItems]):
     fromText(pair.value))
 
 proc toWire(u: PlanUnit): PlanUnitSsz =
+  checkCount(u.envSlots.len, "environment slots")
   var slots: seq[SlotSsz]
   for s in u.envSlots:
     slots.add SlotSsz(kind: toText(s.kind), run: toText(s.run),
@@ -764,6 +932,7 @@ proc fromWire(w: PlanUnitSsz): PlanUnit =
       bin: fromText(s.bin))
 
 proc toWire(r: PlanRun): PlanRunSsz =
+  checkCount(r.providers.len, "providers")
   var providers: seq[ProviderSsz]
   for p in r.providers:
     providers.add ProviderSsz(links: toText(p.links),
@@ -774,7 +943,8 @@ proc toWire(r: PlanRun): PlanRunSsz =
     envRemoved: toTextList(r.envRemoved), outDir: toText(r.outDir),
     cargoOutDir: toText(r.cargoOutDir), manifest: toText(r.manifest),
     manifestFrom: toText(r.manifestFrom), provider: toText(r.provider),
-    providers: List[ProviderSsz, MaxPlanListItems].init(providers))
+    providers: List[ProviderSsz, MaxPlanListItems].init(providers),
+    fedBy: toTextList(r.fedBy))
 
 proc fromWire(w: PlanRunSsz): PlanRun =
   result = PlanRun(id: fromText(w.id), package: fromText(w.package),
@@ -782,7 +952,8 @@ proc fromWire(w: PlanRunSsz): PlanRun =
     argv: fromTextList(w.argv), cwd: fromText(w.cwd), env: fromEnv(w.env),
     envRemoved: fromTextList(w.envRemoved), outDir: fromText(w.outDir),
     cargoOutDir: fromText(w.cargoOutDir), manifest: fromText(w.manifest),
-    manifestFrom: fromText(w.manifestFrom), provider: fromText(w.provider))
+    manifestFrom: fromText(w.manifestFrom), provider: fromText(w.provider),
+    fedBy: fromTextList(w.fedBy))
   for p in w.providers.asSeq():
     result.providers.add PlanProvider(links: fromText(p.links),
       provider: fromText(p.provider))
@@ -805,6 +976,8 @@ proc encodeCargoPlan*(plan: CargoPlan): seq[byte] =
     fail("could not encode the cargo plan: " & err.msg)
   except IOError as err:
     fail("could not encode the cargo plan: " & err.msg)
+  if payload.len.uint64 > high(uint32).uint64:
+    fail("a cargo plan's payload exceeds the record's 32-bit length")
   result.writeString(CargoPlanMagic)
   result.writeU16Le(CargoPlanSchemaVersion)
   result.writeU32Le(uint32(payload.len))
@@ -828,7 +1001,7 @@ proc decodeCargoPlan*(bytes: openArray[byte]): CargoPlan =
     fail("a truncated cargo plan: " & err.msg)
   if version != CargoPlanSchemaVersion:
     fail("unsupported cargo plan schema version " & $version)
-  if pos + int(length) != bytes.len:
+  if uint64(pos) + uint64(length) != uint64(bytes.len):
     fail("a cargo plan whose length does not match: " & $length &
       " payload bytes declared, " & $(bytes.len - pos) & " present")
   var wire: CargoPlanSsz
@@ -840,19 +1013,37 @@ proc decodeCargoPlan*(bytes: openArray[byte]): CargoPlan =
     fail("an unreadable cargo plan payload: " & err.msg)
   for u in wire.units.asSeq(): result.units.add fromWire(u)
   for r in wire.runs.asSeq(): result.runs.add fromWire(r)
+  validatePlan(result)
 
 proc writeCargoPlan*(path: string; plan: CargoPlan) =
-  ## Write the plan's record to `path` through a temporary file, so a reader
-  ## never sees half a plan.
+  ## Write the plan's record to `path` through a temporary file, flushed to
+  ## disk before it is renamed into place, so a reader never sees half a
+  ## plan, and a crash never leaves a renamed but unwritten one. A failed
+  ## write removes the temporary file.
   let bytes = encodeCargoPlan(plan)
   let partial = path & ".partial"
-  var f = open(partial, fmWrite)
   try:
-    if bytes.len > 0:
-      discard f.writeBuffer(unsafeAddr bytes[0], bytes.len)
-  finally:
-    f.close()
-  moveFile(partial, path)
+    var f = open(partial, fmWrite)
+    try:
+      if bytes.len > 0 and
+          f.writeBuffer(unsafeAddr bytes[0], bytes.len) != bytes.len:
+        raise newException(IOError, "short write to " & partial)
+      f.flushFile()
+      when defined(posix):
+        if posix.fsync(f.getOsFileHandle()) != 0:
+          raise newException(IOError, "fsync failed for " & partial)
+    finally:
+      f.close()
+    moveFile(partial, path)
+    when defined(posix):
+      let dirFd = posix.open(parentDir(absolutePath(path)).cstring, O_RDONLY)
+      if dirFd >= 0:
+        discard posix.fsync(dirFd)
+        discard posix.close(dirFd)
+  except CatchableError as err:
+    if fileExists(partial): removeFile(partial)
+    if err of CargoPlanError: raise
+    fail("could not write the cargo plan " & path & ": " & err.msg)
 
 proc readCargoPlan*(path: string): CargoPlan =
   decodeCargoPlan(toBytes(readFile(path)))

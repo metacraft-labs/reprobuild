@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 36,
-    "nimTestBinaries": 3316,
+    "nimTestBinaries": 3317,
     "pureUnitConsolidationGroups": 97,
     "pureUnitTests": 856,
     "staticallyDetectedRuntimeCompilerFlowTests": 165,
-    "testEntries": 3375
+    "testEntries": 3376
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1873,7 +1873,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 30,
-      "integration": 1885,
+      "integration": 1886,
       "platform/destructive": 206,
       "pure unit": 856,
       "unclassified": 398
@@ -2096,9 +2096,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 3316,
+    "nimTestBinaryCount": 3317,
     "pythonTestFileCount": 59,
-    "testEntryCount": 3375
+    "testEntryCount": 3376
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -15016,14 +15016,15 @@
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
+        "repro_build_engine",
         "repro_cargo_edge",
         "repro_core"
       ],
       "owner": "libs/repro_cargo_edge",
       "requiresReproBinary": false,
       "source": "libs/repro_cargo_edge/tests/t_cargo_plan.nim",
-      "sourceSuiteCount": 3,
-      "staticCaseCount": 8,
+      "sourceSuiteCount": 4,
+      "staticCaseCount": 21,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -59500,6 +59501,24 @@
       "source": "tests/integration/t_rqe_cg5_record_run_compiles_nothing.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_rqe_cg5_record_run_refusals",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_cargo_edge",
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_rqe_cg5_record_run_refusals.nim",
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 4,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

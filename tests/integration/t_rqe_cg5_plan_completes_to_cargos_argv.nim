@@ -20,21 +20,24 @@
 ## build uses `-j 1`, as the record run does, so that cargo's `NUM_JOBS` and
 ## jobserver are alike. The logger is a shell script; the four variables a
 ## shell sets for itself (`_`, `SHLVL`, `PWD`, `OLDPWD`) are left out on both
-## sides.
+## sides, and so are the certificate variables cargo's own process sets
+## (`CargoProcessVariables`), which the plan drops.
 ##
-## KNOWN DIFFERENCE, checked separately rather than compared: the plan gives
-## every unit its own output directory, so cargo's one `-L dependency=<deps>`
-## becomes one `-L dependency=` per unit of the closure, and a `deps` (or
-## profile) directory on the dynamic-library path becomes the closure's
-## directories. Those entries are compared as a set against the unit's
-## closure and left out of the sequence comparison.
+## KNOWN DIFFERENCE, compared explicitly: the plan gives every unit its own
+## output directory, so cargo's one `-L dependency=<deps>` becomes one
+## `-L dependency=` per unit of the closure (checked against the closure),
+## and a `deps` (or profile) directory on the dynamic-library path becomes
+## the closure's directories (the real value is expanded the same way and
+## compared exactly).
 ##
-## WHAT IS LEFT for later deliverables: the FED units (a slot from a build
-## script's directive) are completed by the build-script run edges and the
-## launcher that fills the slots; their comparison with the oracle, the
+## FED UNITS (a slot, or an `OUT_DIR`) are compared too, on everything but
+## their slots: the plan's side without its slot tokens, the real side
+## without the values the fixture's build scripts printed.
+##
+## WHAT IS LEFT for later deliverables: completing the fed units (the slots
+## filled from the build-script run edges' output by the launcher), the
 ## directive table's real values with `OUT_DIR` paths, `DEP_*` reaching the
-## direct and not the transitive dependent, and the order of slots, are
-## theirs. Registry dependencies are not in the fixture: the record run does
+## direct and not the transitive dependent, and the order of slots. Registry dependencies are not in the fixture: the record run does
 ## not serve cargo the fetched store prefixes yet.
 ##
 ## Falsifying mutation (applied, observed to fail, reverted; see the change's
@@ -139,7 +142,7 @@ suite "the plan of a record run":
     defer: removeDir(work)
     let ws = work / "ws"
     writePlanWorkspace(ws, smReal)
-    let devEnv = @[("PATH", getEnv("PATH")),
+    let devEnv = @[("PATH", storeOnlyPath()),
       ("TMPDIR", getEnv("TMPDIR", work))]
     proc homeEnv(dir: string): seq[(string, string)] =
       createDir(dir / "cargo-home")
@@ -169,6 +172,10 @@ suite "the plan of a record run":
     let real = runClosed([cargo,
       "--config", "build.rustc=\"" & rustc & "\"",
       "--config", "build.rustc-wrapper=\"" & logger & "\"",
+      # The record run's two other `--config` values, which cargo mixes
+      # into its unit hashes.
+      "--config", "build.rustc-workspace-wrapper=\"\"",
+      "--config", "build.build-dir=\"" & oracleTarget & "\"",
       "build", "--offline", "--locked", "-j", "1",
       "--target-dir", oracleTarget], ws, oracleEnv)
     checkpoint real.output
@@ -195,18 +202,17 @@ suite "the plan of a record run":
     for r in plan.runs:
       back.add (r.outDir, oracleTarget / r.cargoOutDir)
     back.sort(proc (a, b: (string, string)): int = cmp(b[0].len, a[0].len))
-    let roots = parseRecordRoots("project=" & ws)
+    let roots = parseRecordRoots("project=" & ws &
+      (if dirExists("/nix/store"): "\nnix=/nix/store" else: ""))
     proc mapBack(s: string): string =
       var t = s
       for (token, path) in back: t = t.replace(token, path)
       expandRecorded(roots, t)
     let depsDirs = toHashSet([oracleTarget / "debug" / "deps",
       oracleTarget / "debug"])
-    proc pathListWithoutDeps(value: string): string =
-      value.split(':').filterIt(it notin depsDirs).join(":")
 
     # The same units as the real build.
-    check plan.units.len == 10
+    check plan.units.len == 12
     check oracle.len == plan.units.len
     var matched = initTable[string, OracleUnit]()
     for o in oracle:
@@ -237,43 +243,86 @@ suite "the plan of a record run":
     for u in plan.units:
       if not u.isFed: unfed.add u.crateName
     unfed.sort()
+    checkpoint "unfed: " & unfed.join(" ")
     check unfed == @["build_script_build", "build_script_build",
       "build_script_build", "helper", "helper", "pm"]
+    # Every unit, fed or not: for a fed one, the slots are left out of the
+    # plan's side and the real build's directive values (the fixture's
+    # scripts print exactly `rustc-cfg=built_<pkg>`,
+    # `rustc-check-cfg=cfg(built_<pkg>)` and `rustc-env=BUILT_<PKG>=yes`)
+    # out of the real side; everything else must be equal.
+    proc isDirectiveValue(args: openArray[string]; i: int): bool =
+      (args[i] == "--cfg" and i + 1 < args.len and
+        args[i + 1].startsWith("built_")) or
+      (args[i] == "--check-cfg" and i + 1 < args.len and
+        args[i + 1].startsWith("cfg(built_"))
     for u in plan.units:
-      if u.isFed or u.id notin matched: continue
+      if u.id notin matched: continue
       let o = matched[u.id]
-      checkpoint "unit " & u.id
+      checkpoint "unit " & u.id & (if u.isFed: " (fed)" else: "")
       # The closure, as one search directory per unit.
       var closureDirs: seq[string]
       for c in u.closure: closureDirs.add "${out}/" & c
       closureDirs.sort()
       check dependencySearch(u.argv) == closureDirs
-      let planArgv = withoutDependencySearch(u.argv).mapIt(mapBack(it))
-      let realArgv = withoutDependencySearch(o.argv)
+      let planArgv = withoutDependencySearch(u.argv).filterIt(
+        not it.startsWith("${slot:")).mapIt(mapBack(it))
+      var realArgv: seq[string]
+      block:
+        let raw = withoutDependencySearch(o.argv)
+        var i = 0
+        while i < raw.len:
+          if u.isFed and isDirectiveValue(raw, i):
+            i += 2
+            continue
+          realArgv.add raw[i]
+          inc i
       checkpoint "plan: " & planArgv.join(" ")
       checkpoint "real: " & realArgv.join(" ")
       check planArgv == realArgv
       check mapBack(u.cwd) == o.cwd
-      # The environment, as a difference from each run's own.
+      # The environment, as a difference from each run's own; the variables
+      # cargo documents setting for a crate are kept even when equal.
       var planEnv = initTable[string, string]()
       for (name, value) in u.env:
-        planEnv[name] = mapBack(value)
+        if name in PathListVariables:
+          # Closure directories stay tokens; a slot entry has no value in
+          # the real build (its scripts print no link-search path).
+          var parts: seq[string]
+          for entry in value.split(':'):
+            if entry.startsWith("${slot:"): continue
+            parts.add(if entry in closureDirs: entry else: mapBack(entry))
+          planEnv[name] = parts.join(":")
+        else:
+          planEnv[name] = mapBack(value)
       var realEnv = initTable[string, string]()
       for name, value in o.env:
-        if name in ShellVariables: continue
-        if oracleBase.getOrDefault(name, "\0") == value: continue
+        if name in ShellVariables or name in CargoProcessVariables: continue
+        if oracleBase.getOrDefault(name, "\0") == value and
+            not cargoSetsVariable(name, false):
+          continue
         if name == "CARGO_MAKEFLAGS": continue
         if name == "RUSTC_WRAPPER" and value == logger: continue
-        realEnv[name] = value
+        if u.isFed and name.startsWith("BUILT_"): continue
+        if name in PathListVariables:
+          # cargo's one `deps` (or profile) directory is, in the plan, the
+          # closure's directories: expand it here and compare exactly.
+          var parts: seq[string]
+          for entry in value.split(':'):
+            if entry in depsDirs:
+              for dir in closureDirs:
+                if dir notin parts: parts.add dir
+            else:
+              parts.add entry
+          realEnv[name] = parts.join(":")
+        else:
+          realEnv[name] = value
       for name in toSeq(planEnv.keys) & toSeq(realEnv.keys):
         if name in ShellVariables: continue
         let p = planEnv.getOrDefault(name, "<unset>")
         let r = realEnv.getOrDefault(name, "<unset>")
         checkpoint name & ": plan " & p & " | real " & r
-        if name in PathListVariables:
-          check pathListWithoutDeps(p) == pathListWithoutDeps(r)
-        else:
-          check p == r
+        check p == r
       var realRemoved: seq[string]
       for name in oracleBase.keys:
         if name notin o.env and name notin ShellVariables:

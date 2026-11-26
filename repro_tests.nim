@@ -32845,6 +32845,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_tests_integration_g14",
     singleReason: ""),
   TestSpec(
+    source: "tests/integration/t_rqe_cg5_record_run_refusals.nim",
+    binary: "build/test-bin/t_rqe_cg5_record_run_refusals",
+    defines: @[],
+    requiresReproBinary: true,
+    requiresMonitorShim: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_tests_integration_g14",
+    singleReason: ""),
+  TestSpec(
     source: "tests/integration/t_rqe_m15_action_exports_its_lease.nim",
     binary: "build/test-bin/t_rqe_m15_action_exports_its_lease",
     defines: @[],
@@ -33334,7 +33346,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g14",
+    group: "t_group_tests_integration_g15",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_shared_clone_uses_full_repo_url_for_base_remote.nim",
@@ -34270,7 +34282,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g15",
+    group: "t_group_tests_integration_g16",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_target_link_bakes_no_dep_prefix_rpath.nim",
@@ -35074,7 +35086,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g16",
+    group: "t_group_tests_integration_g17",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_ux_m1_reprobuild_module_hierarchy_and_lsp.nim",

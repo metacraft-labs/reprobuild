@@ -297,7 +297,7 @@ libs/repro_build_engine/tests/test_tool_identity_env_plumbing.nim	nim	18
 libs/repro_build_engine/tests/test_umask_wrap_both_spawn_paths.nim	nim	8
 libs/repro_build_engine/tests/test_wrapped_monitor_evidence_ownership.nim	nim	3
 libs/repro_bundle/tests/t_repro_bundle_halves.nim	nim	43
-libs/repro_cargo_edge/tests/t_cargo_plan.nim	nim	8
+libs/repro_cargo_edge/tests/t_cargo_plan.nim	nim	21
 libs/repro_cargo_edge/tests/t_record_mode.nim	nim	24
 libs/repro_cargo_edge/tests/t_rqe_cg3_cargo_edge.nim	nim	22
 libs/repro_cargo_fetch/tests/test_rqe_cg4a_compile_edges_offline.nim	nim	1
@@ -2744,6 +2744,7 @@ tests/integration/t_rqe_cg3_wrapper_is_transparent_fixture_crates.nim	nim	1
 tests/integration/t_rqe_cg5_plan_completes_to_cargos_argv.nim	nim	1
 tests/integration/t_rqe_cg5_record_mode_compiles_nothing.nim	nim	3
 tests/integration/t_rqe_cg5_record_run_compiles_nothing.nim	nim	1
+tests/integration/t_rqe_cg5_record_run_refusals.nim	nim	4
 tests/integration/t_rqe_m15_action_exports_its_lease.nim	nim	1
 tests/integration/t_rqe_m15_nim_edge_bounded.nim	nim	1
 tests/integration/t_rqe_m15_recorder_cargo_edge_bounded.nim	nim	1
