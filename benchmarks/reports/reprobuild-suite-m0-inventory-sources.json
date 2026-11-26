@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 36,
-    "nimTestBinaries": 3287,
+    "nimTestBinaries": 3290,
     "pureUnitConsolidationGroups": 96,
     "pureUnitTests": 852,
     "staticallyDetectedRuntimeCompilerFlowTests": 164,
-    "testEntries": 3346
+    "testEntries": 3349
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1859,7 +1859,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 29,
-      "integration": 1862,
+      "integration": 1865,
       "platform/destructive": 206,
       "pure unit": 852,
       "unclassified": 397
@@ -2082,9 +2082,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 3287,
+    "nimTestBinaryCount": 3290,
     "pythonTestFileCount": 59,
-    "testEntryCount": 3346
+    "testEntryCount": 3349
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -12387,6 +12387,26 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_publish_refuses_a_prefix_that_fails_verification",
+      "class": "integration",
+      "classificationReason": "subprocess or repro CLI invocation in test body",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_binary_cache_client",
+        "repro_home_resources",
+        "repro_peer_cache",
+        "repro_test_support"
+      ],
+      "owner": "libs/repro_binary_cache_client",
+      "requiresReproBinary": false,
+      "source": "libs/repro_binary_cache_client/tests/t_publish_refuses_a_prefix_that_fails_verification.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 7,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_publisher_key_files_are_never_overwritten",
       "class": "unclassified",
       "classificationReason": "mutates the process environment",
@@ -21732,6 +21752,28 @@
       "source": "libs/repro_home_apply/tests/t_builtin_adapter_zip_extraction_cost.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 3,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_cached_app_prefix_is_verified_then_repaired",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_home_apply",
+        "repro_home_resources",
+        "repro_local_store",
+        "repro_project_dsl",
+        "repro_test_support",
+        "repro_tool_profiles"
+      ],
+      "owner": "libs/repro_home_apply",
+      "requiresReproBinary": true,
+      "source": "libs/repro_home_apply/tests/t_cached_app_prefix_is_verified_then_repaired.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 7,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -40018,7 +40060,7 @@
       "requiresReproBinary": true,
       "source": "tests/e2e/gm4c/t_e2e_dmg_app_bundle_install_and_rollback.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 8,
+      "staticCaseCount": 9,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -55070,7 +55112,7 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_nix_expression_closure_keys.nim",
       "sourceSuiteCount": 2,
-      "staticCaseCount": 7,
+      "staticCaseCount": 8,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -57362,6 +57404,23 @@
       "source": "tests/integration/t_record_store_preconditions_run_inside_the_lock_update_node.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_record_store_push_guard_tolerates_disagreeing_destination_refs",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_record_store_push_guard_tolerates_disagreeing_destination_refs.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 4,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -64365,7 +64424,7 @@
       "requiresReproBinary": false,
       "source": "tests/integration/test_nix_daemon_cache.py",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 3,
+      "staticCaseCount": 4,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -64633,7 +64692,7 @@
     {
       "binary": "build/test-bin/t_binary_decoder_profile_nested_counts",
       "class": "unclassified",
-      "classificationReason": "spawns a subprocess (through `libs/repro_tool_profiles/src/repro_tool_profiles/archive_steps.nim`)",
+      "classificationReason": "imports `winlean`, which grants out-of-process reach (through `libs/repro_tool_profiles/src/repro_tool_profiles/executable_evidence.nim`)",
       "defines": [],
       "language": "nim",
       "localDependencyShape": [],
@@ -69849,7 +69908,7 @@
     {
       "binary": "",
       "class": "unclassified",
-      "classificationReason": "imports `pathlib`, which this scan does not recognize; refusing to call it pure rather than assuming it is",
+      "classificationReason": "imports `errno`, which this scan does not recognize; refusing to call it pure rather than assuming it is",
       "defines": [],
       "language": "python",
       "localDependencyShape": [],
@@ -69857,7 +69916,7 @@
       "requiresReproBinary": false,
       "source": "tests/unit/test_nix_evaluation_policy.py",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 1,
+      "staticCaseCount": 2,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

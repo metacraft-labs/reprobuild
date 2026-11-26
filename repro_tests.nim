@@ -1885,6 +1885,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_libs_repro_binary_cache_client_tests_g01",
     singleReason: ""),
   TestSpec(
+    source: "libs/repro_binary_cache_client/tests/t_publish_refuses_a_prefix_that_fails_verification.nim",
+    binary: "build/test-bin/t_publish_refuses_a_prefix_that_fails_verification",
+    defines: @[],
+    requiresReproBinary: false,
+    requiresMonitorShim: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_libs_repro_binary_cache_client_tests_g01",
+    singleReason: ""),
+  TestSpec(
     source: "libs/repro_binary_cache_client/tests/t_publisher_key_files_are_never_overwritten.nim",
     binary: "build/test-bin/t_publisher_key_files_are_never_overwritten",
     defines: @[],
@@ -7836,6 +7848,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     selfInterposes: false,
     group: "",
     singleReason: "suite-scope statement runs at every start-up: let ps = findPowerShell()"),
+  TestSpec(
+    source: "libs/repro_home_apply/tests/t_cached_app_prefix_is_verified_then_repaired.nim",
+    binary: "build/test-bin/t_cached_app_prefix_is_verified_then_repaired",
+    defines: @[],
+    requiresReproBinary: true,
+    requiresMonitorShim: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_libs_repro_home_apply_tests_g01",
+    singleReason: ""),
   TestSpec(
     source: "libs/repro_home_apply/tests/t_catalog_projection_accepts_linked_stdlib_definition.nim",
     binary: "build/test-bin/t_catalog_projection_accepts_linked_stdlib_definition",
@@ -24874,7 +24898,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g04",
+    group: "t_group_tests_integration_g03",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_compiler_args_transport.nim",
@@ -25642,7 +25666,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g05",
+    group: "t_group_tests_integration_g04",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_develop_all_reset_reconciles_drifted_sibling.nim",
@@ -26458,7 +26482,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g06",
+    group: "t_group_tests_integration_g05",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_execution_lease_confinement.nim",
@@ -27202,7 +27226,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g07",
+    group: "t_group_tests_integration_g06",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_home_profile_catalog_imports.nim",
@@ -27994,7 +28018,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g08",
+    group: "t_group_tests_integration_g07",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_integration_variant_conditional_uses_static_value.nim",
@@ -28678,7 +28702,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g09",
+    group: "t_group_tests_integration_g08",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_lock_file_only_workspace_fully_described_from_lock_not_head.nim",
@@ -29338,7 +29362,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g10",
+    group: "t_group_tests_integration_g09",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_manifest_commit_targets_the_manifest_repo_under_inherited_git_dir.nim",
@@ -30142,7 +30166,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g11",
+    group: "t_group_tests_integration_g10",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_platform_refusal_surfaces_through_realize_and_plan.nim",
@@ -30826,7 +30850,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g12",
+    group: "t_group_tests_integration_g11",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_pre_receive_rejects_public_lock_with_private_ref_and_integrity_mismatch.nim",
@@ -31419,6 +31443,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/integration/t_record_store_preconditions_run_inside_the_lock_update_node.nim",
     binary: "build/test-bin/t_record_store_preconditions_run_inside_the_lock_update_node",
+    defines: @[],
+    requiresReproBinary: true,
+    requiresMonitorShim: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_tests_integration_g12",
+    singleReason: ""),
+  TestSpec(
+    source: "tests/integration/t_record_store_push_guard_tolerates_disagreeing_destination_refs.nim",
+    binary: "build/test-bin/t_record_store_push_guard_tolerates_disagreeing_destination_refs",
     defines: @[],
     requiresReproBinary: true,
     requiresMonitorShim: false,

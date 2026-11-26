@@ -214,5 +214,493 @@
   {
     "selector": "github:owner/repo?dir=sub#tool^out",
     "local": false
+  },
+  {
+    "selector": "github:o#x",
+    "local": true,
+    "workspaceEntries": [
+      {
+        "path": "github:o",
+        "kind": "dir"
+      }
+    ]
+  },
+  {
+    "selector": "github:o#x",
+    "local": false,
+    "workspaceEntries": []
+  },
+  {
+    "selector": "gitlab:o#x",
+    "local": true,
+    "workspaceEntries": [
+      {
+        "path": "gitlab:o",
+        "kind": "dir"
+      }
+    ]
+  },
+  {
+    "selector": "gitlab:o#x",
+    "local": false,
+    "workspaceEntries": []
+  },
+  {
+    "selector": "sourcehut:o#x",
+    "local": true,
+    "workspaceEntries": [
+      {
+        "path": "sourcehut:o",
+        "kind": "dir"
+      }
+    ]
+  },
+  {
+    "selector": "sourcehut:o#x",
+    "local": false,
+    "workspaceEntries": []
+  },
+  {
+    "selector": "github:o/r/a..b#x",
+    "local": true,
+    "workspaceEntries": [
+      {
+        "path": "github:o/r/a..b",
+        "kind": "dir"
+      }
+    ]
+  },
+  {
+    "selector": "github:o/r/a..b#x",
+    "local": false,
+    "workspaceEntries": []
+  },
+  {
+    "selector": "flake:a.b#x",
+    "local": true,
+    "workspaceEntries": [
+      {
+        "path": "flake:a.b",
+        "kind": "dir"
+      }
+    ]
+  },
+  {
+    "selector": "flake:a.b#x",
+    "local": false,
+    "workspaceEntries": []
+  },
+  {
+    "selector": "github:#x",
+    "local": true,
+    "workspaceEntries": [
+      {
+        "path": "github:",
+        "kind": "dir"
+      }
+    ]
+  },
+  {
+    "selector": "github:#x",
+    "local": false,
+    "workspaceEntries": []
+  },
+  {
+    "selector": "git+https:#x",
+    "local": true,
+    "workspaceEntries": [
+      {
+        "path": "git+https:",
+        "kind": "dir"
+      }
+    ]
+  },
+  {
+    "selector": "git+https:#x",
+    "local": false,
+    "workspaceEntries": []
+  },
+  {
+    "selector": "github:o%zz#x",
+    "local": true,
+    "workspaceEntries": [
+      {
+        "path": "github:o%zz",
+        "kind": "dir"
+      }
+    ]
+  },
+  {
+    "selector": "github:o%zz#x",
+    "local": false,
+    "workspaceEntries": []
+  },
+  {
+    "selector": "https://h:0/x#x",
+    "local": true,
+    "workspaceEntries": [
+      {
+        "path": "https://h:0/x",
+        "kind": "dir"
+      }
+    ]
+  },
+  {
+    "selector": "https://h:0/x#x",
+    "local": false,
+    "workspaceEntries": []
+  },
+  {
+    "selector": "https://h:65536/x#x",
+    "local": true,
+    "workspaceEntries": [
+      {
+        "path": "https://h:65536/x",
+        "kind": "dir"
+      }
+    ]
+  },
+  {
+    "selector": "https://h:65536/x#x",
+    "local": false,
+    "workspaceEntries": []
+  },
+  {
+    "selector": "https://a@b@c/x#x",
+    "local": true,
+    "workspaceEntries": [
+      {
+        "path": "https://a@b@c/x",
+        "kind": "dir"
+      }
+    ]
+  },
+  {
+    "selector": "https://a@b@c/x#x",
+    "local": false,
+    "workspaceEntries": []
+  },
+  {
+    "selector": "github:o/a^b#x^out",
+    "local": true,
+    "workspaceEntries": [
+      {
+        "path": "github:o/a^b",
+        "kind": "dir"
+      }
+    ]
+  },
+  {
+    "selector": "github:o/a^b#x^out",
+    "local": false,
+    "workspaceEntries": []
+  },
+  {
+    "selector": "github:o#packages.x86_64-linux.default^*",
+    "local": true,
+    "workspaceEntries": [
+      {
+        "path": "github:o",
+        "kind": "dir"
+      }
+    ]
+  },
+  {
+    "selector": "github:o#packages.x86_64-linux.default^*",
+    "local": false,
+    "workspaceEntries": []
+  },
+  {
+    "selector": "github:o#x",
+    "local": true,
+    "workspaceEntries": [
+      {
+        "path": "github:o",
+        "kind": "file"
+      }
+    ]
+  },
+  {
+    "selector": "github:o#x",
+    "local": true,
+    "workspaceEntries": [
+      {
+        "path": "github:o",
+        "kind": "dangling-symlink"
+      }
+    ]
+  },
+  {
+    "selector": "tools/stable",
+    "local": true,
+    "workspaceEntries": [
+      {
+        "path": "tools/stable",
+        "kind": "symlink"
+      }
+    ]
+  },
+  {
+    "selector": "tools/stable",
+    "local": false,
+    "workspaceEntries": []
+  },
+  {
+    "selector": "tools/stable#bin",
+    "local": true,
+    "workspaceEntries": [
+      {
+        "path": "tools/stable#bin",
+        "kind": "symlink"
+      }
+    ]
+  },
+  {
+    "selector": "tools/stable#bin",
+    "local": false,
+    "workspaceEntries": []
+  },
+  {
+    "selector": "github:o/r#x",
+    "local": true,
+    "workspaceEntries": [
+      {
+        "path": "github:o/r#x",
+        "kind": "symlink"
+      }
+    ]
+  },
+  {
+    "selector": "github:o/r#x",
+    "local": false,
+    "workspaceEntries": []
+  },
+  {
+    "selector": "github:o/r#x^*",
+    "local": true,
+    "workspaceEntries": [
+      {
+        "path": "github:o/r#x",
+        "kind": "symlink"
+      }
+    ]
+  },
+  {
+    "selector": "github:o/r#x^*",
+    "local": false,
+    "workspaceEntries": []
+  },
+  {
+    "selector": "github:o/r#x",
+    "local": false,
+    "workspaceEntries": [
+      {
+        "path": "github:o",
+        "kind": "dir"
+      }
+    ]
+  },
+  {
+    "selector": "nixpkgs#bash",
+    "local": false,
+    "workspaceEntries": [
+      {
+        "path": "flake.nix",
+        "kind": "file"
+      },
+      {
+        "path": "github:other",
+        "kind": "dir"
+      },
+      {
+        "path": "nixpkgs-overlay",
+        "kind": "dir"
+      },
+      {
+        "path": "tools",
+        "kind": "dir"
+      }
+    ]
+  },
+  {
+    "selector": "github:NixOS/nixpkgs/addf7cf5f383a3101ecfba091b98d0a1263dc9b8#bash",
+    "local": false,
+    "workspaceEntries": [
+      {
+        "path": "flake.nix",
+        "kind": "file"
+      },
+      {
+        "path": "github:other",
+        "kind": "dir"
+      },
+      {
+        "path": "nixpkgs-overlay",
+        "kind": "dir"
+      },
+      {
+        "path": "tools",
+        "kind": "dir"
+      }
+    ]
+  },
+  {
+    "selector": "github:owner/repo?dir=sub#tool^out",
+    "local": false,
+    "workspaceEntries": [
+      {
+        "path": "flake.nix",
+        "kind": "file"
+      },
+      {
+        "path": "github:other",
+        "kind": "dir"
+      },
+      {
+        "path": "nixpkgs-overlay",
+        "kind": "dir"
+      },
+      {
+        "path": "tools",
+        "kind": "dir"
+      }
+    ]
+  },
+  {
+    "selector": ".#tool",
+    "local": true,
+    "workspaceEntries": [
+      {
+        "path": "flake.nix",
+        "kind": "file"
+      },
+      {
+        "path": "github:other",
+        "kind": "dir"
+      },
+      {
+        "path": "nixpkgs-overlay",
+        "kind": "dir"
+      },
+      {
+        "path": "tools",
+        "kind": "dir"
+      }
+    ]
+  },
+  {
+    "selector": "path:./other#tool",
+    "local": true,
+    "workspaceEntries": [
+      {
+        "path": "other",
+        "kind": "dir"
+      }
+    ]
+  },
+  {
+    "selector": "sub.d#tool",
+    "local": true,
+    "workspaceEntries": [
+      {
+        "path": "sub.d",
+        "kind": "dir"
+      }
+    ]
+  },
+  {
+    "selector": "nixpkgs#bash",
+    "local": false,
+    "workspaceEntries": [
+      {
+        "path": "nixpkgs",
+        "kind": "dir"
+      }
+    ]
+  },
+  {
+    "selector": "registry#tool",
+    "local": false,
+    "workspaceEntries": [
+      {
+        "path": "registry",
+        "kind": "dir"
+      }
+    ]
+  },
+  {
+    "selector": "nixpkgs/nixos-unstable#bash",
+    "local": false,
+    "workspaceEntries": [
+      {
+        "path": "nixpkgs",
+        "kind": "dir"
+      }
+    ]
+  },
+  {
+    "selector": "nixpkgs/nixos-unstable#bash",
+    "local": false,
+    "workspaceEntries": [
+      {
+        "path": "nixpkgs/nixos-unstable",
+        "kind": "dir"
+      }
+    ]
+  },
+  {
+    "selector": "nixpkgs/nixos-unstable#bash",
+    "local": true,
+    "workspaceEntries": [
+      {
+        "path": "nixpkgs/nixos-unstable#bash",
+        "kind": "symlink"
+      }
+    ]
+  },
+  {
+    "selector": "nixpkgs/stable#x^out",
+    "local": true,
+    "workspaceEntries": [
+      {
+        "path": "nixpkgs/stable#x",
+        "kind": "symlink"
+      }
+    ]
+  },
+  {
+    "selector": "nixpkgs/stable#x^out",
+    "local": false,
+    "workspaceEntries": [
+      {
+        "path": "nixpkgs/stable#x^out",
+        "kind": "symlink"
+      }
+    ]
+  },
+  {
+    "selector": "https://h:0/../target#y",
+    "local": true,
+    "workspaceEntries": [
+      {
+        "path": "https:/h:0",
+        "kind": "symlink"
+      }
+    ]
+  },
+  {
+    "selector": "https://h:0/../target#y",
+    "local": false,
+    "workspaceEntries": []
+  },
+  {
+    "selector": "https://h:0/../x#y",
+    "local": true,
+    "workspaceEntries": [
+      {
+        "path": "https:/x",
+        "kind": "dir"
+      }
+    ]
   }
 ]

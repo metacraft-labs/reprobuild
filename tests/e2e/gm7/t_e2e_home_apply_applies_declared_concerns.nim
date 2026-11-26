@@ -286,7 +286,7 @@ when defined(macosx):
         let again = runApply(applyOptions(root, 2500))
         check again.kind == aokNoOpVerified
         check again.generationIdHex == gen.generationIdHex
-      removeDir(root)
+      removeFixtureTree(root)
 
     test "applies: [applications] on a profile every package of which " &
         "realizes still writes no stow link, user file or block":
@@ -305,7 +305,7 @@ when defined(macosx):
         check not storeHasPackage(root, "gm7base")
         check manifestOf(root, gen.generationIdHex).ownedConcerns ==
           @["applications"]
-      removeDir(root)
+      removeFixtureTree(root)
 
     test "negative control: without the declaration the same profile " &
         "fails at step 7, and applies every concern once it can":
@@ -341,7 +341,7 @@ when defined(macosx):
         check manifestVersion(root, gen.generationIdHex) == 2
         check not m.concernsDeclared
         check ownedConcernsOf(m) == AllHomeConcerns
-      removeDir(root)
+      removeFixtureTree(root)
 
     test "narrowing releases, rollback restores, and rolling back to the " &
         "narrowed generation releases instead of removing":
@@ -429,6 +429,6 @@ when defined(macosx):
         check readFile(marker(root)) == "gm7\n"
         check hasBlock(root)
         check dirExists(placedApp(root))
-      removeDir(root)
+      removeFixtureTree(root)
 
-  removeDir(fixtureRoot)
+  removeFixtureTree(fixtureRoot)
