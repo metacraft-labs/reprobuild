@@ -23,7 +23,7 @@
 ##   an Electron updater (Squirrel) leaves behind (126.9.13 becoming
 ##   126.11.11), which only the version check can tell from the pinned
 ##   bundle.
-## * "A process runs from the prefix" is a copy of `/bin/sleep` started from
+## * "A process runs from the prefix" is a signed copy of `/bin/sleep` started from
 ##   inside the cached bundle, found by the real libproc scan.
 ## * Nothing here touches the real `~/Applications`, the real store or the
 ##   real Launch Services entries of any installed application: every path
@@ -223,11 +223,16 @@ when defined(macosx):
       # A program that runs from inside the cached bundle, as an application
       # launched from its prefix would.
       let sleeper = bundle / "Contents" / "MacOS" / "sleeper"
-      copyFile("/bin/sleep", sleeper)
-      setFilePermissions(sleeper, {fpUserRead, fpUserWrite, fpUserExec})
+      makeFixtureSleeper(sleeper)
       let running = startProcess(sleeper, args = @["120"])
       try:
-        check processesRunningFromPrefix(realized.prefixAbsolutePath).len == 1
+        var visible = false
+        for _ in 0 ..< 100:
+          if processesRunningFromPrefix(realized.prefixAbsolutePath).len == 1:
+            visible = true
+            break
+          sleep(100)
+        check visible
         # The apply goes on and does not fail; the prefix is left as it is.
         let during = realizeBuiltinPackage(store, pkg.archive, Relaxed)
         check during.prefixAbsolutePath == realized.prefixAbsolutePath
