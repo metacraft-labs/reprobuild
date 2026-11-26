@@ -18,6 +18,8 @@ import ./protocol
 import ./stats_store
 import ./lease_registry
 import ./instance_registry
+import ./caller_cgroup
+import ./ipc
 when defined(windows):
   import ./windows_detached_spawn
 
@@ -2264,7 +2266,8 @@ when defined(posix):
 
 proc runBuildRequestWorker(socket: IpcConn; config: UserDaemonConfig;
                            request: UserDaemonBuildRequest;
-                           session: var UserDaemonSession) =
+                           session: var UserDaemonSession;
+                           callerCgroup: string) =
   var eventId = 1'u64
   var terminalSent = false
   let sessionId = session.sessionId
@@ -2317,6 +2320,17 @@ proc runBuildRequestWorker(socket: IpcConn; config: UserDaemonConfig;
     session.writer = encodeWriterIdentity(currentWriterIdentity())
     updateSessionState(config, session, "running",
       message = "daemon-hosted build running")
+    # Before the executor starts any process: every action inherits the
+    # cgroup this leaves the worker in (`caller_cgroup`).
+    let placement = placeInCallerCgroup(callerCgroup)
+    logLine(config.logPath, "build worker " & placement.logText() &
+      " session=" & session.sessionId)
+    if placement.kind == cpkRefused:
+      let message = declineMessage(placement)
+      updateSessionState(config, session, "unsupported", 64, message)
+      emit(bekUnsupported, message, true, 64, "warning",
+        "{\"fallbackAllowed\":true,\"reason\":\"caller-cgroup\"}")
+      return
     if userDaemonBuildExecutor == nil:
       let message =
         "daemon-hosted build executor is not registered in repro-daemon"
@@ -2372,7 +2386,10 @@ proc runBuildRequestWorker(socket: IpcConn; config: UserDaemonConfig;
 
 proc handleBuildRequest(socket: IpcConn; config: UserDaemonConfig;
                         request: UserDaemonBuildRequest;
-                        sessions: var seq[UserDaemonSession]) =
+                        sessions: var seq[UserDaemonSession];
+                        callerCgroup = "") =
+  ## ``callerCgroup`` is the cgroup v2 path of the process that sent
+  ## ``request`` (``callerCgroupOf``); the worker runs the build under it.
   var workerRequest = request
   # Sanitize immediately before the detached worker fork as defense in depth
   # for direct runtime callers that bypass the wire codec.
@@ -2449,9 +2466,11 @@ proc handleBuildRequest(socket: IpcConn; config: UserDaemonConfig;
       if prewarmLine.len > 0:
         logLine(config.logPath, prewarmLine & " session=" & sessionId)
       spawnDetachedDaemonWorker(config, "build worker", sessionId, socket):
-        runBuildRequestWorker(socket, config, workerRequest, session)
+        runBuildRequestWorker(socket, config, workerRequest, session,
+          callerCgroup)
     else:
-      runBuildRequestWorker(socket, config, workerRequest, session)
+      runBuildRequestWorker(socket, config, workerRequest, session,
+        callerCgroup)
   finally:
     sessions.removeSession(sessionId)
 
@@ -2478,7 +2497,8 @@ proc nextWatchEvent(runId, sessionId, projectRoot: string;
 proc runWatchRequestWorker(socket: IpcConn; config: UserDaemonConfig;
                            request: UserDaemonWatchRequest;
                            session: var UserDaemonSession;
-                           streamToSocket: bool) =
+                           streamToSocket: bool;
+                           callerCgroup: string) =
   var eventId = 1'u64
   var terminalSent = false
   let sessionId = session.sessionId
@@ -2526,6 +2546,17 @@ proc runWatchRequestWorker(socket: IpcConn; config: UserDaemonConfig;
     sessionRef[].writer = encodeWriterIdentity(currentWriterIdentity())
     updateSessionState(config, sessionRef[], "running",
       message = "daemon-hosted watch running")
+    # Every watch cycle is a build: same placement as the build worker.
+    let placement = placeInCallerCgroup(callerCgroup)
+    logLine(config.logPath, "watch worker " & placement.logText() &
+      " session=" & sessionId)
+    if placement.kind == cpkRefused:
+      let message = declineMessage(placement)
+      updateSessionState(config, sessionRef[], "unsupported", 64, message)
+      emitEvent(bekUnsupported, message, true, 64, "warning",
+        "{\"fallbackAllowed\":true,\"reason\":\"caller-cgroup\"}", @[],
+        "unsupported")
+      return
     if userDaemonWatchExecutor == nil:
       let message =
         "daemon-hosted watch executor is not registered in repro-daemon"
@@ -2614,7 +2645,8 @@ proc streamWatchSession(socket: IpcConn; config: UserDaemonConfig;
 
 proc handleWatchStart(socket: IpcConn; config: UserDaemonConfig;
                       request: UserDaemonWatchRequest;
-                      sessions: var seq[UserDaemonSession]) =
+                      sessions: var seq[UserDaemonSession];
+                      callerCgroup = "") =
   var workerRequest = request
   # Keep the build/watch spawn boundaries identical. Detached watch workers
   # must not receive a private launch marker through an in-process request.
@@ -2648,10 +2680,12 @@ proc handleWatchStart(socket: IpcConn; config: UserDaemonConfig;
   when defined(posix):
     spawnDetachedDaemonWorker(config, "watch worker", sessionId, socket):
       runWatchRequestWorker(socket, config, workerRequest, session,
-        streamToSocket = request.attached and not request.detached)
+        streamToSocket = request.attached and not request.detached,
+        callerCgroup = callerCgroup)
   else:
     runWatchRequestWorker(socket, config, workerRequest, session,
-      streamToSocket = request.attached and not request.detached)
+      streamToSocket = request.attached and not request.detached,
+      callerCgroup = callerCgroup)
   sessions.removeSession(sessionId)
 
 proc handleWatchAttach(socket: IpcConn; config: UserDaemonConfig;
@@ -2723,6 +2757,13 @@ proc handleWatchDetach(socket: IpcConn; config: UserDaemonConfig;
   appendWatchEventRecord(config, request.sessionId, event)
   socket.writeFrame(udkWatchEvent, buildEventBody(event))
 
+proc callerCgroupOf(socket: IpcConn): string =
+  ## The cgroup v2 path of the process that sent the request on ``socket``,
+  ## read NOW, while that process is attached and waiting, from the
+  ## kernel's record of the peer -- never from the request, which the caller
+  ## writes. "" where there is none to read (see ``caller_cgroup``).
+  cgroupV2PathOfPid(ipcPeerPid(socket))
+
 proc handleClient(socket: IpcConn; config: UserDaemonConfig; startedAt: Time;
                   generation: string; shuttingDown: var bool;
                   sessions: var seq[UserDaemonSession];
@@ -2786,7 +2827,8 @@ proc handleClient(socket: IpcConn; config: UserDaemonConfig; startedAt: Time;
         foreignEngineDeclineEvent("build", request.runId, request.projectRoot,
           request.publicCliPath, devRestart.runningImagePath, verdict)))
       return
-    handleBuildRequest(socket, config, request, sessions)
+    handleBuildRequest(socket, config, request, sessions,
+      callerCgroupOf(socket))
   of udkWatchStartRequest:
     if devRestart.restartPending:
       socket.writeFrame(udkError, errorBody(
@@ -2807,7 +2849,8 @@ proc handleClient(socket: IpcConn; config: UserDaemonConfig; startedAt: Time;
         foreignEngineDeclineEvent("watch", request.runId, request.projectRoot,
           request.publicCliPath, devRestart.runningImagePath, verdict)))
       return
-    handleWatchStart(socket, config, request, sessions)
+    handleWatchStart(socket, config, request, sessions,
+      callerCgroupOf(socket))
   of udkWatchAttachRequest:
     handleWatchAttach(socket, config, parseWatchSessionRequestBody(frame.body))
   of udkWatchStopRequest:

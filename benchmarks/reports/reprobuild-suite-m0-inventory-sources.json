@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 36,
-    "nimTestBinaries": 3291,
+    "nimTestBinaries": 3293,
     "pureUnitConsolidationGroups": 96,
-    "pureUnitTests": 852,
+    "pureUnitTests": 853,
     "staticallyDetectedRuntimeCompilerFlowTests": 164,
-    "testEntries": 3350
+    "testEntries": 3352
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1859,9 +1859,9 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 29,
-      "integration": 1866,
+      "integration": 1867,
       "platform/destructive": 206,
-      "pure unit": 852,
+      "pure unit": 853,
       "unclassified": 397
     },
     "graphOwnedTestArtifacts": [
@@ -2082,9 +2082,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 3291,
+    "nimTestBinaryCount": 3293,
     "pythonTestFileCount": 59,
-    "testEntryCount": 3350
+    "testEntryCount": 3352
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -18641,6 +18641,24 @@
       "source": "libs/repro_daemon_core/tests/t_daemon_transient_unit_name.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 7,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_daemon_worker_cgroup_placement_decision",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_daemon_core",
+        "repro_test_support"
+      ],
+      "owner": "libs/repro_daemon_core",
+      "requiresReproBinary": false,
+      "source": "libs/repro_daemon_core/tests/t_daemon_worker_cgroup_placement_decision.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 8,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -48305,6 +48323,24 @@
       "source": "tests/integration/t_daemon_accept_loop_survives_probe.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 3,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_daemon_hosted_build_runs_under_the_callers_cgroup",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_daemon_core",
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_daemon_hosted_build_runs_under_the_callers_cgroup.nim",
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 2,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
