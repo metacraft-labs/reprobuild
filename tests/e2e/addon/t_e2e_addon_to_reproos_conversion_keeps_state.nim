@@ -2451,7 +2451,7 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
          $latestPerKey & ", restore epoch " & $restoreEpoch &
          (if progressed: "" else: "\n" & chainStart))
 
-    # --- 5b. §13 decision 194 (the owner's "add a retire step", 2026-11-25):
+    # --- 5b. §13 decision 195 (the owner's "add a retire step", 2026-11-25):
     # after the successful restore, `repro system state retire` removes the
     # marker, every restore requirement and the restore unit, so the profile
     # decision 192 refused above (a drop-in over sshd.service) now applies,
@@ -2487,7 +2487,7 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
         "markerLeft": markerLeft, "unitLeft": unitLeft,
         "manifestKept": manifestKept, "applyExit": sd.exitCode,
         "connected": conn, "ok": retired and applied and conn == "a13-connected"}
-      step("decision 194: after a successful restore, retire removes the " &
+      step("decision 195: after a successful restore, retire removes the " &
            "marker, every restore requirement and the restore unit, and the " &
            "profile decision 192 refused applies with sshd still reachable",
            retired and applied and conn == "a13-connected",
@@ -2505,7 +2505,7 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
         "/system_next.nim --host " & AgentTarget & " --no-preview",
         timeoutSec = 3600)
       let reqsAgain = nw.exec(reqsCmd).stdout.strip()
-      step("decision 194: the protection installed again for the boot-path " &
+      step("decision 195: the protection installed again for the boot-path " &
            "steps (install-unit, then an apply)",
            back1.exitCode == 0 and reinst.exitCode == 0 and
              back2.exitCode == 0 and reqsAgain.len > 0,

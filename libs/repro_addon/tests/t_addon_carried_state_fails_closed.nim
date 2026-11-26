@@ -3427,7 +3427,7 @@ suite "a secret put is a switch for the carried-state check (§13 decision 190)"
     # Control: the user profile alone leaves the consumer unjudged.
     check "a13p.service" notin liveReachUnits(composedLiveProfile("", user), d, root)
 
-suite "carried state is retired once a restore has succeeded (§13 decision 194)":
+suite "carried state is retired once a restore has succeeded (§13 decision 195)":
   # A converted host as install-unit leaves it after a successful restore:
   # the carried directory restored (its receipt), the marker, the restore
   # unit and its link, install-unit's drop-ins, and a generation's.
@@ -3452,7 +3452,7 @@ suite "carried state is retired once a restore has succeeded (§13 decision 194)
      fileExists(root / "etc/systemd/system" / RestoreUnitName),
      requirementDropIns(root).len)
 
-  test "decision 194: a retire refuses without a confirmed restore":
+  test "decision 195: a retire refuses without a confirmed restore":
     # Falsifier: retire-without-confirmed-restore.
     let h = retireHost("r15-ret-unconfirmed", restored = false)
     expect StateSetError:
@@ -3460,7 +3460,7 @@ suite "carried state is retired once a restore has succeeded (§13 decision 194)
     check retireRefusal(h.d, h.root, h.state).startsWith("no confirmed restore of ")
     check protection(h.root, h.d).marker
 
-  test "decision 194: a retire refuses while a switch or a dead full apply is pending":
+  test "decision 195: a retire refuses while a switch or a dead full apply is pending":
     let h = retireHost("r15-ret-pending")
     createDir(parentDir(pendingMarkerPath(h.state)))
     writeFile(pendingMarkerPath(h.state), "")
@@ -3472,7 +3472,7 @@ suite "carried state is retired once a restore has succeeded (§13 decision 194)
     removeFile(h.state / LiveCheckUnitsFile)
     check retireRefusal(h.d, h.root, h.state) == ""
 
-  test "decision 194: a retire removes the marker, the restore unit and every requirement":
+  test "decision 195: a retire removes the marker, the restore unit and every requirement":
     # Falsifier: retire-leaves-requirements (the generation's drop-in stays).
     let h = retireHost("r15-ret-all")
     check protection(h.root, h.d) == (true, true, 2)
@@ -3495,7 +3495,7 @@ suite "carried state is retired once a restore has succeeded (§13 decision 194)
       "  content = \"[Service]\nEnvironment=A=1\n\"\n}\n"), h.d, h.root,
       LiveHost()).len == 0
 
-  test "decision 194: a crash at any step leaves the full protection or none":
+  test "decision 195: a crash at any step leaves the full protection or none":
     # Falsifier: retire-requirements-first (a crash between its first two
     # steps leaves the marker with no requirement: a boot then starts the
     # carried units without waiting for a restore).

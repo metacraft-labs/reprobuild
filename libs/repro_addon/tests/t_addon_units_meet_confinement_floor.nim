@@ -59,6 +59,10 @@ const
     (BootHoldUnit, 10),
     (BootConfirmUnit, 25),
     (SecretsUnit, 25),
+    # A11's egress observer, since the operator's decision of 2026-11-25
+    # ("Include it": G55's scope).
+    (EgressUnit, 32),
+    (EgressCheckUnit, 32),
     ("a9-store.service", 14),
     ("a9-closure.service", 14)]
     ## Each unit's committed exposure, on ``--threshold=``'s scale: the
@@ -132,6 +136,8 @@ proc ownUnits(): seq[(string, string)] =
   let inp = Gen0Inputs(reproExe: ReproExe,
     agent: AgentUnitsInputs(target: "h1",
       sources: @["http://10.0.2.2:8080/h1/latest.rdm"],
+      allowedAddresses: @["10.0.2.2"]),
+    egress: EgressObserverInputs(nft: "/usr/sbin/nft",
       allowedAddresses: @["10.0.2.2"]))
   for o in generation0Objects(inp):
     if o.kind == ookUnit and o.unit.endsWith(".service"):

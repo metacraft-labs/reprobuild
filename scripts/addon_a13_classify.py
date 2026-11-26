@@ -339,7 +339,7 @@ EXPECT.update({
     # requirement is not refused.
     "mutessreq": ("e2e_addon_to_reproos_conversion_keeps_state", "red",
                   "engine build essential-restore-requirement-allowed"),
-    # §13 decision 194 (2026-11-25): a retire leaves a generation's restore
+    # §13 decision 195 (2026-11-25): a retire leaves a generation's restore
     # requirement behind.
     "mutretire": ("e2e_addon_to_reproos_conversion_keeps_state", "red",
                   "engine build retire-leaves-requirements"),
@@ -367,7 +367,7 @@ TARGET.update({
     "mutprefixcall": "round 15: a drop-in on a dashed prefix keeping an instance",
     "mutsecretput": "decision 190 (b): with a generator making the probe root",
     "mutessreq": "decision 192: an apply that would make sshd require",
-    "mutretire": "decision 194: after a successful restore, retire removes",
+    "mutretire": "decision 195: after a successful restore, retire removes",
 })
 
 ROUND4_PROBES = ["account", "timer", "pathfloored", "path", "host"]

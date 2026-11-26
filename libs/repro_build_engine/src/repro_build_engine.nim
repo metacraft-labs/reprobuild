@@ -23819,6 +23819,22 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
   # exactly that reason.
   noteRunQuotaBypassPolicy()
 
+  # THE BYPASS FALLBACK SAYS WHY, ONCE, AND STRICT MODE REFUSES IT. Taking
+  # the fallback because RunQuota could not be used (never an explicitly
+  # selected bypass, which is not a failure) goes through here: an endpoint
+  # that exists and refused this process is named in one warning per engine
+  # run, and `RUNQUOTA_STRICT` fails the build before anything launches
+  # unleased (`runQuotaUnleasedFallback`; RunQuota's clients answer the same).
+  var unleasedFallbackNoted = false
+  proc noteUnleasedFallback(failure: RunQuotaEndpointFailure) =
+    let decision = runQuotaUnleasedFallback(failure)
+    if not decision.run:
+      raise newException(ReproRunQuotaError, decision.message)
+    if decision.message.len > 0 and not unleasedFallbackNoted:
+      unleasedFallbackNoted = true
+      stderr.writeLine(decision.message)
+      stderr.flushFile()
+
   proc launchBypassesRunQuota(): bool =
     if effectiveBypassRunQuota:
       return true
@@ -23826,8 +23842,11 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       return false
     if runQuotaDaemonReachable.isNone:
       let probeStart = statStart()
-      runQuotaDaemonReachable = some(isRunQuotaDaemonReachable())
+      let probe = probeRunQuotaEndpoint()
+      runQuotaDaemonReachable = some(probe.kind == refNone)
       finishStat("repro runquota probe", probeStart)
+      if probe.kind != refNone:
+        noteUnleasedFallback(probe)
     not runQuotaDaemonReachable.get()
 
   proc tryEnsureInlineRunQuotaSession(): bool =
@@ -23851,6 +23870,13 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     except CatchableError as err:
       runQuotaDaemonReachable = some(false)
       if config.fallbackToRunQuotaBypass:
+        let failure =
+          if err of ReproRunQuotaConnectError:
+            (ref ReproRunQuotaConnectError)(err).failure
+          else:
+            RunQuotaEndpointFailure(kind: refOther, errorName: "error",
+              detail: err.msg)
+        noteUnleasedFallback(failure)
         result = false
       else:
         # M9.R.11 — rewrite the raw ``CreateFileW failed for

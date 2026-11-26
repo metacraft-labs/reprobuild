@@ -80,8 +80,9 @@ libs/repro_addon/tests/t_addon_floor_round17.nim	nim	28
 libs/repro_addon/tests/t_addon_floor_round18.nim	nim	8
 libs/repro_addon/tests/t_addon_floor_round19.nim	nim	20
 libs/repro_addon/tests/t_addon_floor_round20.nim	nim	15
-libs/repro_addon/tests/t_addon_floor_round21.nim	nim	22
+libs/repro_addon/tests/t_addon_floor_round21.nim	nim	23
 libs/repro_addon/tests/t_addon_floor_round22.nim	nim	2
+libs/repro_addon/tests/t_addon_floor_round23.nim	nim	3
 libs/repro_addon/tests/t_addon_floor_round3.nim	nim	16
 libs/repro_addon/tests/t_addon_floor_round4.nim	nim	16
 libs/repro_addon/tests/t_addon_floor_round5.nim	nim	17
@@ -2620,6 +2621,7 @@ tests/integration/t_reconcile_restores_explicit_sibling_pins.nim	nim	4
 tests/integration/t_record_store_checkout_declares_the_route_without_migration_warning.nim	nim	4
 tests/integration/t_record_store_preconditions_run_inside_the_lock_update_node.nim	nim	1
 tests/integration/t_records_url_locates_the_lock_record_store.nim	nim	6
+tests/integration/t_refused_runquota_endpoint_warns_or_refuses.nim	nim	3
 tests/integration/t_remedies_quote_paths_for_the_hook_shell.nim	nim	1
 tests/integration/t_remote_alignment_never_strips_a_checkouts_remotes.nim	nim	3
 tests/integration/t_remote_unseal_boot.nim	nim	7
