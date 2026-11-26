@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 36,
-    "nimTestBinaries": 3313,
+    "nimTestBinaries": 3316,
     "pureUnitConsolidationGroups": 97,
     "pureUnitTests": 856,
     "staticallyDetectedRuntimeCompilerFlowTests": 165,
-    "testEntries": 3372
+    "testEntries": 3375
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1873,10 +1873,10 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 30,
-      "integration": 1883,
+      "integration": 1885,
       "platform/destructive": 206,
       "pure unit": 856,
-      "unclassified": 397
+      "unclassified": 398
     },
     "graphOwnedTestArtifacts": [
       {
@@ -2096,9 +2096,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 3313,
+    "nimTestBinaryCount": 3316,
     "pythonTestFileCount": 59,
-    "testEntryCount": 3372
+    "testEntryCount": 3375
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -15006,6 +15006,24 @@
       "source": "libs/repro_bundle/tests/t_repro_bundle_halves.nim",
       "sourceSuiteCount": 19,
       "staticCaseCount": 43,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_cargo_plan",
+      "class": "unclassified",
+      "classificationReason": "mutates the process environment",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_cargo_edge",
+        "repro_core"
+      ],
+      "owner": "libs/repro_cargo_edge",
+      "requiresReproBinary": false,
+      "source": "libs/repro_cargo_edge/tests/t_cargo_plan.nim",
+      "sourceSuiteCount": 3,
+      "staticCaseCount": 8,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -59431,6 +59449,24 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_rqe_cg5_plan_completes_to_cargos_argv",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_cargo_edge",
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_rqe_cg5_plan_completes_to_cargos_argv.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_rqe_cg5_record_mode_compiles_nothing",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -59445,6 +59481,25 @@
       "source": "tests/integration/t_rqe_cg5_record_mode_compiles_nothing.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 3,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_rqe_cg5_record_run_compiles_nothing",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_build_engine",
+        "repro_cargo_edge",
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_rqe_cg5_record_run_compiles_nothing.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

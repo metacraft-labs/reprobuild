@@ -136,3 +136,66 @@ adds the placeholders it wrote, a run the manifest it matched and the lines it
 printed. Use a scratch target directory for a record run, never the project's
 `target/`: the placeholders would enter cargo's freshness state and a later
 real build would trust them.
+
+## The plan: a record run as a graph-production edge
+
+The record run is wrapped in one build-graph edge, `cargo.plan/<workspace>`,
+whose process is `repro-rustc-wrapper --cargo-plan` and whose one output is the
+**plan**: every unit and build-script run cargo would start, with its command
+line, working directory and environment, and the links between them. Nothing is
+compiled and no build script runs.
+
+```sh
+repro-rustc-wrapper --cargo-plan --plan FILE --scratch DIR \
+    --cargo CARGO --rustc RUSTC [--store-root DIR] -- [CARGO ARGS...]
+```
+
+- **The edge.** It runs in the workspace root, monitored, with its inputs
+  checked by content, from a closed environment (the project's development
+  environment and nothing of the engine's own), and with the network denied.
+  It runs after the edges that fetch the workspace's registry crates and
+  declares their store prefixes as inputs. Its argv and its output are
+  relative to the workspace root, so the checkout's path is not on its command
+  line.
+- **Scratch.** The edge has one scratch directory, which the engine empties
+  before the run and never counts as evidence. It holds the recordings, the
+  scratch target directory with its placeholders, the saved `cargo metadata`,
+  and an empty `CARGO_HOME` and `HOME` for cargo; the run refuses to start if
+  the record directory, `CARGO_HOME` or `HOME` there is not empty.
+- **Cargo's run.** `cargo metadata --offline --locked`, then `cargo build
+  --offline --locked -j 1 --target-dir <scratch>/target` with the given
+  arguments. The record wrapper and the compiler are passed as
+  `--config build.rustc-wrapper=…` and `--config build.rustc=…`, so neither
+  reaches a compile's environment as a variable of the run; an environment
+  that sets `RUSTC`, `RUSTC_WRAPPER` or `RUSTC_WORKSPACE_WRAPPER` (or their
+  `CARGO_BUILD_*` forms), which would outrank them, is refused. `-j 1` makes
+  the `NUM_JOBS` a build script receives the same on every host.
+- **Not yet: registry dependencies.** A `Cargo.lock` that holds any package
+  with a `source` is refused: such a package would reach cargo through a
+  source replacement over the fetched store prefixes, which the run does not
+  write yet.
+
+**The derivation** turns the recordings into the plan, reading every link
+from paths cargo wrote: a unit's `--extern` paths name the units it consumes;
+its `OUT_DIR` is the one its package's build-script run received; a run's
+executable lies in the output directory of the build-script compile that
+wrote it; each sentinel names the run that feeds it. Paths under the scratch
+target directory are rewritten into one output directory per unit under the
+`${out}` root, `<package>-<version>-<hash>` with cargo's own
+`-C extra-filename` hash: the unit's `--out-dir`, outputs and incremental
+directory, a run's `OUT_DIR`, and, because every unit has its own directory,
+cargo's one `-L dependency=` (and a `deps` directory on a dynamic-library
+path) becomes one entry per unit of the closure. A sentinel becomes a slot,
+`${slot:<kind>:<run>}`, standing for the whole group of arguments cargo emitted
+for it; a unit with a slot is *fed* by a build-script run and is completed when
+that run's output is known. Environments are stored as the difference from the
+record run's own, without the run's own variables (`RUSTC_WRAPPER` naming the
+record wrapper, `CARGO_MAKEFLAGS`, jobserver descriptors). A path the
+derivation cannot place, a scratch path, or a sentinel left anywhere fails the
+edge.
+
+**The format.** The plan is a fixed-schema binary record: a length-prefixed
+magic (`reprobuild.cargoPlan.v1`), a 16-bit schema version, a 32-bit payload
+length and an SSZ payload (`repro_cargo_edge/cargo_plan`). It is read back by
+the edges built from it; the JSON recordings it was derived from stay inside
+the edge.
