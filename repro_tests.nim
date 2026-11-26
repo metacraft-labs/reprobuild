@@ -24109,6 +24109,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_tests_integration_g03",
     singleReason: ""),
   TestSpec(
+    source: "tests/integration/t_cache_hits_are_not_held_behind_launch_capacity.nim",
+    binary: "build/test-bin/t_cache_hits_are_not_held_behind_launch_capacity",
+    defines: @[],
+    requiresReproBinary: true,
+    requiresMonitorShim: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "",
+    singleReason: "self-spawn marker isMainModule"),
+  TestSpec(
     source: "tests/integration/t_cache_key_separates_v2_and_v3_artifacts.nim",
     binary: "build/test-bin/t_cache_key_separates_v2_and_v3_artifacts",
     defines: @[],
