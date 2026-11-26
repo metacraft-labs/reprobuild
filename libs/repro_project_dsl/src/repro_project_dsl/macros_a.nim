@@ -1892,6 +1892,7 @@ proc zigCrossAutoInjectShellTools(pkg: var PackageDef) =
   for tool in ["sh", "install-file"]:
     if tool in declared:
       continue
+    pkg.generatedDeps.add("native\x00" & tool)
     pkg.nativeBuildDeps.add(PackageUseDef(
       rawConstraint: tool,
       packageSelector: tool,
@@ -1959,6 +1960,7 @@ proc m9r15pAutoInjectQt6Transitive(pkg: var PackageDef) =
     elif name == "mesa":
       hasMesa = true
   if not hasXkb:
+    pkg.generatedDeps.add("build\x00libxkbcommon >=1.5")
     pkg.toolUses.add(PackageUseDef(
       rawConstraint: "libxkbcommon >=1.5",
       packageSelector: "libxkbcommon",
@@ -1969,6 +1971,7 @@ proc m9r15pAutoInjectQt6Transitive(pkg: var PackageDef) =
       gateVariant: "",
       gateValue: ""))
   if not hasMesa:
+    pkg.generatedDeps.add("build\x00mesa >=23.3")
     pkg.toolUses.add(PackageUseDef(
       rawConstraint: "mesa >=23.3",
       packageSelector: "mesa",

@@ -51,6 +51,7 @@ package consumer:
   defaultToolProvisioning "path"
   uses:
     "sh"
+    "mkdir"
     "brokenbody"
   build:
     let stamp = shell(

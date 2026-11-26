@@ -1,6 +1,7 @@
 ## The managed `pre-commit` hook never moves a committed `repro.lock` pin
-## BACKWARD silently (Unified-Locking-And-Hooks.md §13.3, "A pin never moves
-## backward silently").
+## BACKWARD silently, and keeps such a pin rather than refusing the commit
+## (Unified-Locking-And-Hooks.md §13.3, "A pin never moves backward silently"
+## and "What 'backward' is judged against").
 ##
 ## WHY. The hook re-pins each sibling of a committed `repro.lock` from the
 ## checkout beside the repo. A sibling BEHIND its pin almost always means a
@@ -8,8 +9,14 @@
 ## checkout is old" into "the published lock is old" for every consumer. The
 ## hook therefore relates the observed revision to the pinned one in the
 ## sibling's own history: ahead advances; behind, diverged, or a pinned commit
-## absent from the checkout (unprovable) refuses the commit unless the
-## committer names the sibling in `REPRO_ALLOW_PIN_REGRESSION` for that commit.
+## absent from the checkout (unprovable) KEEPS the pin — the entry is
+## committed exactly as the lock records it, one notice names the remedies,
+## and the commit proceeds — unless the committer names the sibling in
+## `REPRO_ALLOW_PIN_REGRESSION` for that commit, which records the checkout.
+## Backward is a property of the commit, not of a checkout: the hook used to
+## refuse these commits, which made a repository whose lock is ahead of a
+## shared workspace root's checkouts uncommittable from that root
+## (`t_commit_keeps_a_lock_ahead_of_the_shared_siblings` reproduces that).
 ##
 ## Fixture: `committed_lock_siblings_fixture.nim` — a real manifest workspace
 ## (app → lib-b → lib-c, lib-d unrelated) of real git repositories cloned from
@@ -23,36 +30,38 @@
 ## `git commit --amend`, `git rebase -i` or `git cherry-pick` produced.
 ##
 ## Cases:
-##   * an ahead sibling still advances, with no refusal;
-##   * a behind sibling refuses the commit (nonzero exit, HEAD and the lock —
-##     working tree and index — untouched) with a message naming the sibling,
-##     the relation, the distance, both revisions, a forward command and the
-##     variable; the named `git log` lists exactly what would be dropped, and
-##     the named forward command really brings the checkout forward, after
-##     which the same commit proceeds;
+##   * an ahead sibling still advances, with no notice;
+##   * a behind sibling keeps its pin: the commit is made, the committed lock
+##     is byte-identical to the parent's and nothing is left modified, and the
+##     notice names the sibling, the relation, the distance, both revisions, a
+##     forward command and the variable, and is logged as `repro-lock
+##     kept-pin:`; the named forward command really brings the checkout
+##     forward, after which the next commit is at the pin;
 ##   * the behind sibling named in `REPRO_ALLOW_PIN_REGRESSION` commits the
 ##     older pin, and the regression is printed and logged with both revisions;
-##   * the variable naming a DIFFERENT sibling still refuses, with a note;
+##   * the variable naming a DIFFERENT sibling keeps the pin, with a note;
 ##   * the variable naming a sibling that is not regressing passes with a note
 ##     (and a wildcard value is reported, never matched);
-##   * a diverged sibling refuses, naming `repro ws sync <project>`, which
-##     resolves to a plan that covers the sibling;
-##   * a pinned commit absent from the checkout refuses and names a fetch;
-##     after the named fetch the same sibling classifies as behind;
+##   * a diverged sibling keeps its pin, naming `repro ws sync <project>`,
+##     which resolves to a plan that covers the sibling;
+##   * a pinned commit absent from the checkout keeps its pin and names a
+##     fetch; after the named fetch the same sibling classifies as behind;
 ##   * a commit made while a rebase is stopped, and one concluding a
-##     conflicted cherry-pick, stand down — a behind sibling refuses neither;
+##     conflicted cherry-pick, stand down — the lock is not touched;
 ##   * `git commit --amend` is idempotent: over unmoved siblings the lock is
 ##     byte- and mtime-identical, and after an allowed regression the amend
 ##     needs no variable and announces nothing.
 ##
-## Falsifiability (observed at the base commit this change was written on):
-## the refusal, allowance, note and diverged/unprovable cases fail there — the
-## hook re-pins every sibling to its HEAD, backward included, and exits 0. The
-## ahead, stand-down and amend cases are guards on behaviour this change must
-## keep; each was shown to go red under a targeted mutation of the new code:
-## ahead siblings left alone (the ahead case), the stand-down disabled (the
-## rebase and cherry-pick cases), and the lock rewritten when no byte changed
-## (the amend case).
+## Falsifiability: at the base commit the keep-instead-of-refuse change was
+## written on, the behind, other-sibling, diverged and unprovable cases fail —
+## the hook refuses each commit ("would move N pinned sibling revision(s)
+## BACKWARD"). At the base commit the regression rule itself was written on,
+## the allowance, note and diverged/unprovable cases failed — the hook
+## re-pinned every sibling to its HEAD, backward included. The ahead,
+## stand-down and amend cases are guards on behaviour these changes keep; each
+## was shown to go red under a targeted mutation: ahead siblings left alone
+## (the ahead case), the stand-down disabled (the rebase and cherry-pick
+## cases), and the lock rewritten when no byte changed (the amend case).
 ##
 ## NO MOCKS. The one arrangement is writing the hook file by hand instead of
 ## `repro hooks ensure --vcs`, for the PATH reason above; its body is the
@@ -183,13 +192,14 @@ suite "pre-commit never moves a repro.lock pin backward silently":
       check pinOf(s.fx.git(s.fx.app, "show HEAD:repro.lock"), "lib-b") ==
         next
       check "REFUSED" notin c.output
+      check "kept" notin c.output
       check "allowed pin regression" notin c.output
 
-  test "t_a_behind_sibling_refuses_the_commit_and_names_the_remedies":
+  test "t_a_behind_sibling_keeps_its_pin_and_names_the_remedies":
     if findExe("git").len == 0:
       skip("git is not on PATH; every fixture here is a real git repository")
     else:
-      var s = startPinnedAtNewest("behind-refused")
+      var s = startPinnedAtNewest("behind-kept")
       defer: removeDir(s.fx.scratch)
       let fx = s.fx
       let observed = s.rewindLibB(2)
@@ -200,57 +210,49 @@ suite "pre-commit never moves a repro.lock pin backward silently":
       let c = fx.tryCommit("work-against-a-stale-lib-b")
       checkpoint(c.output)
       checkpoint("pre-commit log:\n" & fx.preCommitLog())
-      # The commit is refused, and refused cleanly: no new commit, the lock
-      # untouched in the working tree and not staged.
-      check c.code != 0
-      check fx.headOf(fx.app) == headBefore
+      # The commit is made, and the lock it carries is the parent's, byte for
+      # byte; nothing is left modified or staged.
+      check c.code == 0
+      check "REFUSED" notin c.output
+      check fx.git(fx.app, "rev-parse HEAD~1").strip() == headBefore
+      check fx.git(fx.app, "show HEAD:repro.lock") == lockBefore
       check readFile(fx.app / "repro.lock") == lockBefore
-      check fx.git(fx.app, "diff --cached --name-only").strip() ==
-        "work-against-a-stale-lib-b.txt"
-      check pinOf(readFile(fx.app / "repro.lock"), "lib-b") == s.pinned
+      check fx.git(fx.app, "status --porcelain").strip().len == 0
+      check pinOf(fx.git(fx.app, "show HEAD:repro.lock"), "lib-b") == s.pinned
 
-      # It names the sibling, the relation and distance, both revisions, the
-      # variable, and when using the variable is and is not appropriate.
-      let headline = lineWith(c.output, "repro.lock sibling 'lib-b'",
-        "behind by 2 commit(s)")
-      checkpoint("headline: " & headline)
-      check headline.len > 0
-      check s.pinned in headline
-      check observed in headline
-      check (AllowEnv & "=lib-b git commit") in c.output
-      check "reverting a dependency upgrade" in c.output
-      check "bisecting" in c.output
-      check "another branch" in c.output
-      check "rewritten" in c.output
-      check "have not pulled" in c.output
-      check "refused-pin-regression" in fx.preCommitLog()
+      # One notice names the sibling, the relation and distance, both
+      # revisions, that the pin was kept, and the variable; it is logged.
+      let notice = lineWith(c.output, "repro pre-commit: ",
+        "repro.lock sibling 'lib-b'", "behind by 2 commit(s)")
+      checkpoint("notice: " & notice)
+      check notice.len > 0
+      check s.pinned in notice
+      check observed in notice
+      check "kept" in notice
+      check "commit proceeds" in notice
+      check (AllowEnv & "=lib-b git commit --amend --no-edit") in notice
+      check lineWith(fx.preCommitLog(), "repro-lock kept-pin:", "lib-b",
+        s.pinned, observed).len > 0
+      check "refused-pin-regression" notin fx.preCommitLog()
 
-      # The named `git log` lists exactly the commits the lock would drop.
-      let dropLine = lineWith(c.output, "would drop from the published lock")
-      let dropCmds = backticked(dropLine)
-      check dropCmds.len == 1
-      if dropCmds.len == 1:
-        let dropped = fx.runNamed(dropCmds[0], fx.app)
-        checkpoint("ran `" & dropCmds[0] & "`:\n" & dropped.output)
-        check dropped.code == 0
-        check dropped.output.strip().splitLines().len == 2
-
-      # The forward command runs where the message is printed and brings the
-      # checkout up to the pin; the same commit then proceeds.
-      let forwardLine = lineWith(c.output, "bring the checkout forward")
-      let forward = backticked(forwardLine)
-      checkpoint("forward line: " & forwardLine)
-      check forward.len == 1
-      if forward.len == 1:
+      # The forward command runs where the notice is printed and brings the
+      # checkout up to the pin; the next commit is then at the pin, with no
+      # notice.
+      let forward = backticked(notice)
+      checkpoint("commands: " & $forward)
+      check forward.len == 3
+      if forward.len == 3:
         check "merge --ff-only" in forward[0]
+        check forward[1].startsWith("repro ws sync app ")
+        check forward[2] == AllowEnv & "=lib-b git commit --amend --no-edit"
         let ran = fx.runNamed(forward[0], fx.app)
         checkpoint("ran `" & forward[0] & "`:\n" & ran.output)
         check ran.code == 0
         check fx.headOf(s.libB) == s.pinned
-        let again = runCmd(fx.gitCmd(fx.app, "commit -m " &
-          q("work-after-bringing-lib-b-forward")))
+        let again = fx.tryCommit("work-after-bringing-lib-b-forward")
         checkpoint(again.output)
         check again.code == 0
+        check "kept" notin again.output
         check pinOf(fx.git(fx.app, "show HEAD:repro.lock"), "lib-b") ==
           s.pinned
 
@@ -282,7 +284,7 @@ suite "pre-commit never moves a repro.lock pin backward silently":
       check ("from " & s.pinned & " to " & observed) in logged
       check "REFUSED" notin c.output
 
-  test "t_the_variable_naming_another_sibling_still_refuses":
+  test "t_the_variable_naming_another_sibling_keeps_the_pin":
     if findExe("git").len == 0:
       skip("git is not on PATH; every fixture here is a real git repository")
     else:
@@ -291,13 +293,15 @@ suite "pre-commit never moves a repro.lock pin backward silently":
       let fx = s.fx
       discard s.rewindLibB(1)
       let headBefore = fx.headOf(fx.app)
+      let lockBefore = readFile(fx.app / "repro.lock")
       let c = fx.tryCommit("allowing-the-wrong-sibling", allow = "lib-c")
       checkpoint(c.output)
-      check c.code != 0
-      check fx.headOf(fx.app) == headBefore
+      check c.code == 0
+      check fx.git(fx.app, "rev-parse HEAD~1").strip() == headBefore
+      check fx.git(fx.app, "show HEAD:repro.lock") == lockBefore
       check pinOf(readFile(fx.app / "repro.lock"), "lib-b") == s.pinned
       check lineWith(c.output, "repro.lock sibling 'lib-b'",
-        "behind by 1 commit(s)").len > 0
+        "behind by 1 commit(s)", "kept").len > 0
       check lineWith(c.output, AllowEnv & " names 'lib-c'",
         "does not move backward").len > 0
 
@@ -322,11 +326,11 @@ suite "pre-commit never moves a repro.lock pin backward silently":
       check lineWith(fx.preCommitLog(), "note", "'lib-c'").len > 0
       check "allowed pin regression" notin c.output
 
-  test "t_a_diverged_sibling_refuses_the_commit":
+  test "t_a_diverged_sibling_keeps_its_pin":
     if findExe("git").len == 0:
       skip("git is not on PATH; every fixture here is a real git repository")
     else:
-      var s = startPinnedAtNewest("diverged-refused")
+      var s = startPinnedAtNewest("diverged-kept")
       defer: removeDir(s.fx.scratch)
       let fx = s.fx
       # lib-b leaves the pin's line: one commit back, then a local commit the
@@ -337,32 +341,33 @@ suite "pre-commit never moves a repro.lock pin backward silently":
       discard fx.git(s.libB, "commit -q -m fork")
       let observed = fx.headOf(s.libB)
       let headBefore = fx.headOf(fx.app)
+      let lockBefore = readFile(fx.app / "repro.lock")
       let c = fx.tryCommit("work-on-a-forked-lib-b")
       checkpoint(c.output)
-      check c.code != 0
-      check fx.headOf(fx.app) == headBefore
+      check c.code == 0
+      check fx.git(fx.app, "rev-parse HEAD~1").strip() == headBefore
+      check fx.git(fx.app, "show HEAD:repro.lock") == lockBefore
       check pinOf(readFile(fx.app / "repro.lock"), "lib-b") == s.pinned
       let headline = lineWith(c.output, "repro.lock sibling 'lib-b'",
-        "diverged: 1 and 1 commits apart")
+        "diverged: 1 and 1 commits apart", "kept")
       checkpoint("headline: " & headline)
       check headline.len > 0
       check s.pinned in headline
       check observed in headline
       # The forward command is `repro ws sync <project>`, and it resolves: its
       # dry run plans lib-b.
-      let forward = backticked(lineWith(c.output,
-        "bring the checkout forward"))
-      checkpoint("forward: " & $forward)
-      check forward.len == 1
-      if forward.len == 1:
+      let forward = backticked(headline)
+      checkpoint("commands: " & $forward)
+      check forward.len == 2
+      if forward.len == 2:
+        check forward[1] == AllowEnv & "=lib-b git commit --amend --no-edit"
         check forward[0].startsWith("repro ws sync app ")
         let plan = fx.runNamed(forward[0] & " --dry-run --json", fx.app)
         checkpoint("dry run:\n" & plan.output)
         check plan.code == 0
         check "\"lib-b\"" in plan.output
       # …and the deliberate course works for a diverged sibling too.
-      let allowed = runCmd(fx.gitCmd(fx.app, "commit -m " &
-        q("track-the-forked-lib-b"), allow = "lib-b"))
+      let allowed = fx.tryCommit("track-the-forked-lib-b", allow = "lib-b")
       checkpoint(allowed.output)
       check allowed.code == 0
       check pinOf(fx.git(fx.app, "show HEAD:repro.lock"), "lib-b") ==
@@ -370,11 +375,11 @@ suite "pre-commit never moves a repro.lock pin backward silently":
       check lineWith(allowed.output, "allowed pin regression",
         "diverged").len > 0
 
-  test "t_a_pinned_commit_absent_from_the_checkout_refuses_and_names_a_fetch":
+  test "t_a_pinned_commit_absent_from_the_checkout_keeps_its_pin_and_names_a_fetch":
     if findExe("git").len == 0:
       skip("git is not on PATH; every fixture here is a real git repository")
     else:
-      var s = startPinnedAtNewest("unprovable-refused")
+      var s = startPinnedAtNewest("unprovable-kept")
       defer: removeDir(s.fx.scratch)
       let fx = s.fx
       # Somebody else publishes a newer lib-b and a lock pinning it; this
@@ -405,33 +410,36 @@ suite "pre-commit never moves a repro.lock pin backward silently":
         absent & "^{commit}").code != 0
 
       let headBefore = fx.headOf(fx.app)
+      let lockBefore = readFile(fx.app / "repro.lock")
       let c = fx.tryCommit("work-without-fetching-lib-b")
       checkpoint(c.output)
-      check c.code != 0
-      check fx.headOf(fx.app) == headBefore
+      check c.code == 0
+      check fx.git(fx.app, "rev-parse HEAD~1").strip() == headBefore
+      check fx.git(fx.app, "show HEAD:repro.lock") == lockBefore
       check pinOf(readFile(fx.app / "repro.lock"), "lib-b") == absent
       let headline = lineWith(c.output, "repro.lock sibling 'lib-b'",
-        "pinned commit " & absent & " not present in")
+        "pinned commit " & absent & " not present in", "kept")
       checkpoint("headline: " & headline)
       check headline.len > 0
-      let fetchLine = lineWith(c.output, "fetch it so the direction can be " &
-        "decided")
-      let fetch = backticked(fetchLine)
-      check fetch.len == 1
-      if fetch.len == 1:
+      check "fetch it so the direction can be decided" in headline
+      check (AllowEnv & "=lib-b git commit --amend --no-edit") in headline
+      let fetch = backticked(headline)
+      checkpoint("commands: " & $fetch)
+      check fetch.len == 3
+      if fetch.len == 3:
         check "fetch" in fetch[0]
         let ran = fx.runNamed(fetch[0], fx.app)
         checkpoint("ran `" & fetch[0] & "`:\n" & ran.output)
         check ran.code == 0
         check runCmd(q(fx.gitBin) & " -C " & q(s.libB) & " cat-file -e " &
           absent & "^{commit}").code == 0
-        # Now the direction is decidable: behind by one, still refused.
-        let again = runCmd(fx.gitCmd(fx.app, "commit -m " &
-          q("work-after-fetching-lib-b")))
+        # Now the direction is decidable: behind by one, still kept.
+        let again = fx.tryCommit("work-after-fetching-lib-b")
         checkpoint(again.output)
-        check again.code != 0
+        check again.code == 0
         check lineWith(again.output, "repro.lock sibling 'lib-b'",
-          "behind by 1 commit(s)").len > 0
+          "behind by 1 commit(s)", "kept").len > 0
+        check pinOf(fx.git(fx.app, "show HEAD:repro.lock"), "lib-b") == absent
 
   test "t_a_rebase_stopped_for_editing_stands_down":
     if findExe("git").len == 0:

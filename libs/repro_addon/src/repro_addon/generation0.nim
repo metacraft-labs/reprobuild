@@ -231,6 +231,21 @@ const
     ## each entry through descriptors that follow no link and hand it to
     ## that user (``record_dir.writeDelegatedEntry``). A root reader takes
     ## only entry names from it, never their bytes (§13 decision 181).
+  LegacyOutboxPath* = EvidenceDirPath & "/outbox"
+    ## Where the outbox was before §13 decision 181: root's, under the
+    ## evidence directory. A host an engine before it bootstrapped still has
+    ## its queued records there, and an engine unit not yet re-pointed may
+    ## still write there; the privileged harvest moves them into the dynamic
+    ## user's outbox (``evidence_ship.moveLegacyShipState``, the owner's
+    ## decision of 2026-11-26).
+  LegacyShipStateNames* = ["receipt", "last-ship", "last-heartbeat",
+                           "ship-failures", "ship-broken"]
+    ## The shipping state that was in ``EvidenceStateDir`` before decision
+    ## 181 and is in the dynamic user's state directory since: the sink's
+    ## last receipt, the shipping and heartbeat times, the backoff count and
+    ## the last broken-credential report. The apt hook harvest's cursor
+    ## (``apt-hook.cursor``) and the sink credential stay in
+    ## ``EvidenceStateDir``, where root keeps reading them.
   EgressDropDir* = EvidenceDirPath & "/egress-drop"
     ## The egress check's sink-form entries (§13 decision 188): a root-owned
     ## directory inside the root-only evidence directory, which the check

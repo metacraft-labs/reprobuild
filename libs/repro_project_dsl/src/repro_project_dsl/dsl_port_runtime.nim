@@ -6179,6 +6179,23 @@ var dslPortGeneratedToolDeps {.threadvar.}: Table[string, seq[string]]
   ## Same ``packageName & '\x00' & kind`` key encoding as
   ## ``dslPortPackageDeps``, and the same ``threadvar`` lifetime.
 
+var dslPortWorkspaceSiblingDeps {.threadvar.}: Table[string, seq[string]]
+  ## Per package, the bare selectors of its ``uses:`` / ``nativeBuildDeps:``
+  ## entries that name a workspace sibling PROJECT (a directory of that name
+  ## beside the recipe's repository, or beside a farther ancestor, holding a
+  ## ``repro.nim``). The ``package`` macro records them while it expands
+  ## (``registerWorkspaceSiblingDep``), using the rule it already applies to
+  ## import a sibling producer's schema.
+  ##
+  ## Such an entry is a SOURCE the package consumes -- a library whose root
+  ## reaches ``repro.paths``, or a producer whose outputs only an edge that
+  ## names it may admit (Cross-Repo-Source-Consumption.md §4.2b.3) -- not a
+  ## tool on the caller's ``PATH``, so ``packageShellToolRefs`` leaves it
+  ## out. Folding it in made a library-only sibling such as ``isonim`` a
+  ## tool reference of every ``shell(...)`` edge of its consumer, and
+  ## path-mode tool resolution then refused the build because no
+  ## executable of that name exists.
+
 proc m9r1PackageDepsKey(packageName, kind: string): string {.inline.} =
   ## Compose the ``(packageName, kind)`` registry key. Symmetric with
   ## ``m9iFlagSetKey`` (M9.I) — both pin the ``\x00`` separator so the
@@ -6193,6 +6210,19 @@ proc resetDslPortPackageDepsState*() =
   ## ``resetDslPortFetchState``.
   dslPortPackageDeps.clear()
   dslPortGeneratedToolDeps.clear()
+  dslPortWorkspaceSiblingDeps.clear()
+
+proc registerWorkspaceSiblingDep*(packageName, selector: string) =
+  ## Record that ``packageName``'s dependency ``selector`` names a workspace
+  ## sibling project (``dslPortWorkspaceSiblingDeps``). Idempotent; an empty
+  ## argument is ignored. Emitted by the ``package`` macro beside the
+  ## entry's ``registerPackageDep`` call.
+  if packageName.len == 0 or selector.len == 0:
+    return
+  if packageName notin dslPortWorkspaceSiblingDeps:
+    dslPortWorkspaceSiblingDeps[packageName] = @[]
+  if selector notin dslPortWorkspaceSiblingDeps[packageName]:
+    dslPortWorkspaceSiblingDeps[packageName].add(selector)
 
 proc registerPackageDep*(packageName, kind, constraint: string) =
   ## Append ``constraint`` to the ``(packageName, kind)`` row. ``kind``
@@ -6624,6 +6654,82 @@ proc dslPortStripDepConstraint(value: string): string =
         ch == '~' or ch == '^':
       return value[0 ..< i]
   value
+
+type
+  PackageShellToolRefs* = object
+    ## The tool references a ``shell`` edge takes from its package's
+    ## declaration (``packageShellToolRefs``), split by the list each came
+    ## from so the caller can classify them by platform role.
+    native*: seq[string]
+      ## ``nativeBuildDeps:`` entries: BUILD-platform tools.
+    build*: seq[string]
+      ## ``uses:`` / ``buildDeps:`` entries: HOST-platform dependencies.
+
+proc packageShellToolRefs*(packageName: string): PackageShellToolRefs =
+  ## The bare selectors of the entries ``packageName``'s RECIPE wrote in
+  ## ``nativeBuildDeps:`` and ``uses:`` / ``buildDeps:``, each list in
+  ## declaration order, version ranges stripped, duplicates (within and
+  ## across the two lists) dropped.
+  ##
+  ## Hermetic-Builds-And-Path-Independence.md §"Shell edges declare their
+  ## package's tools": a ``shell`` edge runs an arbitrary command line and
+  ## cannot name its tools the way a typed tool call does, so it declares
+  ## the tools its package names. Without that the edge declared nothing,
+  ## inherited the caller's ``PATH``, and ran the host's compilers under
+  ## ``--tool-provisioning=nix`` while reporting success.
+  ##
+  ## Three things are deliberately left out:
+  ##
+  ## * ``runtimeDeps:`` -- what the package's CONSUMERS need at run time,
+  ##   not what its build runs.
+  ## * entries that name a workspace sibling project
+  ##   (``registerWorkspaceSiblingDep``): a source the package consumes,
+  ##   not a tool; an edge that runs a sibling's executable names it.
+  ## * entries reprobuild's own emitters added (``registerGeneratedToolDep``:
+  ##   the install-mirror and source-fetch scripts' ``rm``, ``mkdir``,
+  ##   ``cp``, ``patchelf``, ...). Those are what GENERATED scripts run, and
+  ##   the edges that run those scripts name them. Folding them into a
+  ##   recipe's shell edge would put two dozen tools on its ``PATH`` that
+  ##   the recipe never named, which hides exactly the missing declarations
+  ##   the hermetic ``PATH`` exists to surface. Measured on a two-entry
+  ##   ``uses:`` under ``--tool-provisioning=path``: 23 selected tool
+  ##   identities with them, 3 without.
+  proc authored(kind: string): seq[string] =
+    let key = m9r1PackageDepsKey(packageName, kind)
+    if key notin dslPortPackageDeps:
+      return @[]
+    let generated =
+      if key in dslPortGeneratedToolDeps: dslPortGeneratedToolDeps[key]
+      else: @[]
+    for constraint in dslPortPackageDeps[key]:
+      if constraint notin generated:
+        result.add(constraint)
+
+  var seen: seq[string] =
+    if packageName in dslPortWorkspaceSiblingDeps:
+      dslPortWorkspaceSiblingDeps[packageName]
+    else: @[]
+  for raw in authored("native"):
+    let dep = dslPortStripDepConstraint(raw)
+    if dep.len > 0 and dep notin seen:
+      seen.add(dep)
+      result.native.add(dep)
+  for raw in authored("build"):
+    let dep = dslPortStripDepConstraint(raw)
+    if dep.len > 0 and dep notin seen:
+      seen.add(dep)
+      result.build.add(dep)
+
+proc activeShellPackageName*(): string =
+  ## The package whose ``build:`` body is running, as ``shell(...)``
+  ## attributes it: the M4 build-context stack first, then the M5
+  ## ``activeBuilds`` stack (the legacy ``buildXxxPackage*()`` path runs
+  ## the body without M4 frames). Empty outside any build body.
+  result = currentBuildPackage()
+  if result.len == 0:
+    let m5 = tryCurrentBuildState()
+    if m5 != nil:
+      result = m5.packageName
 
 proc dslPortCustomShellToolIdentityRefs*(packageName: string):
     seq[string] {.dynOrStatic.} =

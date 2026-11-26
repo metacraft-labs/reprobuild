@@ -2235,7 +2235,7 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
         # is an alias of the running ssh.service, and systemd will not
         # start a socket whose service is already active.
         discard nw.run("printf '[Unit]\\nDescription=A13 round-15 probe: the " &
-          "dummy listener's own service\\n[Service]\\nExecStart=/bin/true\\n' > " &
+          "dummy listener, its own service\\n[Service]\\nExecStart=/bin/true\\n' > " &
           "/etc/systemd/system/a13r15-sshd-dummy.service && " &
           "printf '[Unit]\\nDescription=A13 round-14 probe: an " &
           "essential name, a dummy listener\\n[Socket]\\nListenStream=" &

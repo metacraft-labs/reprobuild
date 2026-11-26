@@ -63,6 +63,7 @@ package actionOutputProbe:
 
   uses:
     "sh"
+    "mkdir"
 
   build:
     let chatty = shell(
