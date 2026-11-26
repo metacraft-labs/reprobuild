@@ -102,6 +102,7 @@ import repro_core/tree_removal
 import repro_core/case_folding
 import repro_core/canonical_work_dir
 import repro_core/source_root
+from repro_core/scratch_env import fingerprintedEnvValue
 import repro_core/arg_files
 import repro_core/target_object_check
 from repro_core/path_identity import resolveExistingTraversal, prsResolved
@@ -13445,7 +13446,11 @@ proc actionEnvResolver*(action: BuildAction;
     env = action.env
   result = proc(name: string): tuple[present: bool, value: string]
       {.gcsafe, raises: [].} =
-    lookupEnv(env, name)
+    # Every key and every lookup reads the environment through here, so a
+    # `nix print-dev-env` session directory is spelled the same way on both
+    # sides (`repro_core/scratch_env.fingerprintedEnvValue`).
+    let (present, value) = lookupEnv(env, name)
+    (present, fingerprintedEnvValue(name, value))
 
 proc cacheEnvInputs*(action: BuildAction; evidence: PathSetEvidence;
                      config: ptr BuildEngineConfig = nil): seq[EnvFingerprint] =

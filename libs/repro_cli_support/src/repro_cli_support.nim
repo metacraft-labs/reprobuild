@@ -12760,9 +12760,43 @@ proc recipeRelativeProviderLocationBound(outputDir: string): bool =
   except IOError, OSError:
     true
 
+proc cacheAttributionLines*(item: ActionResult): seq[string]
+
+type ProviderCompileEdgeObserver* =
+  proc (edge: string; run: BuildRunResult) {.closure.}
+  ## Sees each engine run of a provider-compile edge, named
+  ## `ProviderCompileRecipeRelativeEdge` or `ProviderCompileLocationBoundEdge`.
+
+const
+  ProviderCompileRecipeRelativeEdge* = "recipe-relative"
+  ProviderCompileLocationBoundEdge* = "location-bound"
+
+proc providerCompileEdgeLines*(edge: string; run: BuildRunResult): seq[string] =
+  ## The diagnostics for ONE engine run of a provider-compile edge: which
+  ## edge, how it settled and, when it compiled, why the cache did not serve
+  ## it (`cacheAttributionLines`: `cache-miss:` and `cache-publish-skipped:`).
+  ##
+  ## WHY PER EDGE. One provider compile can run two edges, the recipe-relative
+  ## one and then, when its binary is location-bound, a compile at this
+  ## location. The `providerCompileAction` line describes only the last engine
+  ## consultation of the invocation, which is a hit whenever an earlier one
+  ## did the work, and no line named either edge's miss: a re-run that
+  ## compiled both edges again for ten minutes logged `cache=cdHit
+  ## reason=outputs-present` and nothing else (reprobuild-specs issue
+  ## 2026-11-26-a-second-build-in-the-same-checkout-compiles-the-provider-
+  ## again-on-both-edges).
+  for item in run.results:
+    if item.id != ProviderCompileActionId:
+      continue
+    result.add("providerCompileEdge: " & edge & " status=" & $item.status &
+      " launched=" & $item.launched & " cache=" & $item.cacheDecision &
+      (if item.reason.len > 0: " reason=" & item.reason else: ""))
+    result.add(cacheAttributionLines(item))
+
 proc runProviderCompileEdge(plan: ProviderCompilePlan;
     modulePath, interfacePath, artifactPath, helperCliPath, workDir,
-    scratchDir, providerRoot: string; config: BuildEngineConfig):
+    scratchDir, providerRoot: string; config: BuildEngineConfig;
+    observeEdge: ProviderCompileEdgeObserver = nil):
     BuildRunResult =
   ## Run the provider-compile edge for `plan` (the caller's plan: its binary
   ## and artifact paths are the caller's) and leave the caller's binary,
@@ -12773,9 +12807,12 @@ proc runProviderCompileEdge(plan: ProviderCompilePlan;
   let edge = planRecipeRelativeProviderCompile(plan, modulePath,
     helperCliPath, workDir, providerRoot)
   if not edge.active:
-    return runBuild(graph([providerCompileBuildAction(plan, modulePath,
+    result = runBuild(graph([providerCompileBuildAction(plan, modulePath,
       interfacePath, artifactPath, helperCliPath, workDir, scratchDir)]),
       config)
+    if observeEdge != nil:
+      observeEdge(ProviderCompileLocationBoundEdge, result)
+    return
   # Every copy of the recipe shares the identity's directories; hold them
   # from before execution until this caller has its own copy.
   var locationBound = false
@@ -12785,6 +12822,8 @@ proc runProviderCompileEdge(plan: ProviderCompilePlan;
       resetRecipeCompileStaging(edge.identityDir)
     result = runBuild(graph([recipeRelativeProviderCompileAction(edge,
       modulePath, helperCliPath, workDir)]), config)
+    if observeEdge != nil:
+      observeEdge(ProviderCompileRecipeRelativeEdge, result)
     # The outputs are in the hit or published record's computation
     # directory, or still in `staging/` when nothing was published.
     let outputDir = recipeCompileOutputDirOf(result, ProviderCompileActionId,
@@ -12808,11 +12847,14 @@ proc runProviderCompileEdge(plan: ProviderCompilePlan;
     result = runBuild(graph([providerCompileBuildAction(plan, modulePath,
       interfacePath, artifactPath, helperCliPath, workDir, scratchDir)]),
       config)
+    if observeEdge != nil:
+      observeEdge(ProviderCompileLocationBoundEdge, result)
 
 proc runVerifiedProviderCompileEdge(plan: ProviderCompilePlan;
     modulePath, interfacePath, artifactPath, helperCliPath, workDir,
     scratchDir, providerRoot: string; config: BuildEngineConfig;
-    observe: proc (run: BuildRunResult) {.closure.} = nil):
+    observe: proc (run: BuildRunResult) {.closure.} = nil;
+    observeEdge: ProviderCompileEdgeObserver = nil):
     tuple[run: BuildRunResult, consistency: ProviderCompileConsistency] =
   ## `runProviderCompileEdge`, then the post-execution check of what it left
   ## (`verifyProviderCompileEdge`): an artifact that was SERVED and describes
@@ -12826,7 +12868,7 @@ proc runVerifiedProviderCompileEdge(plan: ProviderCompilePlan;
     edgeConfig.forceRebuild = edgeConfig.forceRebuild or forceRebuild
     let run = runProviderCompileEdge(plan, modulePath, interfacePath,
       artifactPath, helperCliPath, workDir, scratchDir, providerRoot,
-      edgeConfig)
+      edgeConfig, observeEdge)
     lastRun = run
     if observe != nil:
       observe(run)
@@ -15688,7 +15730,10 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
         modulePath, interfacePath, providerArtifactPath,
         graphHelperCliPath(publicCliPath, ProviderCompileActionId), compileWorkDir,
         compileScratchDir, result.projectRoot, providerCompileConfig,
-        observeProviderCompile)
+        observeProviderCompile,
+        observeEdge = proc (edge: string; run: BuildRunResult) =
+          for line in providerCompileEdgeLines(edge, run):
+            logAction(line))
       providerCompileResult = verified.run
       let providerConsistency = verified.consistency
       if not providerConsistency.fresh:

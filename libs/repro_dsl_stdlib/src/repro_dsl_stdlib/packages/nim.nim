@@ -1184,7 +1184,21 @@ proc nimRepropathsConfig*(pkg: NimPackage;
   # `repro:project:<package>:repro-paths-bootstrap`. Its sentinels are
   # rendered by the managed-file writer from the block id; a block an
   # earlier release wrote with a `:v1` suffix is replaced in place.
-  let snippet = "when withDir(thisDir(), system.fileExists(\"" & reproPathsFile & "\")):\n  include \"" & reproPathsFile & "\""
+  #
+  # NOT IN THE RECIPE'S OWN COMPILES. The provider compile
+  # (`-d:reproProviderMode`) and the interface extraction
+  # (`-d:reproInterfaceMode`) evaluate this `config.nims` too, but the file
+  # is an OUTPUT of the graph they compute: the first build compiles the
+  # provider before `generate_nim_paths_*` has written it, and the second
+  # finds it, so both provider edges recompiled on the first re-run of an
+  # unchanged checkout (reprobuild-specs issue 2026-11-26-a-second-build-in-
+  # the-same-checkout-compiles-the-provider-again-on-both-edges). Those
+  # compiles are handed their library paths by the engine, and the first
+  # build already compiles without the file.
+  let snippet = "when not defined(reproProviderMode) and " &
+    "not defined(reproInterfaceMode) and\n    withDir(thisDir(), " &
+    "system.fileExists(\"" & reproPathsFile & "\")):\n  include \"" &
+    reproPathsFile & "\""
   
   let snippetAction = fs.ensureSnippet(configNimsFile,
     blockId = "repro-paths-bootstrap",
