@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 36,
-    "nimTestBinaries": 3306,
+    "nimTestBinaries": 3309,
     "pureUnitConsolidationGroups": 96,
     "pureUnitTests": 855,
-    "staticallyDetectedRuntimeCompilerFlowTests": 164,
-    "testEntries": 3365
+    "staticallyDetectedRuntimeCompilerFlowTests": 165,
+    "testEntries": 3368
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1859,8 +1859,8 @@
   ],
   "static": {
     "classificationCounts": {
-      "graph-fixture": 29,
-      "integration": 1878,
+      "graph-fixture": 30,
+      "integration": 1880,
       "platform/destructive": 206,
       "pure unit": 855,
       "unclassified": 397
@@ -2083,9 +2083,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 3306,
+    "nimTestBinaryCount": 3309,
     "pythonTestFileCount": 59,
-    "testEntryCount": 3365
+    "testEntryCount": 3368
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -2109,6 +2109,26 @@
         }
       ],
       "source": "libs/repro_build_engine/tests/test_monitor_finish_handoff_is_exclusive.nim"
+    },
+    {
+      "class": "graph-fixture",
+      "matches": [
+        {
+          "assignedCommandVariable": "",
+          "commandVariableExecuted": false,
+          "directExecutionLine": true,
+          "executedVariables": [
+            "target"
+          ],
+          "line": 101,
+          "path": "libs/repro_cargo_gc/tests/t_rqe_cg2_cargo_gc_pass_through.nim",
+          "patterns": [
+            "cargo-build"
+          ],
+          "snippet": "let (output, code) = execCmdEx(\"cargo build --offline --quiet \" &"
+        }
+      ],
+      "source": "libs/repro_cargo_gc/tests/t_rqe_cg2_cargo_gc_pass_through.nim"
     },
     {
       "class": "integration",
@@ -15109,6 +15129,23 @@
       "sourceSuiteCount": 3,
       "staticCaseCount": 15,
       "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_rqe_cg2_cargo_gc_pass_through",
+      "class": "graph-fixture",
+      "classificationReason": "test body compiles or links a helper/fixture artifact",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_cargo_gc"
+      ],
+      "owner": "libs/repro_cargo_gc",
+      "requiresReproBinary": false,
+      "source": "libs/repro_cargo_gc/tests/t_rqe_cg2_cargo_gc_pass_through.nim",
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 4,
+      "staticallyDetectedRuntimeCompilerFlow": true,
       "targetOs": "soAny"
     },
     {
@@ -59185,6 +59222,41 @@
       "sourceSuiteCount": 1,
       "staticCaseCount": 3,
       "staticallyDetectedRuntimeCompilerFlow": true,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_rqe_cg2_shim_is_transparent",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_rqe_cg2_shim_is_transparent.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 8,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_rqe_cg2_shim_records_live_set",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_cargo_gc",
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_rqe_cg2_shim_records_live_set.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 4,
+      "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
     {
