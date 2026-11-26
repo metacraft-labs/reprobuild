@@ -49,6 +49,7 @@ import repro_core/host_apply_lock
 import repro_infra/addon_diagnostics
 
 import repro_elevation/posix_system_driver
+from repro_infra/start_holds import PersistentUnitDir
 
 import ./addon_apply
 import ./collision
@@ -200,6 +201,33 @@ proc removeOwned(e: LedgerEntry; r: var UninstallResult;
     r.undone.incl(entryKey(e))
   except CatchableError as ex:
     r.errors.add(e.path & ": " & ex.msg)
+
+proc unledgeredRevertHolds*(l: Ledger; stateDir: string;
+                            root = PersistentUnitDir): seq[LedgerEntry] =
+  ## The revert holds (class ``revertHold``) and their ``<unit>.d``
+  ## directories (class ``dir``) on the host that no entry of ``l`` names,
+  ## which uninstall removes with the ledgered ones (spec §6.4 step 2).
+  ##
+  ## They are claimed exactly as the next ledger write would claim them
+  ## (``revertHoldEntries``): a hold holding exactly the hold text on a unit
+  ## ``l`` installs, and a directory the revert's own record shows it made
+  ## (``claimedRevertHoldDirs``), so an operator's file or directory is
+  ## never taken. Such a hold is left by a revert that died before its
+  ## ledger. §6.4 step 0 refuses uninstall while that revert's pending
+  ## marker exists, and the recovery that clears it ledgers the hold, so
+  ## this is a second line: it covers a host whose marker went without
+  ## a replay. ``root`` stands for ``/etc/systemd/system`` in tests.
+  when mutated("uninstall-ignores-unledgered-holds"):
+    # Falsifying build: uninstall sees only the ledger's holds.
+    return
+  var installed = initHashSet[string]()
+  var ledgered = initHashSet[string]()
+  for e in l.entries:
+    ledgered.incl(entryKey(e))
+    if e.class == lcUnit and e.unit.len > 0: installed.incl(e.unit)
+  for e in revertHoldEntries(l.entries, installed, [],
+                             claimedRevertHoldDirs(stateDir, root), root):
+    if entryKey(e) notin ledgered: result.add(e)
 
 proc systemctlOrRecord(args: openArray[string]; r: var UninstallResult) =
   try:
@@ -2072,26 +2100,12 @@ proc runAddonUninstall*(opts: UninstallOptions): UninstallResult =
   # an ``lcDir`` entry, removed in step 4 once empty.
   for rh in byClass[lcRevertHold]:
     removeOwned(rh, result, driver)
-  # A revert that died before its ledger -- a crash, never replayed --
-  # left holds and directories no ledger names. They are claimed exactly as
-  # the next ledger write would claim them (``revertHoldEntries``): a hold
-  # holding exactly the hold text on a unit this ledger installs, and a
-  # directory the revert's own record shows it made
-  # (``claimedRevertHoldDirs``), so uninstall does not depend on a replay
-  # having run, and never takes an operator's file or directory.
+  # Revert holds and directories no ledger names (``unledgeredRevertHolds``):
+  # the holds go with the drop-ins, the directories in step 4, once empty.
   var lateHoldDirs: seq[LedgerEntry]
-  when not mutated("uninstall-ignores-unledgered-holds"):
-    block:
-      var installed = initHashSet[string]()
-      var ledgered = initHashSet[string]()
-      for u in byClass[lcUnit]:
-        if u.unit.len > 0: installed.incl(u.unit)
-      for e in l.entries: ledgered.incl(entryKey(e))
-      for e in revertHoldEntries(l.entries, installed, [],
-                                 claimedRevertHoldDirs(stateDir)):
-        if entryKey(e) in ledgered: continue
-        if e.class == lcRevertHold: removeOwned(e, result, driver)
-        elif e.class == lcDir: lateHoldDirs.add(e)
+  for e in unledgeredRevertHolds(l, stateDir):
+    if e.class == lcRevertHold: removeOwned(e, result, driver)
+    elif e.class == lcDir: lateHoldDirs.add(e)
 
   # 3. Diversions: the profile's file at the path, then the diversion.
   var handled = initHashSet[string]()

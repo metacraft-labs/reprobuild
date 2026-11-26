@@ -82,7 +82,7 @@ libs/repro_addon/tests/t_addon_floor_round19.nim	nim	20
 libs/repro_addon/tests/t_addon_floor_round20.nim	nim	15
 libs/repro_addon/tests/t_addon_floor_round21.nim	nim	23
 libs/repro_addon/tests/t_addon_floor_round22.nim	nim	2
-libs/repro_addon/tests/t_addon_floor_round23.nim	nim	3
+libs/repro_addon/tests/t_addon_floor_round23.nim	nim	4
 libs/repro_addon/tests/t_addon_floor_round3.nim	nim	16
 libs/repro_addon/tests/t_addon_floor_round4.nim	nim	16
 libs/repro_addon/tests/t_addon_floor_round5.nim	nim	17
@@ -108,7 +108,7 @@ libs/repro_addon/tests/t_addon_reassert_defers_to_a_live_switch.nim	nim	2
 libs/repro_addon/tests/t_addon_recipient_key_mode_checked_at_load.nim	nim	6
 libs/repro_addon/tests/t_addon_restore_before_start.nim	nim	2
 libs/repro_addon/tests/t_addon_retargeted_address_is_refused.nim	nim	3
-libs/repro_addon/tests/t_addon_revert_hold_ledger.nim	nim	13
+libs/repro_addon/tests/t_addon_revert_hold_ledger.nim	nim	15
 libs/repro_addon/tests/t_addon_review_findings.nim	nim	17
 libs/repro_addon/tests/t_addon_review_round2.nim	nim	9
 libs/repro_addon/tests/t_addon_review_round3.nim	nim	8
