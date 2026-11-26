@@ -19,9 +19,17 @@
 ## clone instead of the cache (``cachedNimbleIndexAt`` answering none) runs
 ## `git cat-file`, and the canary records it.
 ##
+## A second case (NPC-M17): the index repository also publishes its
+## `nimble-sources.toml`, and the project commits a `[[policy]]`
+## acceptance, so the resolution reads the source set (its `[[override]]`
+## origins are acceptances) as well as the root and the shards. That read,
+## too, comes from the cache by the pinned commit, with no git. Falsifying
+## mutation: ``readPublishedFile`` ignoring its cache record reads the
+## shared clone, and the canary records it.
+##
 ## No mock: a real index repository, the production verbs and solver.
 
-import std/[os, strutils, tables, unittest]
+import std/[os, sequtils, strutils, tables, unittest]
 
 import repro_solver/[version_encoder, variant_encoder, solver_api]
 
@@ -106,3 +114,45 @@ suite "NPC-M6: a resolution spawns no git and reads only what it needs":
     finally:
       putEnv("PATH", savedPath)
     check failed or fileExists(log)
+
+  test "the published source set and an acceptance are read without git too":
+    var w = newWorld("nogit-sources")
+    let sources = "schema = \"reprobuild.nimble-source-set.v1\"\n\n" &
+      "[[extra]]\nname = \"placeholder\"\n" &
+      "origin = \"https://example.invalid/x\"\n"
+    let gen = w.publish(closurePackages(), daysAgo(1), "generation 1",
+      extraFiles = @[("nimble-sources.toml", sources)])
+    let dir = w.newProject(@[("pkg00", "")])
+    writeFile(dir / "repro-catalogs.toml", readFile(dir / "repro-catalogs.toml") &
+      "\n" & policyTable("pkg01", IndexRepo,
+        "https://example.invalid/nim/pkg01") & "\n")
+    let pinned = refreshProvisioning(dir)
+    checkpoint pinned.output
+    check pinned.rc == 0
+    let pins = lockOf(dir).lockedCatalogImportPins()
+    check pins.len == 1
+
+    let canaryDir = w.root / "canary"
+    createDir(canaryDir)
+    let log = w.root / "spawned.log"
+    writeFile(canaryDir / "git", "#!/bin/sh\necho \"git $*\" >> " &
+      quoteShell(log) & "\nexit 1\n")
+    setFilePermissions(canaryDir / "git", {fpUserRead, fpUserWrite,
+      fpUserExec})
+    let savedPath = getEnv("PATH")
+    putEnv("PATH", canaryDir)
+    var setup: NimbleSolveSetup
+    var packages = @[newPackage("app", ["1.0.0"],
+      [newDependency("nimble:pkg00", "")])]
+    try:
+      setup = prepareNimbleSolve(dir, packages, pins, reselect = false,
+        allowRewind = @[], platform = currentPlatformId())
+    finally:
+      putEnv("PATH", savedPath)
+    let spawned = if fileExists(log): readFile(log) else: ""
+    checkpoint spawned
+    check spawned.len == 0
+    check setup.active
+    check setup.index.revision == gen.commit
+    check setup.notes.anyIt("nimble:pkg01 is taken from " &
+      "https://example.invalid/nim/pkg01, the origin the [[policy]] at " in it)

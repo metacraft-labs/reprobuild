@@ -117,6 +117,81 @@ proc parseExcludeNewer*(text: string; value: var int64): string =
 proc requestsNimble*(packages: openArray[PackageDecl]): bool =
   nimbleRootsOf(packages).len > 0
 
+proc indexSourceSet*(d: DiscoveredNimbleIndex): Option[SourceSet] =
+  ## The index repository's source set at the pinned revision, read by
+  ## object id; none when the revision has none.
+  let (found, text) = readPublishedFile(d, NimbleSourceSetFile,
+    MaxSourceSetBytes)
+  if found:
+    result = some(parseSourceSet(text, d.repo & ":" & NimbleSourceSetFile))
+
+proc nimbleAcceptances*(projectRoot: string; index: DiscoveredNimbleIndex;
+                        refusals: var seq[string]):
+    Table[string, SourceAcceptance] =
+  ## The project's acceptances of sources ``index`` records (NPC-AREQ16),
+  ## keyed by the name key of the package or alias they are for:
+  ##
+  ## * each `[[policy]]` of `<projectRoot>/repro-catalogs.toml` whose `repo`
+  ##   is this import: an `origin` (with `revived`, a revival entry) or an
+  ##   alias `target`;
+  ## * each `[[override]]` with an `origin` in the index repository's source
+  ##   set at the pinned revision (`nimble-sources.toml`): the origin the
+  ##   project's own source set generates the package from. Read only when
+  ##   that file is the source set the index's root names (its identity);
+  ##   otherwise a refusal.
+  ##
+  ## A package both accept is accepted when they name the same origin, and
+  ## refused, naming both, when they do not: neither silently wins.
+  ## ``refusals`` receives those; nothing is checked against the index here
+  ## (``acceptanceRefusals`` does).
+  let located = readLocatedCatalogDeclaration(projectRoot)
+  for a in located.declaration.nimbleAcceptances:
+    if a.repo != index.repo: continue
+    result[nameKey(a.package)] = SourceAcceptance(package: a.package,
+      origin: a.origin, revivedAt: uint64(a.revivedAt), target: a.target,
+      at: located.path & ":" & $a.line, what: "[[policy]]")
+  let ss = indexSourceSet(index)
+  if ss.isNone:
+    return
+  if ss.get.overrides.anyIt(it.origin.len > 0) and
+      sourceSetIdentity(ss.get) != index.root.sourceSet:
+    # Its overrides now decide what is resolved, so it must be the source
+    # set the root says generated this index; a file edited after the
+    # generation (or published beside an unrelated index) is not the
+    # index's word.
+    refusals.add index.repo & ":" & NimbleSourceSetFile & " at " &
+      index.revision & " is not the source set its index was generated " &
+      "from (its identity is " & $sourceSetIdentity(ss.get) & ", the " &
+      "root names " & $index.root.sourceSet & "), so its [[override]] " &
+      "origins are not read as acceptances. Pin a revision of " &
+      index.repo & " whose index was generated from its source set, or " &
+      "regenerate the index"
+    return
+  var seen = initHashSet[string]()
+  for o in ss.get.overrides:
+    if o.origin.len == 0: continue
+    let k = nameKey(o.package)
+    if k in seen: continue
+    seen.incl k
+    let origin = o.origin & (if o.subdir.len > 0: "?subdir=" & o.subdir else: "")
+    let here = SourceAcceptance(package: o.package, origin: origin,
+      at: index.repo & ":" & NimbleSourceSetFile & ":" & $o.line,
+      what: "[[override]]", fromOverride: true)
+    if k in result:
+      let p = result[k]
+      if p.target.len > 0 or p.revivedAt != 0 or
+          not sameOriginText(p.origin, origin):
+        refusals.add "nimble:" & o.package & " is accepted twice, " &
+          "differently: the [[policy]] at " & p.at & " accepts " &
+          (if p.target.len > 0: "the alias target nimble:" & p.target
+           else: "the origin " & p.origin &
+             (if p.revivedAt != 0: " revived at its `revived` time" else: "")) &
+          ", and the [[override]] at " & here.at & " of the index's source " &
+          "set generates it from " & origin & ". One package takes one " &
+          "source: remove the [[policy]], or make it name " & origin
+      continue
+    result[k] = here
+
 proc prepareNimbleSolve*(projectRoot: string; packages: var seq[PackageDecl];
                          incumbentPins: seq[LockedCatalogImport];
                          reselect: bool; allowRewind: seq[string];
@@ -158,9 +233,11 @@ proc prepareNimbleSolve*(projectRoot: string; packages: var seq[PackageDecl];
   # project accepted; a repoint since then is offered only as a separate,
   # excluded candidate (NPC-AREQ16).
   var accepted = initTable[string, string]()
+  var acceptedCommits = initTable[string, string]()
   for d in incumbentRows:
     if d.isNimbleDep and d.catalog == result.index.repo:
       accepted[nameKey(nimbleNameOf(d.name))] = d.coordinates.url
+      acceptedCommits[nameKey(nimbleNameOf(d.name))] = d.coordinates.revision
     if d.isNimbleDep:
       result.incumbentVersions[d.name] = d.version
   # The project's `nim` toolchain package, when the solve declares one: its
@@ -171,13 +248,36 @@ proc prepareNimbleSolve*(projectRoot: string; packages: var seq[PackageDecl];
     if p.name == "nim":
       hasNim = true
       nimVersions = p.versions
-  result.input = solverInput(idx, names, nimblePlatformOf(platform),
-    NimbleSolveOptions(excludeNewer: excludeNewer, roots: roots,
-      acceptedOrigins: accepted, nimDeclared: hasNim))
+  # The project's committed acceptances (NPC-AREQ16): a `[[policy]]` of
+  # repro-catalogs.toml or an `[[override]]` of the index's source set. One
+  # that names a source the index does not record is a refusal, never
+  # ignored.
+  var refusals: seq[string]
+  let acceptances = nimbleAcceptances(projectRoot, result.index, refusals)
+  let options = NimbleSolveOptions(excludeNewer: excludeNewer, roots: roots,
+    acceptedOrigins: accepted, acceptedCommits: acceptedCommits,
+    nimDeclared: hasNim, acceptances: acceptances,
+    indexRepo: result.index.repo,
+    catalogsFile: projectRoot / CatalogImportsFileName)
+  refusals.add acceptanceRefusals(idx, options, indexLabel(result.index))
+  if refusals.len > 0:
+    nimbleError("an accepted Nimble source cannot be applied:\n  " &
+      refusals.join("\n  "))
+  result.input = solverInput(idx, names, nimblePlatformOf(platform), options)
   result.shardsRead = loadedShardCount(idx)
-  # A retargeted alias is resolved to its recorded target; the new target is
-  # said, not taken (NPC-AREQ3, NPC-AREQ16).
+  # A retargeted alias is resolved to its recorded target unless the project
+  # accepts another; a repointed or revived origin is not taken unless the
+  # project accepts it. Each says so, with the table that accepts it
+  # (NPC-AREQ3, NPC-AREQ16).
   result.notes.add aliasCandidateNotes(result.input)
+  result.notes.add originCandidateNotes(result.input)
+  for pkg in result.input.packages:
+    let a = options.acceptanceOf(pkg.name)
+    if a.isSome and a.get.origin.len > 0:
+      result.notes.add pkg.identity & " is taken from " & a.get.origin &
+        (if a.get.revivedAt != 0:
+           " as revived " & formatUtc(int64(a.get.revivedAt)) else: "") &
+        ", the origin the " & a.get.what & " at " & a.get.at & " accepts"
   let decls = lowerToSolver(result.input,
     toolchainNim = (if hasNim: "nim" else: ""), nimVersions = nimVersions)
   for p in packages.mitems:
@@ -341,14 +441,6 @@ type
       ## the version the lock's solve chose for the project's `nim`
       ## toolchain package; "" when the solve declared none. The records'
       ## Nim-version conditions were decided against it (NPC-AREQ7)
-
-proc indexSourceSet*(d: DiscoveredNimbleIndex): Option[SourceSet] =
-  ## The index repository's source set at the pinned revision, read by
-  ## object id; none when the revision has none.
-  let (found, text) = readPublishedFile(d, NimbleSourceSetFile,
-    MaxSourceSetBytes)
-  if found:
-    result = some(parseSourceSet(text, d.repo & ":" & NimbleSourceSetFile))
 
 proc indexMirrors(ss: Option[SourceSet]): seq[Mirror] =
   ## The mirrors the index repository declares in its source set at the
@@ -666,6 +758,124 @@ proc nimVersionRefusals*(report: NimbleSourcesReport; nimVersion: string):
 # `repro lock diff`
 # ---------------------------------------------------------------------------
 
+proc rowOriginLabel(pkg: PackageEnvelope; row: LockedDep): string =
+  ## The origin entry a lock row's record names in ``pkg`` (a revival entry
+  ## shares its URL with the origin it revives, so the record decides),
+  ## labelled as ``recordedOrigins`` labels it; the row's URL when no record
+  ## of the row's commit is found.
+  for r in pkg.versions:
+    if r.commit == row.coordinates.revision and int(r.origin) < pkg.origins.len:
+      return originLabel(pkg.origins, int(r.origin), int(pkg.registryOrigin))
+  row.coordinates.url
+
+proc acceptanceDiffLines(anchor: string; index: DiscoveredNimbleIndex;
+                         oldRows, newRows: Table[string, LockedDep]):
+    seq[string] =
+  ## `repro lock diff`'s account of the acceptances (NPC-AREQ16) that
+  ## changed a row: for each, the origin (or the alias's target) before and
+  ## after, and the `[[policy]]` or `[[override]]` that accepts it. Read from
+  ## the new lock's project (``anchor``) and its index at the new pin; empty
+  ## when the project declares no catalog imports there.
+  if not fileExists(anchor / CatalogImportsFileName):
+    return
+  var refusals: seq[string]
+  var acceptances: Table[string, SourceAcceptance]
+  try:
+    acceptances = nimbleAcceptances(anchor, index, refusals)
+  except CatchableError as err:
+    return @["accepted sources: cannot be read: " & err.msg.splitLines()[0]]
+  for r in refusals: result.add "  refused: " & r
+  var idx = openNimbleIndex(index)
+  var keys: seq[string]
+  for k in acceptances.keys: keys.add k
+  keys.sort()
+  proc changed(row: string): bool =
+    row notin oldRows or
+      oldRows[row].coordinates.url != newRows[row].coordinates.url or
+      oldRows[row].coordinates.revision != newRows[row].coordinates.revision
+  for k in keys:
+    let a = acceptances[k]
+    let by = ", accepted by the " & a.what & " at " & a.at
+    let found = lookupPackage(idx, a.package)
+    if not found.found: continue
+    if a.origin.len > 0:
+      let row = "nimble:" & found.package.name
+      if row notin newRows or not changed(row): continue
+      let before = if row in oldRows: rowOriginLabel(found.package, oldRows[row])
+                   else: "(no row)"
+      result.add "  ~ " & row & ": origin " & before & " -> " &
+        rowOriginLabel(found.package, newRows[row]) & by
+    elif found.alias.len > 0:
+      let t = lookupPackage(idx, a.target)
+      if not t.found: continue
+      let row = "nimble:" & t.package.name
+      if row notin newRows or not changed(row): continue
+      result.add "  ~ nimble:" & found.alias & ": resolves to " & row &
+        " (the alias's recorded target is nimble:" & found.package.name &
+        ")" & by
+  if result.len > 0:
+    result.insert "accepted sources:"
+
+proc nimbleSourceInfo*(projectRoot: string; index: DiscoveredNimbleIndex;
+                       name: string; lockRows: seq[LockedDep] = @[]):
+    seq[string] =
+  ## What `repro info nimble:<name>` says of the package's sources
+  ## (NPC-AREQ16): every origin the pinned index records for it, with the
+  ## event that added it (`repointed`, `revived <time>`), and the one the
+  ## solve takes -- the one an acceptance names, with where it is written,
+  ## else the lock row's, else the first. For an alias: its recorded
+  ## target, the registry's new one, and the one taken. An acceptance that
+  ## cannot be applied is listed as refused.
+  var refusals: seq[string]
+  let acceptances = nimbleAcceptances(projectRoot, index, refusals)
+  let options = NimbleSolveOptions(excludeNewer: -1, acceptances: acceptances,
+    indexRepo: index.repo, catalogsFile: projectRoot / CatalogImportsFileName)
+  var idx = openNimbleIndex(index)
+  refusals.add acceptanceRefusals(idx, options, indexLabel(index))
+  let found = lookupPackage(idx, name)
+  if not found.found:
+    result.add "nimble:" & name & ": not in " & indexLabel(index)
+  else:
+    var pkg = found.package
+    if found.alias.len > 0:
+      var candidate = ""
+      for e in loadNameMap(idx).entries:
+        if nameKey(e.name) == nameKey(found.alias): candidate = e.candidate
+      result.add "nimble:" & found.alias & ": an alias in " & indexLabel(index)
+      result.add "  recorded target: nimble:" & found.package.name
+      if candidate.len > 0:
+        result.add "  the registry now names: nimble:" & candidate &
+          " (alias-retargeted)"
+      let a = options.acceptanceOf(found.alias)
+      if a.isSome and a.get.target.len > 0:
+        result.add "  taken: nimble:" & a.get.target & ", accepted by the " &
+          a.get.what & " at " & a.get.at
+        let t = lookupPackage(idx, a.get.target)
+        if t.found: pkg = t.package
+      else:
+        result.add "  taken: nimble:" & found.package.name &
+          " (the recorded target; no acceptance)"
+    result.add "nimble:" & pkg.name & ": origins recorded by " &
+      indexLabel(index) & ":"
+    for o in recordedOrigins(pkg): result.add "  " & o
+    let a = options.acceptanceOf(pkg.name)
+    var lockUrl = ""
+    for d in lockRows:
+      if d.isNimbleDep and d.catalog == index.repo and
+          nameKey(nimbleNameOf(d.name)) == nameKey(pkg.name):
+        lockUrl = d.coordinates.url
+    if a.isSome and a.get.origin.len > 0:
+      let i = originOf(pkg, a.get.origin, a.get.revivedAt)
+      result.add "  taken: " & (if i >= 0: originLabel(pkg.origins, i,
+          int(pkg.registryOrigin)) else: a.get.origin) &
+        ", accepted by the " & a.get.what & " at " & a.get.at
+    elif lockUrl.len > 0:
+      result.add "  taken: " & lockUrl & " (the origin the lock's row records)"
+    elif pkg.origins.len > 0:
+      result.add "  taken: " & originLabel(pkg.origins, 0,
+        int(pkg.registryOrigin)) & " (no acceptance)"
+  for r in refusals: result.add "  refused: " & r
+
 proc nimbleLockDiff*(oldText, newText, anchor: string; now: int64):
     tuple[changed: bool; lines: seq[string]] =
   ## The Nimble part of `repro lock diff` (NPC-AREQ19, threat model G34):
@@ -801,4 +1011,10 @@ proc nimbleLockDiff*(oldText, newText, anchor: string; now: int64):
       if events.len > 0:
         lines.add "origin events since " & o.get.revision & ":"
         lines.add events
+    if newIndex.isSome:
+      try:
+        lines.add acceptanceDiffLines(anchor, newIndex.get, oldRows, newRows)
+      except CatchableError as err:
+        lines.add "accepted sources: cannot be read: " &
+          err.msg.splitLines()[0]
   result.lines = lines

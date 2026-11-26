@@ -817,16 +817,66 @@ proc readPublishedFile*(d: DiscoveredNimbleIndex; name: string;
   ## declares its mirrors), read by object id and re-hashed like every
   ## other object. ``found`` is false when the commit has no such regular
   ## file; a file larger than ``maxBytes`` is refused unread.
+  ##
+  ## What was read is recorded in the local object cache, by the pinned
+  ## commit (`published-files/<commit>/<name>`: the object id of its bytes,
+  ## filed as a cache object, or `absent`), so an index opened from the
+  ## cache alone (``cachedNimbleIndexAt``) reads it again without the shared
+  ## clone: resolving a lock that names the root runs no git (spec § 1.1).
+  ## The commit's content never changes, and the bytes are checked against
+  ## the recorded id; a record that cannot be used is ignored and the file
+  ## is read from the shared clone again.
   let where = catalogName(d.repo, d.remote) & " at " & d.revision
+  let record =
+    if d.objectCache.len > 0 and (isLowerHex40(d.revision) or
+        isLowerHex64(d.revision)) and '/' notin name:
+      d.objectCache / "published-files" / d.revision / name
+    else: ""
+  if record.len > 0 and fileExists(record):
+    var line = ""
+    try:
+      line = readFile(record).strip()
+    except IOError:
+      discard
+    if line == "absent":
+      return (false, "")
+    var id: IndexObjectId
+    if parseObjectId(line, id):
+      try:
+        let bytes = readVerified(directorySource(d.objectCache), id, -1,
+          maxBytes, name)
+        var text = newString(bytes.len)
+        for i, b in bytes: text[i] = char(b)
+        return (true, text)
+      except NimbleIndexError:
+        discard
+  proc remember(content: string) =
+    if record.len == 0: return
+    try:
+      createDir(parentDir(record))
+      let tmp = record & ".tmp-" & $getCurrentProcessId()
+      writeFile(tmp, content & "\n")
+      moveFile(tmp, record)
+    except CatchableError:
+      discard
   let m = materialized(d)
   for e in verifiedTree(m.store, m.rootTree, where, ""):
     if e.name == name:
       if e.mode notin ["100644", "100755"]:
         discoveryError(where & ": `" & name & "` is not a regular file")
+      var text = ""
       try:
-        return (true, m.store.readVerified("blob", e.oid, maxBytes))
+        text = m.store.readVerified("blob", e.oid, maxBytes)
       except ObjectTooLarge as err:
         discoveryError(where & ": `" & name & "` is refused: " & err.msg)
+      if record.len > 0:
+        var bytes = newSeq[byte](text.len)
+        for i, c in text: bytes[i] = byte(ord(c))
+        let id = indexObjectId(bytes)
+        cacheIndexObject(d.objectCache, id, bytes)
+        remember($id)
+      return (true, text)
+  remember("absent")
   (false, "")
 
 proc descendantDefect(store: GitStore; pinned, candidate: string): string =

@@ -423,6 +423,11 @@ libs/repro_cli_support/tests/test_npc_m15_conditional_layout_and_binaries_are_ap
 libs/repro_cli_support/tests/test_npc_m15_n_component_change_leaves_other_ecosystems_unchanged.nim	nim	2
 libs/repro_cli_support/tests/test_npc_m15_n_component_versions_order_as_nimble.nim	nim	3
 libs/repro_cli_support/tests/test_npc_m15_revived_origin_is_a_repoint_candidate.nim	nim	3
+libs/repro_cli_support/tests/test_npc_m17_accepted_alias_target_is_followed.nim	nim	1
+libs/repro_cli_support/tests/test_npc_m17_accepted_repointed_origin_is_solved.nim	nim	2
+libs/repro_cli_support/tests/test_npc_m17_accepted_revived_origin_is_solved.nim	nim	1
+libs/repro_cli_support/tests/test_npc_m17_develop_overlay_reads_acceptances.nim	nim	1
+libs/repro_cli_support/tests/test_npc_m17_source_set_override_accepts_an_origin.nim	nim	1
 libs/repro_cli_support/tests/test_npc_m6_pin_survives_repoint.nim	nim	1
 libs/repro_cli_support/tests/test_npc_m6_refresh_rewind_refused.nim	nim	2
 libs/repro_cli_support/tests/test_npc_m6_refresh_shows_index_age.nim	nim	2
@@ -446,7 +451,7 @@ libs/repro_cli_support/tests/test_npc_m9_override_not_in_locked_build.nim	nim	1
 libs/repro_cli_support/tests/test_npc_m9_sibling_overrides_by_identity.nim	nim	1
 libs/repro_cli_support/tests/test_npc_nimble_dir_canary_never_resolves.nim	nim	3
 libs/repro_cli_support/tests/test_npc_no_nimbledata_written.nim	nim	1
-libs/repro_cli_support/tests/test_npc_resolve_spawns_no_git.nim	nim	1
+libs/repro_cli_support/tests/test_npc_resolve_spawns_no_git.nim	nim	2
 libs/repro_cli_support/tests/test_npc_warm_build_zero_network.nim	nim	2
 libs/repro_cmake_trycompile/tests/test_envelope_v3.nim	nim	3
 libs/repro_core/tests/t_ambient_execution_external_import.nim	nim	1

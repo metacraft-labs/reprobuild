@@ -162,7 +162,11 @@ suite "NPC-M15: a revived origin is a repoint candidate":
             checkpoint $x.kind & ": " & x.detail
             if x.kind == exRevivedOrigin:
               inc excluded
-              check AcceptingNotImplemented in x.detail
+              # The remedy is the exact `[[policy]]` table that accepts the
+              # revival entry, its `revived` time included (NPC-M17).
+              for l in policyTable("pkg", "<the nimble-index import's repo>",
+                  f.url("nim/pkg.git"), t0 + 2 * Day).splitLines():
+                check l in x.detail
               check "revived" in x.detail
     check excluded == 1
 
