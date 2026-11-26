@@ -638,6 +638,12 @@
 ##                                           hold (decisions 171 and 177)
 ## ``restart-success-by-exit-code``        a restart's exit code is taken as
 ##                                           its outcome (round 11, H1)
+## ``retire-without-confirmed-restore``
+##     a retire goes ahead without a confirmed restore (round 15, decision 194)
+## ``retire-leaves-requirements``
+##     a retire leaves the generations' requirement drop-ins behind (round 15, decision 194)
+## ``retire-requirements-first``
+##     a retire removes the requirements before the marker (round 15, decision 194)
 ## ``secret-put-user-profile-only``
 ##     a secret put judges its consumers in the user profile alone (round 15, decision 190)
 ## ``secret-put-unjudged``
@@ -2288,6 +2294,9 @@ const
                           "dropin-refusal-before-writes-skipped",
                           "secret-put-unjudged",
                           "secret-put-user-profile-only",
+                          "retire-without-confirmed-restore",
+                          "retire-leaves-requirements",
+                          "retire-requirements-first",
                           "restore-holds-sysinit",
                           "restore-removes-filled-placeholder",
                           "restore-unbounded",

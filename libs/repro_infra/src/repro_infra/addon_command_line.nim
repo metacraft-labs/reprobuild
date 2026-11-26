@@ -158,6 +158,13 @@ proc addonStateCommands*(): NimNode {.compileTime.} =
         help = "Only /var/lib/repro/system/carried is accepted"
       flag root is string,
         help = "The root of the system to install it into (default /)"
+    subcmd "retire", help = "After a successful restore, end the " &
+        "carried-state protection: remove the marker, every restore " &
+        "requirement and the restore unit":
+      flag fromDir is string, perSource = [cli = "from"],
+        help = "Not accepted: retire reads /var/lib/repro/system/carried"
+      flag root is string,
+        help = "The root of the system to retire it on (default /)"
     subcmd "help", visibility = hidden:
       pos topic is seq[string], required = false
 
