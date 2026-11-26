@@ -309,6 +309,37 @@ if [[ "$archive_name" == *.zip ]]; then
   hermetic_path="${win_root}/System32:${win_root}:${win_root}/System32/Wbem"
   echo "=== Running smoke test with PATH scrubbed to '${hermetic_path}' ==="
   run_repro() { PATH="$hermetic_path" "$@"; }
+
+  # The closure audit, over the archive as it ships (both Windows legs). The
+  # manifest above names the DLLs reprobuild loads by name; this walks the
+  # import and delay-load import tables of every PE image in the archive --
+  # bin/, lib/ and any other directory -- and requires each to be of the
+  # archive's machine, and each DLL it names to be in bin/ or part of Windows
+  # (windows/release-os-dlls.txt). windows/stage-release-dlls.ps1 audits
+  # build\bin on the arm64 leg before packaging; this checks the bytes a user
+  # downloads. Windows PowerShell is named by its absolute path because PATH
+  # is the scrubbed one, so nothing on the build host's PATH can satisfy it.
+  case "$archive_name" in
+    *-windows-aarch64.zip) audit_arch=arm64 ;;
+    *-windows-x86_64.zip) audit_arch=x64 ;;
+    *)
+      echo "ERROR: $archive_name names no Windows architecture the closure audit knows (aarch64, x86_64)" >&2
+      exit 1
+      ;;
+  esac
+  if ! command -v cygpath > /dev/null 2>&1; then
+    echo "ERROR: the Windows closure audit needs cygpath (Git Bash or MSYS2) to hand Windows paths to PowerShell" >&2
+    exit 1
+  fi
+  audit_ps1=$(cygpath -w "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/windows/audit-release-dll-closure.ps1")
+  audit_root=$(cygpath -w "$pkg_dir")
+  windows_powershell="${win_root}/System32/WindowsPowerShell/v1.0/powershell.exe"
+  echo "=== Auditing the DLL closure of every image in $pkg_dir ($audit_arch) with PATH scrubbed to '${hermetic_path}' ==="
+  if ! PATH="$hermetic_path" "$windows_powershell" -NoLogo -NoProfile -NonInteractive \
+      -ExecutionPolicy Bypass -File "$audit_ps1" -ArchiveRoot "$audit_root" -Arch "$audit_arch"; then
+    echo "ERROR: $archive_name failed the DLL closure audit (see the violations above)" >&2
+    exit 1
+  fi
 else
   run_repro() { "$@"; }
 fi

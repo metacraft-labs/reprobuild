@@ -195,7 +195,7 @@ const SharedFlags = ["--daemon", "--tool-provisioning", "--target",
   "--publish-materialized", "--skip-cmake-regeneration",
   "--[no-]restore-cached-outputs",
   "--no-runquota", "--runquota", "--monitor-hosting", "--evidence",
-  "--peer-cache", "--trust-profile", "--publish"]
+  "--peer-cache", "--trust-profile", "--publish", "--locked"]
 
 suite "the build family's command lines":
 
@@ -694,6 +694,22 @@ suite "the build family's command lines":
       check t.checkSetCommand == "true"
       check argvOf(to, only = reproBuildFlagNames(),
         commandWords = false) == @["--tool-provisioning=nix"]
+    # `--locked` (a develop override of a `nimble:` package is not applied)
+    # is a build flag: `repro test` and `repro certify` hand it to the build
+    # they run, and `bench` and `lint`, which are `repro build <verb> ...`,
+    # read it as `build` does.
+    withBuildEnv(NoEnv):
+      let lockedWords = reproTestBuildWords(@["--locked", "sel"]).buildFlags
+      check lockedWords == @["--locked"]
+      check loadBuildCommandLine(lockedWords & @["sel"])[0].locked
+      check not loadBuildCommandLine(@["sel"])[0].locked
+      let (_, lco) = loadCertifyCommandLine(["--locked"])
+      check argvOf(lco, only = reproBuildFlagNames(),
+        commandWords = false) == @["--locked"]
+      for verb in ["bench", "lint"]:
+        let (lb, _) = loadBuildCommandLine([verb, "--locked"])
+        check lb.locked
+        check lb.selectors == @[verb]
 
   test "repro test's variants: the run's own reads see them, its builds add them once":
     # The certificate plan, the lock refresh and the sharded path evaluate

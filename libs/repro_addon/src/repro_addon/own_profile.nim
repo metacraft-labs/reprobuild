@@ -90,6 +90,44 @@ proc refreshEgressUnit*(own: string): string =
   if fresh != unit:
     result = replaceUnitContent(result, EgressUnit, fresh)
 
+proc execExeOf*(unit, verb: string): string =
+  ## The binary a unit's ``ExecStart=<exe> system addon <verb>`` line runs,
+  ## "" when it has no such line.
+  let tail = " system addon " & verb
+  for l in unit.splitLines():
+    if l.startsWith("ExecStart=") and l.endsWith(tail):
+      return l["ExecStart=".len ..< l.len - tail.len]
+  ""
+
+proc unitLineValue*(unit, key: string): string =
+  ## The value of ``unit``'s first ``<key>=`` line, "" when there is none.
+  for l in unit.splitLines():
+    if l.startsWith(key & "="): return l[key.len + 1 .. ^1]
+  ""
+
+const ShapeMigratedUnits* = [EvidenceShipUnit, EgressCheckUnit]
+  ## The units whose whole text this build's migration renders again and
+  ## which only this build's engine (or a newer one) may run in that shape
+  ## (the owner's decision of 2026-11-26, "migrate existing hosts"): the
+  ## shipping unit's dynamic user and harvest step (§13 decision 181) and the
+  ## egress check without ``CAP_DAC_OVERRIDE`` (decision 188). An apply that
+  ## cannot re-point them at its own engine keeps them as they are
+  ## (``keepUnitsFrom``).
+
+const MigratedOwnUnits* = [AgentFetchUnit, EgressUnit, EvidenceShipUnit,
+                           EgressCheckUnit, EvidenceShipPathUnit, BootHoldUnit]
+  ## Every unit ``migrateOwnProfile`` may render again: what an apply's plan
+  ## lists as migrated when its text changes.
+
+proc keepUnitsFrom*(own, source: string; units: openArray[string]): string =
+  ## ``own`` with each of ``units`` as ``source`` has it (unchanged for a
+  ## unit either text does not carry).
+  result = own
+  for u in units:
+    let s = unitContentOf(source, u)
+    if s.len > 0 and unitContentOf(result, u).len > 0:
+      result = replaceUnitContent(result, u, s)
+
 proc migrateOwnProfile*(own: string): string =
   ## Generation 0's own objects re-rendered by this build where a fix
   ## changed them, from what they were rendered from (A11 review findings 2
@@ -105,17 +143,42 @@ proc migrateOwnProfile*(own: string): string =
       result = replaceUnitContent(result, AgentFetchUnit,
         agentFetchUnit(exe, fetchUnitInputsOf(fetch), ownObserved(own)))
   result = refreshEgressUnit(result)
-  # The shipping unit's start timeout (A11 review round 2): only its
-  # ``TimeoutStartSec=`` line, which this build renders from one constant.
+  # The shipping unit as this build renders it, whole (the owner's decision
+  # of 2026-11-26, "migrate existing hosts"): its dynamic user and
+  # confinement (§13 decision 181), its harvest step for the egress drop directory (decision 188) and its
+  # start timeout (A11 review round 2). Rendered from what the installed
+  # text names: its engine (``ExecStart=``) and the sink's address (its
+  # ``IPAddressAllow=``, the only input the unit takes); one that names
+  # neither is left as it is.
   let ship = unitContentOf(result, EvidenceShipUnit)
   if ship.len > 0:
-    var lines = ship.split('\n')
-    for l in lines.mitems:
-      if l.startsWith("TimeoutStartSec="):
-        l = "TimeoutStartSec=" & $EvidenceShipTimeoutStartSec
-    let fixed = lines.join("\n")
-    if fixed != ship:
-      result = replaceUnitContent(result, EvidenceShipUnit, fixed)
+    let exe = execExeOf(ship, "evidence-ship")
+    let sink = unitLineValue(ship, "IPAddressAllow")
+    if exe.len > 0 and sink.len > 0:
+      when mutated("migration-skips-ship-identity"):
+        # FALSIFYING BUILD: only the start timeout, as before -- the unit
+        # keeps running as root on a host bootstrapped before decision 181.
+        var lines = ship.split('\n')
+        for l in lines.mitems:
+          if l.startsWith("TimeoutStartSec="):
+            l = "TimeoutStartSec=" & $EvidenceShipTimeoutStartSec
+        let fixed = lines.join("\n")
+        if fixed != ship:
+          result = replaceUnitContent(result, EvidenceShipUnit, fixed)
+      else:
+        let fresh = evidenceShipUnit(exe, EvidenceUnitsInputs(sinkAddress: sink))
+        if fresh != ship:
+          result = replaceUnitContent(result, EvidenceShipUnit, fresh)
+  # The egress check as this build renders it, whole: CAP_NET_ADMIN alone,
+  # writing into the root drop directory (§13 decision 188).
+  when not mutated("migration-skips-egress-check"):
+    let check = unitContentOf(result, EgressCheckUnit)
+    if check.len > 0:
+      let exe = execExeOf(check, "egress-check")
+      if exe.len > 0:
+        let fresh = egressCheckUnit(exe)
+        if fresh != check:
+          result = replaceUnitContent(result, EgressCheckUnit, fresh)
   when not mutated("path-unit-not-migrated"):
     if unitContentOf(result, EvidenceShipPathUnit).len > 0:
       result = replaceUnitContent(result, EvidenceShipPathUnit,
@@ -222,13 +285,16 @@ proc reassertExeOf*(reassertUnitText: string): string =
   ""
 
 const RepointedUnits* = [ReassertUnit, BootConfirmUnit, AgentApplyUnit,
-                         AgentFetchUnit]
+                         AgentFetchUnit, EvidenceShipUnit, EgressCheckUnit]
   ## The generation-0 units whose engine an apply re-points (§13 decision
   ## 164, and the owner's decision of 2026-11-16 that extends it to the
   ## agent's two units): each runs the add-on binary on a path a later
-  ## engine's holds and recovery depend on. The secrets, evidence,
-  ## store-verify and egress-check units, the apt hook and the profile.d
-  ## script keep the engine that bootstrapped the host (a residual).
+  ## engine's holds and recovery depend on. Since the owner's decision of
+  ## 2026-11-26 ("migrate existing hosts") the shipping and egress check
+  ## units too: the migration renders them in a shape only an engine with
+  ## decisions 181 and 188 can run (``ShapeMigratedUnits``). The secrets
+  ## and store-verify units, the apt hook and the profile.d script keep the
+  ## engine that bootstrapped the host (a residual).
 
 proc engineExeIn*(unitText: string): string =
   ## The add-on binary a generation-0 unit's text runs: the first

@@ -70,6 +70,13 @@ type
     dpkgLog*: string
     bootIdPath*: string
     harvestStateDir*: string  ## the apt hook cursor's directory ("": stateDir)
+    legacyOutbox*: string
+      ## Where the outbox was before §13 decision 181 (``LegacyOutboxPath``),
+      ## emptied into ``outbox`` by the privileged harvest; "" where nothing
+      ## may read it.
+    legacyStateDir*: string
+      ## Where ``LegacyShipStateNames`` were before decision 181
+      ## (``EvidenceStateDir``); "" as for ``legacyOutbox``.
     dropDir*: string
       ## The egress check's root drop directory (§13 decision 188), emptied
       ## into the outbox by the privileged harvest; "" where nothing may
@@ -114,6 +121,7 @@ proc defaultShipSite*(): ShipSite =
     harvestStateDir: EvidenceStateDir, confined: true,
     outbox: EvidenceOutboxPath, aptHookLog: AptHookLogPath,
     dpkgLog: "/var/log/dpkg.log", dropDir: EgressDropDir,
+    legacyOutbox: LegacyOutboxPath, legacyStateDir: EvidenceStateDir,
     bootIdPath: "/proc/sys/kernel/random/boot_id")
 
 proc unitShipSite*(): ShipSite =
@@ -131,6 +139,8 @@ proc unitShipSite*(): ShipSite =
   result.aptHookLog = ""
   result.harvestStateDir = ""
   result.dropDir = ""
+  result.legacyOutbox = ""
+  result.legacyStateDir = ""
 
 proc parseEvidenceConf*(text: string): EvidenceConf =
   ## ``key = value`` lines (``generation0.renderEvidenceConf``).
@@ -228,21 +238,164 @@ proc harvestHookWrapperEvents*(site: ShipSite; host: string): int =
     writeOutboxRecord(site.outbox, r, parts[1])
     inc result
 
-proc harvestDropEntries*(dropDir, outbox: string): int =
+proc escapeControl*(s: string): string
+
+const DropLeftName* = "drop-left"
+  ## Under ``<shipping state>/harvest``: how many of the egress check's drop
+  ## entries the last harvest could not move into the outbox. The shipping
+  ## run counts them as queued for its backoff (``shipRunWait``), since it
+  ## cannot see the root drop directory itself.
+
+proc dropLeftPath*(stateDir: string): string = stateDir / "harvest" / DropLeftName
+
+proc harvestDropEntries*(dropDir, outbox: string; stateDir = ""): DropHarvest =
   ## The egress check's entries in its root drop directory, each moved into
   ## the outbox (§13 decision 188): run as root, by the shipping unit's
   ## privileged first step and by a root caller before its confined run.
   ## ``takeDropEntries`` follows no link, takes regular files only, each
-  ## under ``DropEntryMaxBytes``, and removes anything else unread, which
-  ## is printed. Returns the count moved.
+  ## under ``DropEntryMaxBytes``, and moves anything else aside unread. What
+  ## was moved aside and what could not be moved is printed, every name
+  ## escaped (it is a name the writer chose). With ``stateDir`` (the shipping
+  ## unit's state as root sees it), the count left behind is written there
+  ## for the shipping run's backoff (``dropLeftPath``).
   if dropDir.len == 0: return
-  var moved = 0
-  for refused in takeDropEntries(dropDir, DropEntryMaxBytes,
-      take = proc (e: DropEntry) =
-        writeOutboxEntry(outbox, e.name, e.bytes)
-        inc moved):
-    stderr.write("repro-addon evidence: drop entry " & refused & "\n")
-  moved
+  result = takeDropEntries(dropDir, DropEntryMaxBytes,
+    take = proc (e: DropEntry) = writeOutboxEntry(outbox, e.name, e.bytes))
+  for r in result.asideNames & result.left:
+    stderr.write("repro-addon evidence: drop entry " & escapeControl(r) & "\n")
+  if stateDir.len > 0:
+    try:
+      writeDelegatedEntry(stateDir / "harvest", DropLeftName,
+                          $result.left.len & "\n", mode = 0o644)
+    except CatchableError as e:
+      stderr.write("repro-addon evidence: cannot record the drop entries " &
+        "left: " & escapeControl(e.msg) & "\n")
+
+proc dropLeft(stateDir: string): int =
+  try: parseInt(readFile(dropLeftPath(stateDir)).strip())
+  except CatchableError: 0
+
+const LegacyLeftName* = "legacy-left"
+  ## Under ``<shipping state>/harvest``: how much of the shipping state from
+  ## before §13 decision 181 the privileged harvest has still to move
+  ## (``moveLegacyShipState``). Written "1" before a move starts and the
+  ## count left once it ends, so a move that stopped half way, by a failure
+  ## or a crash, leaves it non-zero. While it is, a shipping run ships
+  ## nothing: an entry the move handed over but could not yet remove would
+  ## otherwise leave twice.
+
+proc legacyLeftPath*(stateDir: string): string =
+  stateDir / "harvest" / LegacyLeftName
+
+proc legacyLeft*(stateDir: string): int =
+  try: parseInt(readFile(legacyLeftPath(stateDir)).strip())
+  except CatchableError: 0
+
+type
+  LegacyMove* = object
+    ## What one ``moveLegacyShipState`` did.
+    found*: bool             ## there was legacy state to move
+    entries*: DropHarvest    ## the legacy outbox's entries
+    stateMoved*: seq[string] ## state files carried over
+    stateKept*: seq[string]  ## legacy state files dropped because the
+                             ## dynamic user's state already has a newer one
+    stateLeft*: seq[string]  ## state files that could not be moved, with why
+
+proc hasLegacyShipState*(site: ShipSite): bool =
+  ## Whether ``site`` names legacy state and any of it is there: the legacy
+  ## outbox directory, or a ``LegacyShipStateNames`` file. Judged without
+  ## following a link.
+  if site.legacyOutbox.len > 0:
+    var st: Stat
+    if lstat(site.legacyOutbox.cstring, st) == 0: return true
+  if site.legacyStateDir.len > 0:
+    for n in LegacyShipStateNames:
+      var st: Stat
+      if lstat((site.legacyStateDir / n).cstring, st) == 0: return true
+  false
+
+proc moveLegacyShipState*(site: ShipSite): LegacyMove =
+  ## The shipping state of a host an engine before §13 decision 181
+  ## bootstrapped, moved into the dynamic user's state directory (the
+  ## owner's decision of 2026-11-26, "migrate existing hosts"). Run as root
+  ## by the privileged harvest, before any shipping run that follows it.
+  ##
+  ## - Every regular ``*.evr`` entry of the legacy outbox is handed into the
+  ##   outbox under its own name and then removed (``takeDropEntries``: no
+  ##   link followed, anything else moved aside unread into
+  ##   ``outbox-rejected``). A move killed between the two leaves the entry
+  ##   in both places, and the next run hands it over again under the same
+  ##   name, replacing the copy: no entry is lost and none is queued twice.
+  ## - Each ``LegacyShipStateNames`` file is carried over unless the dynamic
+  ##   user's state already has that file -- the newer one, written by a
+  ##   shipping run after a move that stopped between the copy and the
+  ##   removal -- and then removed. The sink's receipt is the signed head of
+  ##   what it holds, so the newer one is the one to keep.
+  ## - ``legacyLeftPath`` is "1" while the move runs and the count left
+  ##   afterwards; a shipping run ships nothing while it is non-zero.
+  ##
+  ## Serialised by a root lock in the legacy state directory, so two root
+  ## callers never hand the same entry over twice. Nothing to do (no legacy
+  ## state): returns at once and writes nothing.
+  if not hasLegacyShipState(site): return
+  result.found = true
+  createDir(site.legacyStateDir)
+  var lock = acquireExclusiveLockWithin(site.legacyStateDir / "legacy-move.lock",
+                                        ShipLockWaitSec * 1000)
+  defer: releaseExclusiveFileLock(lock)
+  writeDelegatedEntry(site.stateDir / "harvest", LegacyLeftName, "1\n",
+                      mode = 0o644)
+  # The state files first: a receipt carried over before any entry moves
+  # is the head the entries' shipping continues from.
+  for n in LegacyShipStateNames:
+    let src = site.legacyStateDir / n
+    var st: Stat
+    if lstat(src.cstring, st) != 0: continue
+    if not S_ISREG(st.st_mode) or st.st_size > MaxRecordBytes:
+      # Root's own directory: only root wrote there. Anything else is not
+      # shipping state, and is left for the operator, reported.
+      result.stateLeft.add(n & ": not a regular file of at most " &
+        $MaxRecordBytes & " bytes; left in " & site.legacyStateDir)
+      continue
+    try:
+      if delegatedStateFileExists(site.stateDir, n):
+        result.stateKept.add(n)
+      else:
+        let bytes = readRecordFileNoFollow(src)
+        writeDelegatedStateFile(site.stateDir, n, bytes)
+        result.stateMoved.add(n)
+      if crashPointHook != nil: crashPointHook("state-copied:" & n)
+      if posix.unlink(src.cstring) != 0 and errno != ENOENT:
+        raiseOSError(osLastError(), "remove " & src)
+    except OSError, IOError, ValueError:
+      result.stateLeft.add(n & ": " & getCurrentExceptionMsg())
+  when mutated("legacy-move-skips-outbox"):
+    discard
+  else:
+    result.entries = takeDropEntries(site.legacyOutbox, MaxRecordBytes,
+      take = proc (e: DropEntry) = writeOutboxEntry(site.outbox, e.name, e.bytes))
+  # The emptied legacy outbox goes; an engine unit not yet re-pointed that
+  # writes a record makes it again, and the next harvest moves that too.
+  if result.entries.left.len == 0:
+    discard posix.rmdir(site.legacyOutbox.cstring)
+  let left = result.entries.left.len + result.stateLeft.len
+  writeDelegatedEntry(site.stateDir / "harvest", LegacyLeftName, $left & "\n",
+                      mode = 0o644)
+
+proc reportLegacyMove(m: LegacyMove) =
+  ## The move on stdout (what moved) and stderr (what did not), every name
+  ## escaped.
+  if not m.found: return
+  if m.entries.moved > 0 or m.stateMoved.len > 0:
+    stdout.write("evidence: moved " & $m.entries.moved & " queued record(s)" &
+      (if m.stateMoved.len > 0: " and " & m.stateMoved.join(", ") else: "") &
+      " from before the shipping unit's own user (§13 decision 181)\n")
+  for k in m.stateKept:
+    stdout.write("evidence: kept the shipping state's newer " & k &
+      "; removed the one from before decision 181\n")
+  for r in m.entries.asideNames & m.entries.left & m.stateLeft:
+    stderr.write("repro-addon evidence: legacy shipping state: " &
+      escapeControl(r) & "\n")
 
 const
   StaleOutboxMs* = 60_000'i64
@@ -307,6 +460,17 @@ proc runEvidenceShip*(site: ShipSite; conf: EvidenceConf; host: string;
         ": " & e.msg
       return
   defer: releaseExclusiveFileLock(lock)
+  # The move of the shipping state from before §13 decision 181 has not
+  # finished (``moveLegacyShipState``): an entry it handed over may still be
+  # in the legacy outbox too, so nothing ships until the next harvest has
+  # finished it (the owner's decision of 2026-11-26).
+  when not mutated("legacy-ship-ungated"):
+    if legacyLeft(site.stateDir) > 0:
+      result.pending = outboxEntries(site.outbox).len
+      result.error = "the shipping state from before the shipping unit's " &
+        "own user has not been moved yet (" & legacyLeftPath(site.stateDir) &
+        "); nothing ships until the privileged harvest has moved it"
+      return
   discard clearStaleOutbox(site, host)
   result = runEvidenceShipOnce(site, conf, host, forceHeartbeat)
   when mutated("evidence-path-changed-only"):
@@ -460,7 +624,13 @@ proc shipRunWait*(site: ShipSite; heartbeatSec: int): int =
   except CatchableError: discard
   when mutated("ship-no-backoff"):
     return 0
-  if outboxBusy(site.outbox):
+  # Drop entries the privileged harvest could not move count as queued
+  # too (A11 round 26): the path unit's DirectoryNotEmpty= on the drop
+  # directory would otherwise restart the unit at once, for ever.
+  let dropBusy = when mutated("ship-backoff-ignores-drop"): false
+                 else: dropLeft(site.stateDir) > 0
+  let legacyBusy = legacyLeft(site.stateDir) > 0
+  if outboxBusy(site.outbox) or dropBusy or legacyBusy:
     inc failures
     try:
       createDir(site.stateDir)
@@ -634,11 +804,32 @@ proc shipFor*(site: ShipSite; conf: EvidenceConf; host: string;
     s.confined = false
     return runEvidenceShip(s, conf, host, forceHeartbeat)
   result.hookEvents = harvestHookWrapperEvents(site, host)
-  discard harvestDropEntries(site.dropDir, site.outbox)
+  try:
+    reportLegacyMove(moveLegacyShipState(site))
+  except CatchableError as e:
+    # The move leaves ``legacyLeftPath`` non-zero, so the confined run
+    # below ships nothing; the records stay where they are.
+    stderr.write("repro-addon evidence: the shipping state from before " &
+      "the shipping unit's own user: " & escapeControl(e.msg) & "\n")
+  var dropLeftOver = 0
+  try:
+    dropLeftOver = harvestDropEntries(site.dropDir, site.outbox,
+                                      site.stateDir).left.len
+  except CatchableError as e:
+    # A drop directory that cannot be opened (a link or a file in its
+    # place) ships nothing from it, and says so; the outbox still ships.
+    stderr.write("repro-addon evidence: the egress check's drop directory " &
+      escapeControl(site.dropDir) & ": " & escapeControl(e.msg) & "\n")
   var cmd = @["evidence-ship", "--no-backoff"]
   if forceHeartbeat: cmd.add("--heartbeat")
   let r = runConfined(conf, cmd)
   result.pending = outboxEntries(site.outbox).len
+  # Drop entries still not moved are queued records too (uninstall's gate).
+  when not mutated("uninstall-ignores-drop"):
+    result.pending += dropEntryNames(site.dropDir).len
+  # So are the legacy outbox's entries not yet moved.
+  if site.legacyOutbox.len > 0:
+    result.pending += dropEntryNames(site.legacyOutbox).len
   if r.exitCode != 0:
     result.error = "the confined shipping run (" & confinedReproExe() &
       ") exited " & $r.exitCode & ": " & r.output.strip()
@@ -651,24 +842,53 @@ proc inConfinedRun(): bool =
   ## runs (``EvidenceShipConfinedEnv``).
   getEnv(EvidenceShipConfinedEnv) == "1"
 
+proc runHarvest*(site: ShipSite; host: string): int
+
 proc runEvidenceHarvestCommand*(): int =
   ## ``repro system addon evidence-harvest``: the shipping unit's
   ## privileged ``ExecStartPre=+`` step. Turns the apt hook wrapper's
   ## events in root's log into outbox entries, and moves the egress check's
   ## entries from its root drop directory into the outbox (§13 decision
   ## 188); reads nothing from the network.
+  runHarvest(defaultShipSite(), readHost())
+
+proc runHarvest*(site: ShipSite; host: string): int =
+  ## ``evidence-harvest`` for ``site``. Each half's failure is reported and
+  ## does not fail the step (A11 round 26): an ``ExecStartPre=+`` that
+  ## failed would stop the shipping run, and with it every record already
+  ## in the outbox.
+  var failed = false
   try:
-    let site = defaultShipSite()
-    let n = harvestHookWrapperEvents(site, readHost())
-    if n > 0: stdout.write("evidence: " & $n & " apt hook event(s)\n")
-    # The egress check's entries (§13 decision 188).
-    let m = harvestDropEntries(site.dropDir, site.outbox)
-    if m > 0: stdout.write("evidence: " & $m & " egress check entr" &
-                           (if m == 1: "y" else: "ies") & "\n")
-    0
+    # The shipping state from before §13 decision 181 (the owner's
+    # decision of 2026-11-26), before anything else lands in the outbox.
+    reportLegacyMove(moveLegacyShipState(site))
   except CatchableError as e:
-    stderr.write("repro system addon evidence-harvest: " & e.msg & "\n")
-    2
+    failed = true
+    stderr.write("repro system addon evidence-harvest: the shipping state " &
+      "from before the shipping unit's own user: " & escapeControl(e.msg) &
+      "\n")
+  try:
+    let n = harvestHookWrapperEvents(site, host)
+    if n > 0: stdout.write("evidence: " & $n & " apt hook event(s)\n")
+  except CatchableError as e:
+    failed = true
+    stderr.write("repro system addon evidence-harvest: the apt hook's " &
+      "events: " & escapeControl(e.msg) & "\n")
+  try:
+    # The egress check's entries (§13 decision 188).
+    let h = harvestDropEntries(site.dropDir, site.outbox, site.stateDir)
+    if h.moved > 0: stdout.write("evidence: " & $h.moved & " egress check entr" &
+                                 (if h.moved == 1: "y" else: "ies") & "\n")
+  except CatchableError as e:
+    failed = true
+    stderr.write("repro system addon evidence-harvest: the egress check's " &
+      "drop directory " & escapeControl(site.dropDir) & ": " &
+      escapeControl(e.msg) & "\n")
+  when mutated("harvest-failure-fails-step"):
+    return (if failed: 2 else: 0)     # FALSIFYING BUILD: the step fails
+  else:
+    discard failed
+    0
 
 proc runEvidenceShipCommand*(heartbeat, noBackoff: bool): int =
   ## ``repro system addon evidence-ship [--heartbeat]`` (the shipping unit);

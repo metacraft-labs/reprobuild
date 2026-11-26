@@ -59,6 +59,7 @@ package interfaceCopyProbe:
 
   uses:
     "sh"
+    "mkdir"
 
   build:
     let keyed = shell(

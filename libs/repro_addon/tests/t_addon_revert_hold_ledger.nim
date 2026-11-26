@@ -52,7 +52,14 @@
 ## for reprobuild-pm issue
 ## ``2026-11-15-floor-a-revert-hold-directory-record-is-rewritten-empty-
 ## when-it-cannot-be-read``) is red on "a record that exists and cannot be
-## read is refused, never rewritten empty".
+## read is refused, never rewritten empty";
+## ``uninstall-ignores-unledgered-holds`` is red on "a killed revert's hold
+## and the directory it made, never an operator's" (uninstall's claim of
+## the holds no ledger names, ``unledgeredRevertHolds``; spec §6.4 step 2).
+## Step 0 refuses uninstall while the dead revert's pending marker exists,
+## and the recovery that clears it ledgers the holds, so the VM gate
+## ``e2e_addon_uninstall_removes_revert_holds`` cannot reach this claim
+## through ``repro system addon uninstall``; this suite calls it directly.
 ##
 ## Mocks: none. The unreadable record is a real file of mode 0, read under
 ## an unprivileged uid. The holds are real files under a temporary directory that
@@ -67,6 +74,7 @@ import repro_addon/addon_apply
 import repro_addon/effective_floor
 import repro_addon/fingerprint
 import repro_addon/ledger
+import repro_addon/uninstall
 
 proc holdAt(root, unit: string; text = RevertHoldText): string =
   result = root / (unit & ".d") / RevertHoldName
@@ -376,3 +384,48 @@ suite "a passing switch clears the holds":
                              [parentDir(d)])
     check not fileExists(d)
     check fileExists(root / "d.service.d" / "10-operator.conf")
+
+suite "uninstall claims the revert holds no ledger names":
+  test "a killed revert's hold and the directory it made, never an operator's":
+    # The state a revert leaves when it dies after placing its holds and
+    # before its ledger (spec §6.4 step 2): the holds and the record are on
+    # the host, the ledger is the refused switch's and names neither.
+    # Uninstall refuses that host while its pending marker exists (step 0),
+    # so the VM gate reaches this only after a recovery has ledgered the
+    # holds; here the claim is exercised directly.
+    let root = createTempDir("revert-hold-", "")
+    let state = createTempDir("revert-hold-state-", "")
+    defer:
+      removeDir(root)
+      removeDir(state)
+    let a = placeRevertHold(state, "a.service", root)
+    # An operator's directory the revert put its hold in: the hold is
+    # claimed, the directory is not.
+    createDir(root / "b.service.d")
+    let b = placeRevertHold(state, "b.service", root)
+    # A hold-named file on a unit the ledger does not install, and one with
+    # other bytes on a unit it does: neither is claimed.
+    let c = holdAt(root, "c.service")
+    let d = holdAt(root, "d.service", "[Unit]\nDescription=theirs\n")
+    let l = Ledger(entries: @[
+      LedgerEntry(class: lcUnit, path: root / "a.service", unit: "a.service"),
+      LedgerEntry(class: lcUnit, path: root / "b.service", unit: "b.service"),
+      LedgerEntry(class: lcUnit, path: root / "d.service", unit: "d.service")])
+    let es = unledgeredRevertHolds(l, state, root)
+    check classes(es, lcRevertHold).toHashSet == toHashSet([a.hold, b.hold])
+    check classes(es, lcDir) == @[root / "a.service.d"]
+    check c notin classes(es, lcRevertHold) and d notin classes(es, lcRevertHold)
+
+  test "a hold and a directory the ledger already names are not claimed again":
+    let root = createTempDir("revert-hold-", "")
+    let state = createTempDir("revert-hold-state-", "")
+    defer:
+      removeDir(root)
+      removeDir(state)
+    let a = placeRevertHold(state, "a.service", root)
+    var l = Ledger(entries: @[
+      LedgerEntry(class: lcUnit, path: root / "a.service", unit: "a.service")])
+    l.entries.add(revertHoldEntries([], toHashSet(["a.service"]), [a.hold],
+                                    [a.createdDir], root))
+    check unledgeredRevertHolds(l, state, root).len == 0
+

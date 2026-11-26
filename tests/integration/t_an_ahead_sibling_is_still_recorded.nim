@@ -28,11 +28,12 @@
 ##      same workspace — an ahead sibling whose revision was never pushed —
 ##      because withholding is per-INPUT and a per-REFRESH implementation of it
 ##      would pass a single-sibling case and lose §3.1 the moment anything else
-##      drifted. (The companion used to be a sibling BEHIND its pin; since §3.2's
-##      "Rule, at commit" a behind sibling refuses the whole commit instead of
-##      being withheld, which `t_a_behind_pin_sibling_is_not_recorded_as_the_
-##      new_pin` pins, so the per-input guard now stands on the withholding that
-##      remains.)
+##      drifted. (The companion used to be a sibling BEHIND its pin; between
+##      §3.2's "Rule, at commit" (2026-09-30) and its 2026-11-25 amendment a
+##      behind sibling refused the whole commit instead of being withheld, so
+##      the per-input guard was moved onto an unpushed sibling. A behind
+##      sibling is withheld again now, which `t_a_behind_pin_sibling_is_not_
+##      recorded_as_the_new_pin` pins.)
 ##   3. the refresh announces itself, naming the input and both revisions.
 ##
 ## ## Mutation

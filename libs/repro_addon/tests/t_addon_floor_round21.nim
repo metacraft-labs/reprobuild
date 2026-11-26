@@ -263,6 +263,7 @@ proc ownUnits(): seq[(string, string)] =
   for o in generation0Objects(Gen0Inputs(reproExe: Exe,
       agent: AgentUnitsInputs(target: "https://deploy.example/h",
         sources: @["https://deploy.example/m"], allowedAddresses: @["192.0.2.1"]),
+      egress: EgressObserverInputs(nft: "/usr/sbin/nft", allowedAddresses: @["192.0.2.1"]),
       evidence: EvidenceUnitsInputs(sinkAddress: "192.0.2.7:7443"))):
     if o.kind == ookUnit and o.unit.endsWith(".service"):
       result.add((o.unit, o.content))
@@ -282,13 +283,23 @@ suite "A9 review round 21: the confinement table (M1, M2, M3, L2, L4)":
       check text.len > 0
       check missingSettings(u, text).len == 0
       checkpoint u & " lacks " & missingSettings(u, text).join(", ")
-  test "the gate's units are every service unit generation 0 renders but the egress check's":
-    # A unit added to generation 0 is in the gate, or named here as not.
-    const NotRun = ["repro-addon-egress-check.service"]
+  test "the gate's units are every service unit generation 0 renders":
+    # A unit added to generation 0 is in the gate (A11's egress units since
+    # the operator's decision of 2026-11-25, "Include it").
     for (n, _) in units:
       checkpoint n
-      check n in GateUnits or n in NotRun
+      check n in GateUnits
+    for u in GateUnits:
+      checkpoint "rendered: " & u
+      check unit(u).len > 0
     for u in PrivilegedUnits: check u in GateUnits
+  test "a setting a unit leaves unset with no reason is a finding, never a reason":
+    for (u, k, why) in UnsetPendingOwner:
+      checkpoint u & " " & k
+      check u in GateUnits
+      check "no reason" in why
+      check not setsSetting(unit(u), k)   # stale once the owner sets it
+      for (u2, k2, _) in UnsetByDesign: check not (u2 == u and k2 == k)
   test "each reason not to set a setting names a unit the gate runs":
     for (u, k, why) in UnsetByDesign:
       check u in GateUnits

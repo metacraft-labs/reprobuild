@@ -40,8 +40,12 @@
  *   tier1-nosync   as tier1 with the SYNC_CORE membarrier suppressed — the
  *                  "remove the second half and observe the difference" arm the
  *                  milestone's first deliverable requires.
- *   tier2          quiesce, publish, adjust in-window PCs, release.
- *   tier2-noadjust quiesce and publish but DECLINE to adjust in-window PCs.
+ *   tier2          prepare, quiesce, publish, adjust in-window PCs, release,
+ *                  finish — the agent's tier-2 order (design §6.2 "Deadlock
+ *                  hazards", §11.2): the transaction claims the window and
+ *                  maps the body with every thread RUNNING, and only the
+ *                  publishing commit runs with them parked.
+ *   tier2-noadjust as tier2 but DECLINE to adjust in-window PCs.
  *                  Expected to die: it is the deterministic demonstration that
  *                  §6.1 point 4 is a real hazard and that the adjustment is
  *                  what prevents it.
@@ -125,6 +129,38 @@ extern unsigned long long repro_hcr_lx_probe_quiesce_park_ns(void);
 extern unsigned long long repro_hcr_lx_probe_quiesce_release_ns(void);
 extern unsigned long long repro_hcr_lx_probe_quiesce_adjust_count(void);
 extern int repro_hcr_lx_probe_quiesce_signo(void);
+extern void repro_hcr_lx_probe_txn_reset(void);
+extern int repro_hcr_lx_probe_txn_add(unsigned long long entry_address,
+                                      unsigned long long sled_address,
+                                      const unsigned char *patch_bytes,
+                                      size_t patch_len);
+extern int repro_hcr_lx_probe_txn_prepare_for_quiescence(void);
+extern int repro_hcr_lx_probe_txn_commit_quiesced(void);
+extern void repro_hcr_lx_probe_txn_finish_cleanup(void);
+extern void repro_hcr_lx_probe_txn_discard_prepared(void);
+extern unsigned long long repro_hcr_lx_probe_txn_dispatch_address(int index);
+
+/* The tier-2 halves of the production publication (see the probe's
+ * `txn_prepare_for_quiescence`). Prepare runs with the threads RUNNING and
+ * returns 0 or the refusal; commit runs with them parked and returns the live
+ * body address or 0, as `repro_hcr_lx_probe_apply_direct_patch_at` does. */
+static int prepare_publication(unsigned long long entry_address,
+                               unsigned long long sled_address,
+                               const unsigned char *body, size_t body_len) {
+  int rc;
+  repro_hcr_lx_probe_txn_reset();
+  rc = repro_hcr_lx_probe_txn_add(entry_address, sled_address, body, body_len);
+  if (rc != 0) {
+    return rc;
+  }
+  return repro_hcr_lx_probe_txn_prepare_for_quiescence();
+}
+
+static unsigned long long commit_publication(void) {
+  return repro_hcr_lx_probe_txn_commit_quiesced() == 0
+             ? repro_hcr_lx_probe_txn_dispatch_address(0)
+             : 0ull;
+}
 
 /* ---- shared state ------------------------------------------------------- */
 
@@ -672,9 +708,21 @@ int main(int argc, char **argv) {
       const unsigned char *body = (i % 2) == 0 ? body_a : body_b;
       size_t body_len = (i % 2) == 0 ? body_a_len : body_b_len;
       int quiesced_here = 0;
+      int tier2 =
+          strcmp(mode, "tier2") == 0 || strcmp(mode, "tier2-noadjust") == 0;
+      int prepared_rc = -1;
 
-      if (strcmp(mode, "tier2") == 0 || strcmp(mode, "tier2-noadjust") == 0) {
+      if (tier2) {
+        /* Design §6.2 "Deadlock hazards", §11.2: the claim and the body page
+         * are taken with every thread running; quiescence is the last step of
+         * prepare, and an abandoned prepare is discarded with the threads
+         * running again. */
+        prepared_rc = prepare_publication(entry_address, sled_address, body,
+                                          body_len);
         if (!quiesce_round(planned_window, &qtally)) {
+          if (prepared_rc == 0) {
+            repro_hcr_lx_probe_txn_discard_prepared();
+          }
           quiesce_failures += 1;
           continue;
         }
@@ -706,8 +754,11 @@ int main(int argc, char **argv) {
                      (i % 2) == 0 ? published_word_a : published_word_b);
         applied += 1;
       } else {
-        unsigned long long page = repro_hcr_lx_probe_apply_direct_patch_at(
-            entry_address, sled_address, body, body_len);
+        unsigned long long page =
+            !tier2 ? repro_hcr_lx_probe_apply_direct_patch_at(
+                         entry_address, sled_address, body, body_len)
+            : prepared_rc == 0 ? commit_publication()
+                               : 0ull;
         if (page == 0) {
           refused += 1;
           last_refusal = repro_hcr_lx_probe_last_refusal();
@@ -735,6 +786,11 @@ int main(int argc, char **argv) {
 
       if (quiesced_here) {
         repro_hcr_lx_probe_quiesce_release();
+        if (prepared_rc == 0) {
+          /* A failed commit restored the text with the threads parked; its
+           * claim release and unmapping happen here, with them running. */
+          repro_hcr_lx_probe_txn_finish_cleanup();
+        }
       }
     }
   }

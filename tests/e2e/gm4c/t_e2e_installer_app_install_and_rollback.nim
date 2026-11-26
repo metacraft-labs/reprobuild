@@ -219,7 +219,7 @@ when defined(macosx):
               relative = true):
             leftovers.add(path)
         check leftovers.len == 0
-      removeDir(root)
+      removeFixtureTree(root)
 
     test "the plan names the folder an installer application places":
       let root = newRoot("plan")
@@ -234,6 +234,6 @@ when defined(macosx):
             check item.action == piaCreate
             found = true
         check found
-      removeDir(root)
+      removeFixtureTree(root)
 
-  removeDir(fixtureRoot)
+  removeFixtureTree(fixtureRoot)

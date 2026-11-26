@@ -41,12 +41,12 @@
 ##
 ## Phase 2 runs the refresh through the operator verb, `repro flake
 ## refresh-lock`, which shares the whole decision with the commit path
-## (`executeFlakeLockRefresh`) and keeps its per-input withholding. On the
-## commit path the BEHIND sibling would instead refuse the whole commit
+## (`executeFlakeLockRefresh`) and keeps its per-input withholding. The
+## commit path withholds the BEHIND sibling the same way since 2026-11-25
 ## (§3.2's "Rule, at commit", pinned by `t_a_behind_pin_sibling_is_not_recorded_
-## as_the_new_pin`), and then nothing is written at all — which would leave the
-## per-input publication decision this case exists for unobservable. The verb
-## reports that it withheld inputs with status 3.
+## as_the_new_pin`); it refused the whole commit before that, which is why this
+## case was written against the verb. The verb also reports that it withheld
+## inputs with status 3, which the commit path cannot.
 ##
 ## ## What is asserted
 ##

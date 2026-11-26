@@ -146,6 +146,13 @@ const
     ## `.repro/workspace-state.toml`: the `[workspace]` table of the old file
     ## under a name that says what it is.
   schemaDevelopOverridesV1* = "reprobuild.workspace.develop-overrides.v1"
+  schemaDevelopOverridesV2* = "reprobuild.workspace.develop-overrides.v2"
+    ## Workspace-Manifests.md §"Develop-Mode Override File": a v1 file whose
+    ## entries may carry `replaces`. A writer writes it exactly when an entry
+    ## carries `replaces`, and v1 otherwise.
+  schemasDevelopOverridesAccepted* = [schemaDevelopOverridesV2,
+    schemaDevelopOverridesV1]
+    ## The override-file schemas this reader reads, the current one first.
   pushGatewayOptOutValues* = ["off"]
     ## The values the settings files' top-level `push_gateway` key may take:
     ## Push-Gateway-Wiring-And-Policy.md §7.4 defines exactly one, the
@@ -725,6 +732,11 @@ type
     state*: string
     created_at*: string
     provenance*: Option[string]
+    replaces*: Option[string]
+      ## The locked identity the override replaces, when the command that
+      ## recorded it knew one (Workspace-And-Develop-Mode.md §"Source
+      ## Override Semantics"): for a Nimble catalog package,
+      ## `<origin>#<commit> blake3:<tree>` of its lock row.
 
   DevelopOverrides* = object
     schema*: string

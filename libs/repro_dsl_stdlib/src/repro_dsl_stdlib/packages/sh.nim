@@ -304,7 +304,7 @@ proc shell*(command: string; args: seq[string] = @[]; actionId = "";
   ])
   let selectedActionId =
     if actionId.len > 0: actionId else: defaultToolActionId(call)
-  recordToolInvocation(selectedActionId, call,
+  result = recordToolInvocation(selectedActionId, call,
     deps = combineActionDeps(deps, after),
     extraInputs = extraInputs,
     extraOutputs = extraOutputs,
@@ -314,3 +314,39 @@ proc shell*(command: string; args: seq[string] = @[]; actionId = "";
     dependencyPolicy = resolvedPolicy,
     actionCachePolicy = actionCachePolicy,
     extraEnv = withShellHostSystemEnv(extraEnv))
+  # THE EDGE DECLARES THE TOOLS ITS PACKAGE NAMES. A shell command line
+  # can run anything, so unlike a typed tool call (`nim.c` names `nim` and
+  # its C compiler) it cannot say what it runs; the package's `uses:` /
+  # `nativeBuildDeps:` lists already do. Without this the edge declared
+  # nothing, inherited the caller's `PATH` behind `sh`'s own directory, and
+  # ran the HOST's `make` / `gcc` under `--tool-provisioning=nix` while
+  # reporting success. Spec:
+  # Hermetic-Builds-And-Path-Independence.md §"Shell edges declare their
+  # package's tools".
+  #
+  # They are recorded APART from the edge's own refs, in
+  # `packageToolIdentityRefs`, and the CLI merges them in when it lowers the
+  # edge -- minus every selector that is a cross-repo producer, which is
+  # admitted only by an edge that names it (Cross-Repo-Source-Consumption.md
+  # §4.2b.3). Only the CLI knows which selectors those are. Once merged they
+  # are ordinary refs: they select the tools for realization and give the
+  # edge the hermetic `PATH` (`actionPathDecision`).
+  #
+  # The list is a function of the package declaration alone, never of which
+  # other edges a build selects, so the edge's `PATH` and key are the same
+  # under `repro build .` and `repro build <this-target>`.
+  let packageName = activeShellPackageName()
+  if packageName.len > 0:
+    let refs = packageShellToolRefs(packageName)
+    var kinds: seq[ToolIdentityRefKind] = @[]
+    for _ in refs.native:
+      kinds.add(tirkNative)
+    for _ in refs.build:
+      kinds.add(tirkBuild)
+    let declared = refs.native & refs.build
+    if declared.len > 0:
+      setRegisteredActionPackageToolIdentityRefs(result.id, declared, kinds)
+      # The returned value is a copy of the registry row; keep it in step
+      # so a caller that inspects it sees what the engine will see.
+      result.packageToolIdentityRefs = declared
+      result.packageToolIdentityRefKinds = kinds

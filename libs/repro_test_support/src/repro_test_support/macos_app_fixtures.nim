@@ -62,6 +62,25 @@ proc runChecked(exe: string; args: openArray[string]; workingDir = "") =
     raise newException(OSError, "fixture command failed (exit " &
       $res.exitCode & "): " & exe & " " & args.join(" ") & "\n" & res.output)
 
+proc removeFixtureTree*(path: string) =
+  ## ``removeDir`` for a tree that may hold a sealed store prefix: a verified
+  ## application prefix is read-only (Store-And-Installation-Layout.md,
+  ## "Cached prefixes"), so write bits come back before the removal, as they
+  ## do for the store's own discards.
+  if dirExists(path):
+    discard runArgv("/bin/chmod", ["-R", "u+w", path])
+    removeDir(path)
+
+proc makeFixtureSleeper*(dest: string) =
+  ## A program that runs until it is killed, at ``dest``: a copy of
+  ## ``/bin/sleep`` signed ad hoc. The copy of a system binary is killed by
+  ## the kernel at exec (its platform signature does not hold at another
+  ## path), so it is signed again; started as ``dest 120`` it then stays up,
+  ## and ``processesRunningFrom`` finds it by its own path.
+  copyFile("/bin/sleep", dest)
+  setFilePermissions(dest, {fpUserRead, fpUserWrite, fpUserExec})
+  runChecked("/usr/bin/codesign", ["--force", "-s", "-", dest])
+
 proc makeFixtureApp*(dir, name, bundleId, version: string;
                      teamId = FixtureTeamId; sign = true;
                      declareExecutable = true;

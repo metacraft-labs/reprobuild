@@ -18,7 +18,18 @@
 ##    library gets a RUNPATH relative to itself (`$ORIGIN/../lib` from
 ##    `bin/`, `$ORIGIN` in `lib/`, `$ORIGIN/../../lib` from `nim/bin/`);
 ##    one that needs none keeps none, which is what the monitor shim must be
-##    (it is preloaded into processes nobody here built). Then every
+##    (it is preloaded into processes nobody here built). When the C
+##    library stays the target's (`libc.so.6` in `systemSonames`), each
+##    image whose `PT_INTERP` names glibc's loader for the triple, wherever
+##    it lives, is made to name the triple's system loader
+##    (`glibc_loaders.GlibcLoaders`: `/lib64/ld-linux-x86-64.so.2`,
+##    `/lib/ld-linux-armhf.so.3`, ...), so a prefix linked by a toolchain
+##    with a loader of its own (a Nix gcc's `/nix/store/...-glibc-...`)
+##    loads on the target and passes the gate. An image that already names
+##    it is not touched; one with no `PT_INTERP` (a static image, a
+##    library) or another C library's loader (musl's) is left alone. A
+##    triple the table does not hold is refused when the edges are
+##    declared. Then every
 ##    global undefined symbol of every ELF that is not glibc-versioned must
 ##    be defined by some ELF of the prefix: an image linked against one
 ##    build of a library and run with another must not take a symbol the
@@ -38,6 +49,8 @@ import std/[os, sequtils, strutils]
 
 import repro_project_dsl
 
+import ../../glibc_loaders
+
 type
   PrefixEntry* = object
     ## One file or directory tree placed in the prefix.
@@ -53,7 +66,10 @@ type
 
   InstalledPrefixSpec* = object
     name*: string               ## an id part (`reprobuild`)
-    triple*: string             ## the platform the prefix is for
+    triple*: string
+      ## the platform the prefix is for. With `libc.so.6` in
+      ## `systemSonames` it must be a triple `GlibcLoaders` holds, whose
+      ## loader the images are made to name.
     output*: string             ## the prefix directory
     entries*: seq[PrefixEntry]
     symlinks*: seq[(string, string)]
@@ -127,11 +143,15 @@ type
 const
   PrefixRecordPath* = "share/repro/cross-build-info"
   PrefixGateStampName* = ".builder-path-gate.ok"
-  GlibcSonames* = ["libc.so.6", "libm.so.6", "libdl.so.2", "libpthread.so.0",
-    "librt.so.1", "libutil.so.1", "libresolv.so.2", "ld-linux-armhf.so.3",
-    "ld-linux-aarch64.so.1", "ld-linux-x86-64.so.2", "ld-linux.so.3"]
-    ## The C library, which an installed prefix never bundles: it is the ABI
-    ## of the target's kernel and loader (§5.3 decision C).
+  GlibcSoname* = "libc.so.6"
+    ## The soname whose presence in `systemSonames` says the prefix runs on
+    ## the target's glibc, so its images must name the target's loader.
+  GlibcSonames* = @["libc.so.6", "libm.so.6", "libdl.so.2",
+    "libpthread.so.0", "librt.so.1", "libutil.so.1", "libresolv.so.2"] &
+    glibcLoaderSonames()
+    ## The C library and every loader of `GlibcLoaders`, which an installed
+    ## prefix never bundles: it is the ABI of the target's kernel and loader
+    ## (§5.3 decision C).
   LlvmObjcopyDebugStrip* = "llvm-objcopy --strip-debug - -"
     ## `debugStripCommand` for a prefix whose libraries may be built for
     ## another machine: LLVM's objcopy reads every target, and `- -` makes it
@@ -148,10 +168,27 @@ proc idPart(value: string): string =
   for ch in value:
     result.add(if ch.isAlphaNumeric or ch in {'-', '_', '.'}: ch else: '_')
 
+proc systemLoaderOf*(spec: InstalledPrefixSpec): string =
+  ## The loader the prefix's images are made to name: the triple's glibc
+  ## loader when glibc is a system soname of the prefix, "" when it is not
+  ## (a musl or a static prefix: the images keep what they name). A triple
+  ## the table does not hold is a `ValueError`, never a prefix whose images
+  ## keep the build toolchain's loader.
+  if GlibcSoname notin spec.systemSonames:
+    return ""
+  result = glibcLoaderOfTriple(spec.triple)
+  if result.len == 0:
+    raise newException(ValueError, "installedPrefix '" & spec.name &
+      "': glibc (" & GlibcSoname & ") is a system soname, so the images " &
+      "must name the system loader of '" & spec.triple & "', and no loader " &
+      "is known for that triple; known: " & glibcLoaderTriples().join(", ") &
+      ". Add its row to GlibcLoaders (repro_dsl_stdlib/glibc_loaders).")
+
 proc validate(spec: InstalledPrefixSpec) =
   if spec.name.len == 0 or spec.output.len == 0:
     raise newException(ValueError,
       "installedPrefix: the spec needs a name and an output directory")
+  discard systemLoaderOf(spec)
   for e in spec.entries:
     if e.dest.len == 0 or e.dest.isAbsolute or ".." in e.dest.split('/'):
       raise newException(ValueError, "installedPrefix '" & spec.name &
@@ -247,6 +284,21 @@ for f in $(elfs "$O"); do
   elif [ -n "$(patchelf --print-rpath "$f")" ]; then
     patchelf --remove-rpath "$f"
   fi
+done
+""")
+  # ---- PT_INTERP --------------------------------------------------------
+  let loader = systemLoaderOf(spec)
+  if loader.len > 0:
+    s.add("LOADER=" & q(loader) & "; ")
+    s.add("""
+for f in $(elfs "$O"); do
+  interp=$(readelf -l -W "$f" 2>/dev/null | sed -n 's/.*\[Requesting program interpreter: \(.*\)\]$/\1/p')
+  # No PT_INTERP: a static image, or a library.
+  [ -n "$interp" ] || continue
+  # Another C library's loader (musl's): not glibc's, so not ours to move.
+  [ "${interp##*/}" = "${LOADER##*/}" ] || continue
+  # Already the system loader: the image is left byte for byte as it is.
+  [ "$interp" = "$LOADER" ] || patchelf --set-interpreter "$LOADER" "$f"
 done
 """)
   # ---- the symbol check -------------------------------------------------

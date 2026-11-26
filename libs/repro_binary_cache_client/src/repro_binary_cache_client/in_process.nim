@@ -35,6 +35,7 @@ when defined(ssl):
 import blake3
 
 import ./types
+import ./app_prefix_guard
 import ./http_pool
 import ./scheduler_executor
 import ./closure_walk
@@ -898,6 +899,15 @@ proc publishInProcess*(req: PublishInProcessRequest): PublishInProcessResult =
       p.cpu & "/" & p.os & "/" & p.abi & "/" & p.libcVariant &
       "), so nothing is published (the object check):\n  " &
       mismatches.join("\n  ")
+    return
+
+  # An application prefix is published only while it still is the bundle it
+  # was realized as: an updater that rewrote the copy in place must not reach
+  # every host that substitutes this key (Store-And-Installation-Layout.md,
+  # macOS application bundles, "Cached prefixes").
+  let appRefusal = appPrefixPublishRefusal(req.prefixDir)
+  if appRefusal.len > 0:
+    result.error = "publish: " & appRefusal & "; nothing is published"
     return
 
   let archivePlan =
