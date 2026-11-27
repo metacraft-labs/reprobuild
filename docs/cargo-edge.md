@@ -244,3 +244,36 @@ is bounds-checked when it is written, and a plan read back is checked for
 unique ids, resolved references and outputs inside their units' directories.
 It is read back by the edges built from it; the JSON recordings it was
 derived from stay inside the edge.
+
+## Edges from the plan: library and binary units
+
+`repro_cargo_edge/plan_units` turns a plan into build-graph edges, one rustc
+edge per unit, `cargo.rustc/<package>@<version>-<hash>` with cargo's own
+hash. In a workspace these edges cover, every library and binary unit comes
+from the plan, workspace members as well as crates.io crates, so a member's
+features and cfgs are the ones cargo's feature unification gave it across the
+whole build, never ones derived from the manifests or `cargo metadata`.
+
+- **What an edge runs.** The unit's command line exactly as cargo wrote it,
+  in the working directory cargo used, with the plan's roots expanded on this
+  host (`${project}`, `${store}`, `${nix}`, and `${out}`, the output root the
+  caller gives). A crates.io crate's edge adds one flag,
+  `--remap-path-prefix=<prefix>=<name>-<version>`, as the registry-crate edge
+  always has (`repro_cargo_fetch/crate_compile.registryCrateUnitEdge`, which
+  also checks that the store holds the crate and refuses one that needs a
+  build script, a proc-macro or `links`). A member's edge runs cargo's command
+  line unchanged.
+- **The environment.** Each edge is launched from its declared environment
+  alone: the variables cargo set for the unit, plus the toolchain variables
+  the caller names (the `PATH` that finds the linker). The project's
+  development environment is not given to a compile.
+- **Incremental state.** Cargo's `-C incremental=` directory stays in the
+  argv and is a scratch directory of the edge, emptied before every run.
+- **Outputs and ordering.** The files the unit's `--emit` writes, without
+  the dep-info file. An edge depends on the edges of the units it consumes;
+  its key comes from what the monitor records it reading, checked by content.
+- **One builder per workspace.** A plan holding anything these edges do not
+  build yet (a build script's compile or run, a unit fed by a build script, a
+  proc-macro, a crate type other than `lib`, `rlib` or `bin`, a test target)
+  is refused as a whole (`PlanUnitsRefusal`, naming each unit and why), and
+  no edge is made: such a workspace is built by cargo.
