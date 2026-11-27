@@ -1117,6 +1117,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "",
     singleReason: "suite-scope statement runs at every start-up: var store: string"),
   TestSpec(
+    source: "libs/repro_addon/tests/t_addon_legacy_move_round27.nim",
+    binary: "build/test-bin/t_addon_legacy_move_round27",
+    defines: @[],
+    requiresReproBinary: false,
+    requiresMonitorShim: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "",
+    singleReason: "module-level statement runs at every start-up: let root = getTempDir() / (\"addon-legacy-r27-\" & $getCurrent..."),
+  TestSpec(
     source: "libs/repro_addon/tests/t_addon_plan_json_has_no_rendered_sections.nim",
     binary: "build/test-bin/t_addon_plan_json_has_no_rendered_sections",
     defines: @[],

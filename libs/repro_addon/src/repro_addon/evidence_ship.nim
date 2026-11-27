@@ -248,7 +248,8 @@ const DropLeftName* = "drop-left"
 
 proc dropLeftPath*(stateDir: string): string = stateDir / "harvest" / DropLeftName
 
-proc harvestDropEntries*(dropDir, outbox: string; stateDir = ""): DropHarvest =
+proc harvestDropEntries*(dropDir, outbox: string; stateDir = "";
+                         otherLeft = 0): DropHarvest =
   ## The egress check's entries in its root drop directory, each moved into
   ## the outbox (§13 decision 188): run as root, by the shipping unit's
   ## privileged first step and by a root caller before its confined run.
@@ -265,8 +266,10 @@ proc harvestDropEntries*(dropDir, outbox: string; stateDir = ""): DropHarvest =
     stderr.write("repro-addon evidence: drop entry " & escapeControl(r) & "\n")
   if stateDir.len > 0:
     try:
+      # ``otherLeft``: the legacy outbox's entries this harvest could not
+      # move, which keep the path unit's DirectoryNotEmpty= true as well.
       writeDelegatedEntry(stateDir / "harvest", DropLeftName,
-                          $result.left.len & "\n", mode = 0o644)
+                          $(result.left.len + otherLeft) & "\n", mode = 0o644)
     except CatchableError as e:
       stderr.write("repro-addon evidence: cannot record the drop entries " &
         "left: " & escapeControl(e.msg) & "\n")
@@ -276,13 +279,14 @@ proc dropLeft(stateDir: string): int =
   except CatchableError: 0
 
 const LegacyLeftName* = "legacy-left"
-  ## Under ``<shipping state>/harvest``: how much of the shipping state from
-  ## before §13 decision 181 the privileged harvest has still to move
-  ## (``moveLegacyShipState``). Written "1" before a move starts and the
-  ## count left once it ends, so a move that stopped half way, by a failure
-  ## or a crash, leaves it non-zero. While it is, a shipping run ships
-  ## nothing: an entry the move handed over but could not yet remove would
-  ## otherwise leave twice.
+  ## Under ``<shipping state>/harvest``: how many legacy outbox entries the
+  ## privileged harvest handed over but could not yet remove
+  ## (``moveLegacyShipState``), the only entries that could leave twice.
+  ## Written "1" before a move starts, so a move killed in the middle leaves
+  ## it non-zero, and that count once it ends, whatever stopped it. While it
+  ## is non-zero a shipping run ships nothing; the next harvest runs the
+  ## move again because of it (A11 round 27, M1), so it never stays non-zero
+  ## once a move finishes.
 
 proc legacyLeftPath*(stateDir: string): string =
   stateDir / "harvest" / LegacyLeftName
@@ -294,17 +298,21 @@ proc legacyLeft*(stateDir: string): int =
 type
   LegacyMove* = object
     ## What one ``moveLegacyShipState`` did.
-    found*: bool             ## there was legacy state to move
+    found*: bool             ## there was legacy state to move, or an
+                             ## unfinished move's mark to clear
+    skipped*: string         ## why it moved nothing ("" when it ran)
     entries*: DropHarvest    ## the legacy outbox's entries
+    asideOutbox*: string     ## the legacy outbox's place held something
+                             ## other than a directory, moved aside: what
     stateMoved*: seq[string] ## state files carried over
     stateKept*: seq[string]  ## legacy state files dropped because the
-                             ## dynamic user's state already has a newer one
+                             ## dynamic user's state has a newer one
     stateLeft*: seq[string]  ## state files that could not be moved, with why
 
 proc hasLegacyShipState*(site: ShipSite): bool =
   ## Whether ``site`` names legacy state and any of it is there: the legacy
-  ## outbox directory, or a ``LegacyShipStateNames`` file. Judged without
-  ## following a link.
+  ## outbox's place (whatever holds it), or a ``LegacyShipStateNames`` file.
+  ## Judged without following a link.
   if site.legacyOutbox.len > 0:
     var st: Stat
     if lstat(site.legacyOutbox.cstring, st) == 0: return true
@@ -314,12 +322,34 @@ proc hasLegacyShipState*(site: ShipSite): bool =
       if lstat((site.legacyStateDir / n).cstring, st) == 0: return true
   false
 
-proc moveLegacyShipState*(site: ShipSite): LegacyMove =
+proc stateOrder(name, bytes: string): BiggestInt =
+  ## How new a shipping state file is, by what it records, or -1 when its
+  ## bytes say nothing about that: the receipt by the sink's chain head
+  ## (``SinkReceipt.headSeq``: the sink only ever extends its chain), the
+  ## shipping and heartbeat times by their milliseconds.
+  try:
+    case name
+    of "receipt": BiggestInt(decodeReceipt(bytes).headSeq)
+    of "last-ship", "last-heartbeat": parseBiggestInt(bytes.strip())
+    else: -1
+  except CatchableError:
+    -1
+
+proc moveLegacyShipState*(site: ShipSite;
+                          lockWaitMs = ShipLockWaitSec * 1000): LegacyMove =
   ## The shipping state of a host an engine before §13 decision 181
   ## bootstrapped, moved into the dynamic user's state directory (the
-  ## owner's decision of 2026-11-26, "migrate existing hosts"). Run as root
-  ## by the privileged harvest, before any shipping run that follows it.
+  ## operator's decision of 2026-11-26, "Migrate existing hosts"). Run as
+  ## root by the privileged harvest, before any shipping run that follows
+  ## it, on every harvest: the engine units that keep the bootstrap engine
+  ## (the store-verify and secrets units, the apt hook) write their records
+  ## into the legacy outbox for the host's life, and the harvest absorbs
+  ## them as a steady state (A11 round 27).
   ##
+  ## - A legacy outbox place that holds anything but a directory (a link, a
+  ##   FIFO, a file: the egress check, uid 0 with the evidence directory
+  ##   writable, can plant one) is moved aside unread and reported; it never
+  ##   holds shipping up.
   ## - Every regular ``*.evr`` entry of the legacy outbox is handed into the
   ##   outbox under its own name and then removed (``takeDropEntries``: no
   ##   link followed, anything else moved aside unread into
@@ -327,65 +357,126 @@ proc moveLegacyShipState*(site: ShipSite): LegacyMove =
   ##   in both places, and the next run hands it over again under the same
   ##   name, replacing the copy: no entry is lost and none is queued twice.
   ## - Each ``LegacyShipStateNames`` file is carried over unless the dynamic
-  ##   user's state already has that file -- the newer one, written by a
-  ##   shipping run after a move that stopped between the copy and the
-  ##   removal -- and then removed. The sink's receipt is the signed head of
-  ##   what it holds, so the newer one is the one to keep.
-  ## - ``legacyLeftPath`` is "1" while the move runs and the count left
-  ##   afterwards; a shipping run ships nothing while it is non-zero.
+  ##   user's state already has a newer one (``stateOrder``: the receipt by
+  ##   the sink's chain head, the times by their value; for the others the
+  ##   dynamic user's is kept), and then removed.
+  ## - ``legacyLeftPath`` is "1" while the move runs and the count of
+  ##   entries handed over but not removed after it, written whatever
+  ##   stopped the move; a mark left non-zero by a killed move makes the
+  ##   next harvest run the move again, which clears it.
   ##
-  ## Serialised by a root lock in the legacy state directory, so two root
-  ## callers never hand the same entry over twice. Nothing to do (no legacy
-  ## state): returns at once and writes nothing.
-  if not hasLegacyShipState(site): return
+  ## Serialised by a root lock in the legacy state directory, and by the
+  ## earlier engine's own shipping lock there (``ship.lock``), so neither a
+  ## second root caller nor a shipping run of that engine (its units kept
+  ## as installed when an apply's dynamic engine had no static image to
+  ## re-point at, §13 decision 174) takes an entry the move hands over. A
+  ## lock not taken in ``lockWaitMs`` skips the move, reported, and leaves
+  ## the mark as it was. Nothing to do: returns at once and writes nothing.
+  let pending = when mutated("legacy-left-not-rerun"): false
+                else: legacyLeft(site.stateDir) > 0
+  if not hasLegacyShipState(site) and not pending: return
   result.found = true
   createDir(site.legacyStateDir)
-  var lock = acquireExclusiveLockWithin(site.legacyStateDir / "legacy-move.lock",
-                                        ShipLockWaitSec * 1000)
+  var lock, shipLock: ReproFileLock
+  try:
+    lock = acquireExclusiveLockWithin(site.legacyStateDir / "legacy-move.lock",
+                                      lockWaitMs)
+  except IOError as e:
+    result.skipped = "another move holds its lock: " & e.msg
+    return
   defer: releaseExclusiveFileLock(lock)
+  when not mutated("legacy-move-ignores-ship-lock"):
+    try:
+      shipLock = acquireExclusiveLockWithin(site.legacyStateDir / "ship.lock",
+                                            lockWaitMs)
+    except IOError as e:
+      result.skipped = "a shipping run of the earlier engine holds " &
+        site.legacyStateDir / "ship.lock" & ": " & e.msg
+      return
+  defer: releaseExclusiveFileLock(shipLock)
   writeDelegatedEntry(site.stateDir / "harvest", LegacyLeftName, "1\n",
                       mode = 0o644)
-  # The state files first: a receipt carried over before any entry moves
-  # is the head the entries' shipping continues from.
-  for n in LegacyShipStateNames:
-    let src = site.legacyStateDir / n
-    var st: Stat
-    if lstat(src.cstring, st) != 0: continue
-    if not S_ISREG(st.st_mode) or st.st_size > MaxRecordBytes:
-      # Root's own directory: only root wrote there. Anything else is not
-      # shipping state, and is left for the operator, reported.
-      result.stateLeft.add(n & ": not a regular file of at most " &
-        $MaxRecordBytes & " bytes; left in " & site.legacyStateDir)
-      continue
-    try:
-      if delegatedStateFileExists(site.stateDir, n):
-        result.stateKept.add(n)
-      else:
+  try:
+    # The state files first: a receipt carried over before any entry moves
+    # is the head the entries' shipping continues from.
+    for n in LegacyShipStateNames:
+      let src = site.legacyStateDir / n
+      var st: Stat
+      if lstat(src.cstring, st) != 0: continue
+      if not S_ISREG(st.st_mode) or st.st_size > MaxRecordBytes:
+        # Root's own directory: only root wrote there. Anything else is not
+        # shipping state, and is left for the operator, reported.
+        result.stateLeft.add(n & ": not a regular file of at most " &
+          $MaxRecordBytes & " bytes; left in " & site.legacyStateDir)
+        continue
+      try:
         let bytes = readRecordFileNoFollow(src)
-        writeDelegatedStateFile(site.stateDir, n, bytes)
-        result.stateMoved.add(n)
-      if crashPointHook != nil: crashPointHook("state-copied:" & n)
-      if posix.unlink(src.cstring) != 0 and errno != ENOENT:
-        raiseOSError(osLastError(), "remove " & src)
-    except OSError, IOError, ValueError:
-      result.stateLeft.add(n & ": " & getCurrentExceptionMsg())
-  when mutated("legacy-move-skips-outbox"):
-    discard
-  else:
-    result.entries = takeDropEntries(site.legacyOutbox, MaxRecordBytes,
-      take = proc (e: DropEntry) = writeOutboxEntry(site.outbox, e.name, e.bytes))
-  # The emptied legacy outbox goes; an engine unit not yet re-pointed that
-  # writes a record makes it again, and the next harvest moves that too.
-  if result.entries.left.len == 0:
-    discard posix.rmdir(site.legacyOutbox.cstring)
-  let left = result.entries.left.len + result.stateLeft.len
-  writeDelegatedEntry(site.stateDir / "harvest", LegacyLeftName, $left & "\n",
-                      mode = 0o644)
+        var keepTheirs = delegatedStateFileExists(site.stateDir, n)
+        when not mutated("legacy-state-newer-dropped"):
+          if keepTheirs:
+            # Bytes the dynamic user wrote, read bounded and not through a
+            # link, and only compared: never executed or decoded further.
+            let theirs = try: readRecordFileNoFollow(site.stateDir / n)
+                         except CatchableError: ""
+            let mine = stateOrder(n, bytes)
+            if mine >= 0 and mine > stateOrder(n, theirs): keepTheirs = false
+        if keepTheirs:
+          result.stateKept.add(n)
+        else:
+          writeDelegatedStateFile(site.stateDir, n, bytes)
+          result.stateMoved.add(n)
+        if crashPointHook != nil: crashPointHook("state-copied:" & n)
+        if posix.unlink(src.cstring) != 0 and errno != ENOENT:
+          raiseOSError(osLastError(), "remove " & src)
+      except OSError, IOError, ValueError:
+        result.stateLeft.add(n & ": " & getCurrentExceptionMsg())
+    var ost: Stat
+    let outboxThere = site.legacyOutbox.len > 0 and
+                      lstat(site.legacyOutbox.cstring, ost) == 0
+    if outboxThere and not S_ISDIR(ost.st_mode) and
+        not mutated("legacy-outbox-not-dir-raises"):
+      let failed = moveAsidePath(site.legacyOutbox)
+      result.asideOutbox = "the legacy outbox " & site.legacyOutbox &
+        " is not a directory; " & (if failed.len == 0:
+          "moved aside unread to " & dropAsideDir(site.legacyOutbox)
+        else: "could not be moved aside (" & failed & "), removed if it could be")
+    elif outboxThere:
+      when mutated("legacy-move-skips-outbox"):
+        discard
+      else:
+        try:
+          result.entries = takeDropEntries(site.legacyOutbox, MaxRecordBytes,
+            take = proc (e: DropEntry) =
+              writeOutboxEntry(site.outbox, e.name, e.bytes))
+        except OSError as e:
+          # The directory could not be opened: nothing was handed over, so
+          # nothing can leave twice; reported, and shipping goes on.
+          result.entries.left.add(site.legacyOutbox & ": " & e.msg)
+      # The emptied legacy outbox goes; an engine unit that still runs the
+      # bootstrap engine makes it again, and the next harvest moves that.
+      if result.entries.left.len == 0:
+        discard posix.rmdir(site.legacyOutbox.cstring)
+        if crashPointHook != nil: crashPointHook("legacy-rmdir")
+  except CrashPointKill:
+    raise                 # tests only: a kill writes nothing more
+  except CatchableError:
+    # Whatever stopped the move, the mark says what may now leave twice.
+    writeDelegatedEntry(site.stateDir / "harvest", LegacyLeftName,
+                        $result.entries.stuck.len & "\n", mode = 0o644)
+    raise
+  writeDelegatedEntry(site.stateDir / "harvest", LegacyLeftName,
+                      $result.entries.stuck.len & "\n", mode = 0o644)
 
 proc reportLegacyMove(m: LegacyMove) =
   ## The move on stdout (what moved) and stderr (what did not), every name
   ## escaped.
   if not m.found: return
+  if m.skipped.len > 0:
+    stderr.write("repro-addon evidence: the shipping state from before " &
+      "decision 181 was not moved this time: " & escapeControl(m.skipped) & "\n")
+    return
+  if m.asideOutbox.len > 0:
+    stderr.write("repro-addon evidence: " & escapeControl(m.asideOutbox) & "\n")
   if m.entries.moved > 0 or m.stateMoved.len > 0:
     stdout.write("evidence: moved " & $m.entries.moved & " queued record(s)" &
       (if m.stateMoved.len > 0: " and " & m.stateMoved.join(", ") else: "") &
@@ -804,17 +895,20 @@ proc shipFor*(site: ShipSite; conf: EvidenceConf; host: string;
     s.confined = false
     return runEvidenceShip(s, conf, host, forceHeartbeat)
   result.hookEvents = harvestHookWrapperEvents(site, host)
+  var legacyNotMoved = 0
   try:
-    reportLegacyMove(moveLegacyShipState(site))
+    let m = moveLegacyShipState(site)
+    reportLegacyMove(m)
+    legacyNotMoved = m.entries.left.len
   except CatchableError as e:
-    # The move leaves ``legacyLeftPath`` non-zero, so the confined run
-    # below ships nothing; the records stay where they are.
+    # The move records what may leave twice in ``legacyLeftPath``, so the
+    # confined run below ships nothing only while that is so.
     stderr.write("repro-addon evidence: the shipping state from before " &
       "the shipping unit's own user: " & escapeControl(e.msg) & "\n")
   var dropLeftOver = 0
   try:
     dropLeftOver = harvestDropEntries(site.dropDir, site.outbox,
-                                      site.stateDir).left.len
+                                      site.stateDir, legacyNotMoved).left.len
   except CatchableError as e:
     # A drop directory that cannot be opened (a link or a file in its
     # place) ships nothing from it, and says so; the outbox still ships.
@@ -858,10 +952,13 @@ proc runHarvest*(site: ShipSite; host: string): int =
   ## failed would stop the shipping run, and with it every record already
   ## in the outbox.
   var failed = false
+  var legacyNotMoved = 0
   try:
     # The shipping state from before §13 decision 181 (the owner's
     # decision of 2026-11-26), before anything else lands in the outbox.
-    reportLegacyMove(moveLegacyShipState(site))
+    let m = moveLegacyShipState(site)
+    reportLegacyMove(m)
+    legacyNotMoved = m.entries.left.len
   except CatchableError as e:
     failed = true
     stderr.write("repro system addon evidence-harvest: the shipping state " &
@@ -876,7 +973,8 @@ proc runHarvest*(site: ShipSite; host: string): int =
       "events: " & escapeControl(e.msg) & "\n")
   try:
     # The egress check's entries (§13 decision 188).
-    let h = harvestDropEntries(site.dropDir, site.outbox, site.stateDir)
+    let h = harvestDropEntries(site.dropDir, site.outbox, site.stateDir,
+                               legacyNotMoved)
     if h.moved > 0: stdout.write("evidence: " & $h.moved & " egress check entr" &
                                  (if h.moved == 1: "y" else: "ies") & "\n")
   except CatchableError as e:

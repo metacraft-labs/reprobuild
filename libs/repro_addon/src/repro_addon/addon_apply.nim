@@ -345,8 +345,10 @@ type
     ownMigrated*: seq[string]
       ## Generation 0's units this engine renders differently and the switch
       ## rewrites (``own_profile.migrateOwnProfile``), for the operator's
-      ## review: the plan lists them. Each only narrows the unit (the owner's
-      ## decision of 2026-11-26 for the shipping and egress check units).
+      ## review: the plan lists them. The shipping and egress check units
+      ## lose privilege where they decode (the operator's decision of
+      ## 2026-11-26); on a host from before §13 decision 181 the shipping
+      ## unit gains the privileged harvest step, the engine's own code.
     repointSkipped*: string
       ## Non-empty when the engine units were not re-pointed because the
       ## running engine is not the static add-on image and no matching

@@ -124,7 +124,7 @@ proc exactlyOnce(s: ShipSite): bool =
     if readFile(s.outbox / n) != "record " & $i: return false
   not dirExists(s.legacyOutbox) or names(s.legacyOutbox).len == 0
 
-type Killed = object of CatchableError
+type Killed = CrashPointKill
 
 suite "existing hosts are migrated (owner decision 2026-11-26)":
   test "the migration renders the shipping unit whole: its own user":

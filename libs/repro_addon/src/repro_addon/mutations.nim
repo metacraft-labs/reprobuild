@@ -1426,6 +1426,21 @@
 ## ``legacy-ship-ungated``                    a shipping run ships while the
 ##                                            legacy move is unfinished
 ##                                            (2026-11-26)
+## ``legacy-left-not-rerun``                  a mark an unfinished legacy move
+##                                            left is not cleared by the next
+##                                            harvest (round 27, M1)
+## ``legacy-outbox-not-dir-raises``           a link or FIFO in the legacy
+##                                            outbox's place is not moved
+##                                            aside (round 27, M1)
+## ``legacy-state-newer-dropped``             the dynamic user's receipt is
+##                                            kept over a newer legacy one
+##                                            (round 27, L2)
+## ``legacy-move-ignores-ship-lock``          the move does not exclude the
+##                                            earlier engine's shipping run
+##                                            (round 27, L3)
+## ``path-unit-ignores-legacy-outbox``        the path unit does not start the
+##                                            shipping unit for the legacy
+##                                            outbox (round 27)
 ## ``outbox-listed-by-path``                  the outbox is listed by path,
 ##                                            through a link its dynamic user
 ##                                            planted (decision 181)
@@ -2615,6 +2630,11 @@ const
                           "legacy-move-unlinks-first",
                           "legacy-move-skips-outbox",
                           "legacy-ship-ungated",
+                          "legacy-left-not-rerun",
+                          "legacy-outbox-not-dir-raises",
+                          "legacy-state-newer-dropped",
+                          "legacy-move-ignores-ship-lock",
+                          "path-unit-ignores-legacy-outbox",
                           "outbox-listed-by-path",
                           "confined-output-unescaped",
                           "confined-copy-shared",
