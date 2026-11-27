@@ -242,11 +242,17 @@ proc logShim*(targetDir, message: string) =
 
 proc findRealCargo*(pathVar, explicit: string): string =
   ## `explicit` (`REPRO_CARGO_REAL`) when it names an executable file, else
-  ## the first `cargo` on `pathVar` that is not this program: not the same
-  ## file (by identity, so a symlink or hard link to the shim is skipped) and
-  ## not in the directory the shim was found in. Not resolved through
-  ## symlinks, so a rustup proxy still sees the name it dispatches on.
-  ## "" when there is none.
+  ## the first `cargo` on `pathVar` AFTER this program's own entry: not the
+  ## same file (by identity, so a symlink or hard link to the shim is skipped)
+  ## and not in the directory the shim was found in. A `cargo` that sits BEFORE
+  ## the shim on the path is another wrapper that put itself in front (a
+  ## repository's dev-bin/cargo); handing it the call would send it back here,
+  ## because such a wrapper takes the first `cargo` that is not itself, which
+  ## is the shim, and the two would call each other for ever. So the search
+  ## starts after the shim's entry. When the shim is not on `pathVar` at all
+  ## (it was run by an absolute path), the whole path is searched. Not
+  ## resolved through symlinks, so a rustup proxy still sees the name it
+  ## dispatches on. "" when there is none.
   when defined(posix):
     proc executableFile(path: string): bool =
       var st: Stat
@@ -255,13 +261,24 @@ proc findRealCargo*(pathVar, explicit: string): string =
     if explicit.len > 0 and executableFile(explicit): return explicit
     var self: Stat
     let haveSelf = stat(getAppFilename().cstring, self) == 0
+    proc isSelf(candidate: string): bool =
+      var st: Stat
+      haveSelf and stat(candidate.cstring, st) == 0 and
+        st.st_dev == self.st_dev and st.st_ino == self.st_ino
+    let dirs = pathVar.split(':')
+    # The first entry that is this program; every entry up to it is skipped.
+    var start = 0
+    for i, dir in dirs:
+      let candidate = (if dir.len == 0: "." else: dir) / "cargo"
+      if executableFile(candidate) and isSelf(candidate):
+        start = i + 1
+        break
     var shimDirs: seq[string]
-    for dir in pathVar.split(':'):
+    for i in start ..< dirs.len:
+      let dir = dirs[i]
       let candidate = (if dir.len == 0: "." else: dir) / "cargo"
       if not executableFile(candidate): continue
-      var st: Stat
-      discard stat(candidate.cstring, st)
-      if haveSelf and st.st_dev == self.st_dev and st.st_ino == self.st_ino:
+      if isSelf(candidate):
         shimDirs.add (try: expandFilename(parentDir(candidate)) except OSError: dir)
         continue
       let real = try: expandFilename(parentDir(candidate)) except OSError: ""
