@@ -66,6 +66,16 @@
 ## the compile: the library's crate name and root, the edition, and the
 ## package fields of cargo's crate environment.
 ##
+## **The unit from cargo's plan (`registryCrateUnitEdge`).** In a workspace
+## Reprobuild builds from cargo's recorded plan (`repro_cargo_edge/
+## plan_units`), the unit is not the caller's: its argv, working directory
+## and environment are cargo's own, read from the record run, so its
+## features, cfgs, profile flags, `-C metadata` hash and `CARGO_*`
+## environment are exactly cargo's. This module then adds what is particular
+## to a registry crate (the store check, the refusals below, the remap) and
+## builds the same kind of edge. The caller-supplied form
+## (`registryCrateEdge`) remains for a unit named without a plan.
+##
 ## **Refused, never half-built.** Build scripts and proc-macros are not
 ## built as edges yet. A crate whose manifest names a build script, that
 ## ships a `build.rs` beside its manifest, that declares `links`, or whose
@@ -145,6 +155,7 @@ type
       ## what `action.argv` adds to `cargoArgv`: the remap flag, alone
     closure*: seq[RegistryCrateEdge]
       ## every unit this one depends on, transitively, without duplicates
+      ## (empty for a unit from cargo's plan, which holds the closure itself)
     action*: BuildAction
 
 const
@@ -154,6 +165,7 @@ const
   ReleaseProfileArgs* = ["-C", "opt-level=3"]
     ## cargo's `release` profile: `opt-level = 3`, `debug = false` (no flag)
   RegistryCrateEdgePrefix* = "cargo.rustc/"
+  RegistryCrateStatsId* = "rust.rustc-registry"
   UnitHashKind = "reprobuild.cargo-registry-unit.v1"
 
 proc refuse(reason: RegistryCrateRefusalReason; crate, msg: string) {.noreturn.} =
@@ -403,6 +415,37 @@ proc unitHash(row: CrateRow; m: CrateManifest; profileArgs: openArray[string];
   let digest = blake3.digest(s)
   for i in 0 ..< 8: result.add toHex(int(digest[i]), 2).toLowerAscii()
 
+proc rustcUnitAction*(id: string; argv: openArray[string]; cwd: string;
+                      deps, inputs, outputs, env: openArray[string];
+                      commandStatsId: string;
+                      isolateHostEnvironment = false;
+                      scratchDirs: openArray[string] = []): BuildAction =
+  ## The engine action of one rustc unit, as every cargo unit edge declares
+  ## it: cacheable, its inputs checked by content (`hybrid`) and gathered by
+  ## the automatic monitor (so nothing rests on the declared inputs, which
+  ## only order it), in the `compile` pool, outside any solved graph's lock
+  ## identity until a planner names one. ``scratchDirs`` are emptied before
+  ## each run and are never evidence (an incremental-compilation directory).
+  result = action(id, argv,
+    cwd = cwd,
+    deps = deps,
+    inputs = inputs,
+    outputs = outputs,
+    pool = "compile",
+    commandStatsId = commandStatsId,
+    cacheable = true,
+    actionCachePolicy = ffpHybrid,
+    dependencyPolicy = automaticMonitorGatheringPolicy(),
+    isolateHostEnvironment = isolateHostEnvironment,
+    env = env,
+    # Every input of the edge is content: the crate's checksum-addressed
+    # prefix or the workspace's sources, its dependencies' outputs and the
+    # toolchain. No solved graph's identity is wired in yet; the planner
+    # that derives these units from a build of the lock is what will name
+    # it.
+    governingLockIdentity = lockIdentityOutsideSolvedGraph())
+  result.scratchDirs = @scratchDirs
+
 proc registryCrateEdge*(row: CrateRow; storeRoot, rustc, outRoot: string;
                         profileArgs: openArray[string];
                         features: openArray[string] = [];
@@ -505,24 +548,152 @@ proc registryCrateEdge*(row: CrateRow; storeRoot, rustc, outRoot: string;
   var env = cargoCrateEnv(m, prefix)
   env.add extraEnv
   createDir(outDir)
-  let compile = action(registryCrateEdgeId(row, hash), argv & difference,
-    # cargo runs a dependency's rustc in the package's root.
-    cwd = prefix,
-    deps = depIds,
-    inputs = inputs,
-    outputs = [rmeta, rlib],
-    pool = "compile",
-    commandStatsId = "rust.rustc-registry",
-    cacheable = true,
-    actionCachePolicy = ffpHybrid,
-    dependencyPolicy = automaticMonitorGatheringPolicy(),
-    env = env,
-    # Every input of the edge is content: the crate's checksum-addressed
-    # prefix, its dependencies' outputs and the toolchain. No solved
-    # graph's identity is wired in yet; the planner that derives these
-    # units from a build of the lock is what will name it.
-    governingLockIdentity = lockIdentityOutsideSolvedGraph())
+  # cargo runs a dependency's rustc in the package's root.
+  let compile = rustcUnitAction(registryCrateEdgeId(row, hash),
+    argv & difference, cwd = prefix, deps = depIds, inputs = inputs,
+    outputs = [rmeta, rlib], env = env,
+    commandStatsId = RegistryCrateStatsId)
   RegistryCrateEdge(row: row, prefix: prefix, crateName: m.libName,
     metadataHash: hash, outDir: outDir, rmeta: rmeta, rlib: rlib,
     depInfo: outDir / (stem & ".d"), cargoArgv: argv,
     argvDifference: difference, closure: closure, action: compile)
+
+# ---------------------------------------------------------------------------
+# The unit from cargo's plan
+# ---------------------------------------------------------------------------
+
+type
+  RegistryCrateUnit* = object
+    ## One registry crate's unit as cargo planned it, with every path
+    ## absolute on this host: what a record run of cargo recorded for the
+    ## unit (`repro_cargo_edge/cargo_plan`), not what a caller decided.
+    hash*: string
+      ## cargo's own `-C extra-filename` value, without its `-`: the unit's
+      ## name in the edge's id and directory.
+    crateName*: string    ## the unit's `--crate-name`
+    argv*: seq[string]
+      ## cargo's rustc command line for the unit, rustc first
+    cwd*: string          ## the directory cargo ran rustc in
+    env*: seq[string]     ## the variables cargo set for it, `NAME=value`
+    outDir*: string       ## its `--out-dir`
+    outputs*: seq[string]
+      ## every file its `--emit` writes, the dep-info file included
+    deps*: seq[string]    ## the ids of the edges of the units it consumes
+    inputs*: seq[string]  ## the files of those units it reads, in order
+    scratchDirs*: seq[string]
+      ## directories rustc keeps state in between runs (its incremental
+      ## directory), emptied before each run and never evidence
+    isolateHostEnvironment*: bool
+      ## launch from `env` alone, nothing of the engine's environment
+
+type
+  RegistryCrateUnitCheck* = object
+    ## What `checkRegistryCrateUnit` established about a planned unit.
+    prefix*: string          ## the crate's verified store prefix
+    manifest*: CrateManifest
+    rmeta*, rlib*, depInfo*: string
+    declared*: seq[string]   ## the outputs the edge declares
+
+proc unitCrateTypes(argv: openArray[string]): seq[string] =
+  var i = 0
+  while i < argv.len:
+    var value = ""
+    if argv[i] == "--crate-type" and i + 1 < argv.len:
+      value = argv[i + 1]
+      inc i
+    elif argv[i].startsWith("--crate-type="):
+      value = argv[i]["--crate-type=".len .. ^1]
+    for t in value.split(','):
+      if t.len > 0: result.add t
+    inc i
+
+proc checkRegistryCrateUnit*(row: CrateRow; storeRoot: string;
+                             unit: RegistryCrateUnit): RegistryCrateUnitCheck =
+  ## Every check `registryCrateUnitEdge` makes, writing nothing, so that a
+  ## caller can check every unit of a plan before it creates anything.
+  ##
+  ## Raises `RegistryCrateRefusal` for a crate the store at ``storeRoot``
+  ## ("" = the user's store root) does not hold (`rcrNotFetched`); whose
+  ## manifest cannot be read; that needs a build script, a proc-macro,
+  ## `links` or a crate type other than a Rust library
+  ## (`refuseUnbuildable`); or for a unit that is not a compile of this
+  ## crate's library from its prefix (`rcrUnit`): run elsewhere than in the
+  ## prefix, under another crate name, with a `--crate-type` other than
+  ## `lib` or `rlib`, without the library's crate root, with a remap of its
+  ## own, or without both an rlib and an rmeta among its outputs.
+  validateRow(row)
+  let crate = row.label
+  let prefix = block:
+    var s = openStore(if storeRoot.len > 0: absolutePath(storeRoot)
+                      else: resolveStoreRoot())
+    defer: s.close()
+    s.presentCratePrefix(row)
+  if prefix.len == 0:
+    refuse(rcrNotFetched, crate, "registry crate " & crate & " (sha256:" &
+      row.cksum & ") is not in the store; its cargo.fetch edge must run " &
+      "before its compile edge is built")
+  let m = readCrateManifest(row, prefix)
+  refuseUnbuildable(row, m)
+  proc unitRefusal(why: string) {.noreturn.} =
+    refuse(rcrUnit, crate, "registry crate " & crate & ": the planned unit " &
+      unit.hash & " " & why)
+  if unit.hash.len == 0 or not unit.hash.allCharsInSet(HexDigits):
+    unitRefusal("has no hexadecimal unit hash")
+  if unit.argv.len < 2: unitRefusal("has no rustc command line")
+  # The prefix the store names is the one cargo ran in (the same directory,
+  # whichever spelling of the store root each came from).
+  if not (unit.cwd == prefix or (dirExists(unit.cwd) and dirExists(prefix) and
+      sameFile(unit.cwd, prefix))):
+    unitRefusal("runs in " & unit.cwd & ", not in the crate's prefix " &
+      prefix)
+  if unit.crateName != m.libName:
+    unitRefusal("compiles crate " & unit.crateName & ", not the library " &
+      m.libName & " of the manifest")
+  let types = unitCrateTypes(unit.argv)
+  if types.len == 0:
+    unitRefusal("names no crate type")
+  for t in types:
+    if t notin ["lib", "rlib"]:
+      unitRefusal("has crate type " & t & "; only a Rust library (lib, " &
+        "rlib) is built as a registry crate's edge")
+  var root = false
+  for a in unit.argv[1 .. ^1]:
+    if a.startsWith("--remap-path-prefix"):
+      unitRefusal("already passes " & a)
+    if a == m.libPath or a == prefix / m.libPath or a == unit.cwd / m.libPath:
+      root = true
+  if not root:
+    unitRefusal("does not compile the crate root " & m.libPath)
+  result = RegistryCrateUnitCheck(prefix: prefix, manifest: m)
+  for o in unit.outputs:
+    if o.endsWith(".d"): result.depInfo = o
+    else:
+      result.declared.add o
+      if o.endsWith(".rmeta"): result.rmeta = o
+      elif o.endsWith(".rlib"): result.rlib = o
+  if result.rmeta.len == 0 or result.rlib.len == 0:
+    unitRefusal("does not write both an rlib and an rmeta")
+
+proc registryCrateUnitEdge*(row: CrateRow; storeRoot: string;
+                            unit: RegistryCrateUnit): RegistryCrateEdge =
+  ## The rustc edge of ``row`` for a unit cargo planned (see the module
+  ## docstring, "The unit from cargo's plan"). The argv, working directory,
+  ## environment and outputs are ``unit``'s; this proc checks them against
+  ## the crate (`checkRegistryCrateUnit`, whose refusals it raises before it
+  ## creates anything) and adds the remap, so the edge differs from cargo's
+  ## invocation by that one flag, as the caller-supplied form does.
+  let c = checkRegistryCrateUnit(row, storeRoot, unit)
+  # The remap names the prefix as the argv spells it, which is the path
+  # rustc writes into its outputs.
+  let difference = @[remapFlag(row, unit.cwd)]
+  createDir(unit.outDir)
+  let compile = rustcUnitAction(registryCrateEdgeId(row, unit.hash),
+    unit.argv & difference, cwd = unit.cwd, deps = unit.deps,
+    inputs = unit.inputs, outputs = c.declared, env = unit.env,
+    commandStatsId = RegistryCrateStatsId,
+    isolateHostEnvironment = unit.isolateHostEnvironment,
+    scratchDirs = unit.scratchDirs)
+  RegistryCrateEdge(row: row, prefix: c.prefix, crateName: c.manifest.libName,
+    metadataHash: unit.hash, outDir: unit.outDir, rmeta: c.rmeta,
+    rlib: c.rlib, depInfo: c.depInfo, cargoArgv: unit.argv,
+    argvDifference: difference, action: compile)
