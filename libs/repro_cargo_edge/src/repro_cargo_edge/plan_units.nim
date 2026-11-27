@@ -27,8 +27,12 @@
 ## variables the caller names (`PlanUnitsConfig.toolchainEnv`, such as the
 ## `PATH` that finds the linker a binary is linked with). The project's
 ## development environment is not given to a compile: a registry crate's key
-## must not move with a project's shell. A name the unit sets is the unit's,
-## and the toolchain's value of it is not given.
+## must not move with a project's shell. The variables the dev shell's cargo
+## wrapper changes for itself (`CargoWrapperVariables`: `PATH`, `SHLVL`,
+## `PWD`, `OLDPWD`, `_`), which cargo does not set for a compile, are dropped
+## from the difference, so the toolchain's `PATH` is an edge's only `PATH`.
+## A toolchain variable that cargo also set for the unit, or removed from
+## it, is refused: the edge would no longer get what cargo gave the unit.
 ##
 ## INCREMENTAL STATE. Cargo passes `-C incremental=<dir>` for a workspace
 ## member in a profile with incremental compilation. The argv keeps it (it
@@ -49,7 +53,8 @@
 ## ONE WORKSPACE, ONE BUILDER. A workspace is built either wholly by these
 ## edges or wholly by cargo, never a mix. So `planUnitEdges` returns an edge
 ## for every unit of the plan or raises `PlanUnitsRefusal`, which names every
-## unit it cannot build and why, and creates no edge. Refused today, each
+## unit it cannot build and why, and creates no edge and no directory (every
+## check, the registry crates' too, is made before anything is written). Refused today, each
 ## until the change that builds it:
 ##
 ## - a build script's compile, and each build-script run;
@@ -58,6 +63,12 @@
 ##   `OUT_DIR`);
 ## - a proc-macro, and any crate type other than `lib`, `rlib` and `bin`;
 ## - a test target (`--test`);
+## - a unit that writes split debug information (`-C split-debuginfo`
+##   other than `off`, explicitly or as rustc's default for an Apple or a
+##   Windows MSVC target with debug information on), whose side files
+##   (`.dwo`, `.dwp`, `.dSYM`, `.pdb`) are not declared outputs yet;
+## - a unit passing `-C prefer-dynamic`;
+## - a unit given a toolchain variable that cargo set or removed for it;
 ## - a registry crate the caller gives no lock row for, or one
 ##   `registryCrateUnitEdge` refuses (not fetched, a manifest that needs a
 ##   build script, a proc-macro or `links`, a unit that does not compile
@@ -74,6 +85,15 @@ const
   MemberUnitStatsId* = "rust.rustc-member"
     ## The statistics id of a workspace member's unit edge.
   BuildableCrateTypes = ["lib", "rlib", "bin"]
+  CargoWrapperVariables* = ["PATH", "SHLVL", "PWD", "OLDPWD", "_"]
+    ## Variables a unit's recorded difference can carry that cargo does not
+    ## set for a compile on Linux and macOS: the dev shell's `cargo` is a
+    ## shell script around the real one, which changes them for itself, and
+    ## every process cargo starts inherits the change. They are not given
+    ## to an edge, so a dev-shell bump does not change a unit's key, and the
+    ## toolchain's `PATH` (`PlanUnitsConfig.toolchainEnv`) picks the linker.
+    ## (Cargo extends `PATH` on Windows as its dynamic-library path; the
+    ## record mode is refused there.)
 
 type
   PlanUnitsRefusal* = object of CatchableError
@@ -133,6 +153,49 @@ proc crateTypes*(argv: openArray[string]): seq[string] =
       if t.len > 0: result.add t
     inc i
 
+proc codegenOption*(argv: openArray[string]; key: string):
+    tuple[found: bool, value: string] =
+  ## The last `-C <key>[=<value>]` of a rustc command line (rustc takes the
+  ## last), with "" for a key given without a value.
+  var i = 0
+  while i < argv.len:
+    var opt = ""
+    if argv[i] in ["-C", "--codegen"] and i + 1 < argv.len:
+      opt = argv[i + 1]
+      inc i
+    elif argv[i].startsWith("-C") and argv[i].len > 2:
+      opt = argv[i][2 .. ^1]
+    elif argv[i].startsWith("--codegen="):
+      opt = argv[i]["--codegen=".len .. ^1]
+    if opt == key:
+      result = (true, "")
+    elif opt.startsWith(key & "="):
+      result = (true, opt[key.len + 1 .. ^1])
+    inc i
+
+proc effectiveSplitDebuginfo*(argv: openArray[string]): string =
+  ## The `-C split-debuginfo` a rustc command line compiles with: the value
+  ## it passes, or, when it passes none, rustc's default for the target
+  ## (`off` on Linux; `packed` for an Apple or a Windows MSVC target, where
+  ## rustc writes a `.dSYM` or a `.pdb` beside a linked output) when it
+  ## asks for debug information at all; `off` when it asks for none.
+  ## https://doc.rust-lang.org/rustc/codegen-options/index.html#split-debuginfo
+  let explicit = codegenOption(argv, "split-debuginfo")
+  if explicit.found: return explicit.value
+  let debug = codegenOption(argv, "debuginfo")
+  var wantsDebug = debug.found and debug.value notin ["0", "none"]
+  if "-g" in argv: wantsDebug = true
+  if not wantsDebug: return "off"
+  var target = ""
+  for i, a in argv:
+    if a == "--target" and i + 1 < argv.len: target = argv[i + 1]
+    elif a.startsWith("--target="): target = a["--target=".len .. ^1]
+  if target.len == 0:
+    target = (when defined(macosx): "apple"
+              elif defined(windows): "windows-msvc"
+              else: "")
+  if "apple" in target or "windows-msvc" in target: "packed" else: "off"
+
 proc staticRefusal(u: PlanUnit): string =
   ## Why the plan alone says this unit is not built as an edge, or "".
   if u.buildScriptCompile:
@@ -160,6 +223,14 @@ proc staticRefusal(u: PlanUnit): string =
     if t notin BuildableCrateTypes:
       return "has crate type " & t & ", and only " &
         BuildableCrateTypes.join(", ") & " units are built from the plan"
+  let split = effectiveSplitDebuginfo(u.argv)
+  if split != "off":
+    return "writes split debug information (-C split-debuginfo=" & split &
+      "), whose side files are not declared outputs yet"
+  let dynamic = codegenOption(u.argv, "prefer-dynamic")
+  if dynamic.found and dynamic.value notin ["no", "n", "off", "false"]:
+    return "passes -C prefer-dynamic, which links the standard library " &
+      "dynamically from the toolchain, and is not built from the plan"
   ""
 
 proc refusalMessage(refused: seq[(string, string)]): string =
@@ -201,14 +272,32 @@ proc externPaths(argv: openArray[string]): seq[string] =
     if eq > 0: result.add value[eq + 1 .. ^1]
     inc i
 
+type
+  Prepared = object
+    ## One unit's edge, computed in the checking pass, before anything is
+    ## written.
+    unit: PlanUnit
+    registry: bool
+    row: CrateRow
+    argv, env, launchEnv, outputs, declared, inputs, deps, scratch: seq[string]
+    cwd, outDir, depInfo: string
+
+proc registryUnit(p: Prepared): RegistryCrateUnit =
+  RegistryCrateUnit(hash: p.unit.id[p.unit.id.rfind('-') + 1 .. ^1],
+    crateName: p.unit.crateName, argv: p.argv, cwd: p.cwd,
+    env: p.launchEnv, outDir: p.outDir, outputs: p.outputs, deps: p.deps,
+    inputs: p.inputs, scratchDirs: p.scratch, isolateHostEnvironment: true)
+
 proc planUnitEdges*(plan: CargoPlan; cfg: PlanUnitsConfig): seq[PlanUnitEdge] =
   ## One rustc edge per unit of ``plan`` (see the module docstring), sorted
-  ## by the units' plan ids. Raises `PlanUnitsRefusal`, creating no edge,
-  ## when any unit or run of the plan is one these edges do not build;
-  ## `CargoPlanError` when the plan names a root this host does not have
-  ## (`${nix}` without a Nix store, `${store}` with no store root given);
-  ## `ValueError` for a configuration without the absolute roots it needs.
-  ## Each unit's output directory is created; nothing else is written.
+  ## by the units' plan ids. Raises `PlanUnitsRefusal` when any unit or run
+  ## of the plan is one these edges do not build; `CargoPlanError` when the
+  ## plan names a root this host does not have (`${nix}` without a Nix
+  ## store, `${store}` with no store root given); `ValueError` for a
+  ## configuration without the absolute roots it needs or with a malformed
+  ## toolchain variable. Every check, the registry crates' included, is made
+  ## before anything is written, so a refused or failed plan creates no
+  ## directory; an accepted one creates each unit's output directory.
   for (what, path) in [("workspace root", cfg.projectRoot),
                        ("output root", cfg.outRoot)]:
     if path.len == 0 or not path.isAbsolute:
@@ -217,87 +306,99 @@ proc planUnitEdges*(plan: CargoPlan; cfg: PlanUnitsConfig): seq[PlanUnitEdge] =
   if cfg.storeRoot.len > 0 and not cfg.storeRoot.isAbsolute:
     raise newException(ValueError, "the store root must be absolute: " &
       cfg.storeRoot)
+  var toolchainNames: seq[string]
+  for entry in cfg.toolchainEnv:
+    let eq = entry.find('=')
+    if eq <= 0:
+      raise newException(ValueError, "a toolchain variable must be " &
+        "NAME=value: " & entry.escape())
+    toolchainNames.add entry[0 ..< eq]
   validatePlan(plan)
   let roots = planRoots(cfg)
   var rows = initTable[string, CrateRow]()
   for row in cfg.registryCrates: rows[row.name & "@" & row.version] = row
+  var byId = initTable[string, PlanUnit]()
+  for u in plan.units: byId[u.id] = u
 
-  # 1. What the plan alone says is not built here.
+  # 1. Every check, writing nothing.
   var refused: seq[(string, string)]
   for r in plan.runs:
     refused.add (r.id, "is a build-script run, and build scripts are not " &
       "built as edges yet")
+  var prepared: seq[Prepared]
   for u in plan.units:
     let why = staticRefusal(u)
-    if why.len > 0: refused.add (u.id, why)
-    elif u.cwd.startsWith("${store}/") and
-        u.package & "@" & u.version notin rows:
-      refused.add (u.id, "compiles the registry crate " & u.package & "@" &
-        u.version & ", for which no lock row was given")
-  if refused.len > 0: raiseRefusal(refused)
-
-  # 2. The edges.
-  var byId = initTable[string, PlanUnit]()
-  for u in plan.units: byId[u.id] = u
-  for u in plan.units:
+    if why.len > 0:
+      refused.add (u.id, why)
+      continue
+    var p = Prepared(unit: u, registry: u.cwd.startsWith("${store}/"))
+    if p.registry:
+      if u.package & "@" & u.version notin rows:
+        refused.add (u.id, "compiles the registry crate " & u.package & "@" &
+          u.version & ", for which no lock row was given")
+        continue
+      p.row = rows[u.package & "@" & u.version]
     let where = "the unit " & u.id
-    let argv = block:
-      var s: seq[string]
-      for a in u.argv: s.add expand(roots, a, where)
-      s
-    let cwd = expand(roots, u.cwd, where)
-    var env: seq[string]
-    var named = initHashSet[string]()
+    for a in u.argv: p.argv.add expand(roots, a, where)
+    p.cwd = expand(roots, u.cwd, where)
+    var named: seq[string]
     for (name, value) in u.env:
-      env.add name & "=" & expand(roots, value, where & " (" & name & ")")
-      named.incl name
-    var launchEnv = env
-    for entry in cfg.toolchainEnv:
-      let eq = entry.find('=')
-      if eq <= 0:
-        raise newException(ValueError, "a toolchain variable must be " &
-          "NAME=value: " & entry.escape())
-      if entry[0 ..< eq] notin named: launchEnv.add entry
-    let outDir = cfg.outRoot / u.id
-    var outputs: seq[string]
-    for o in u.outputs: outputs.add expand(roots, o, where)
-    var depInfo = ""
-    var declared: seq[string]
-    for o in outputs:
-      if o.endsWith(".d"): depInfo = o
-      else: declared.add o
+      # What the dev shell's cargo wrapper changed for itself, which cargo
+      # does not set for a compile: not given to the edge, so the
+      # toolchain's `PATH` is the edge's only `PATH`.
+      if name in CargoWrapperVariables: continue
+      p.env.add name & "=" & expand(roots, value, where & " (" & name & ")")
+      named.add name
+    var clash = ""
+    for name in toolchainNames:
+      if name in named:
+        clash = "is given " & name & " by cargo, and the toolchain " &
+          "variables name it too"
+      elif name in u.envRemoved:
+        clash = "has " & name & " removed by cargo, and the toolchain " &
+          "variables set it"
+    if clash.len > 0:
+      refused.add (u.id, clash)
+      continue
+    p.launchEnv = p.env & cfg.toolchainEnv
+    p.outDir = cfg.outRoot / u.id
+    for o in u.outputs: p.outputs.add expand(roots, o, where)
+    for o in p.outputs:
+      if o.endsWith(".d"): p.depInfo = o
+      else: p.declared.add o
     # Ordering: the files `--extern` names, and the matching file of every
     # other unit of the closure.
     let links = "bin" in crateTypes(u.argv)
-    var inputs = externPaths(argv)
+    p.inputs = externPaths(p.argv)
     for c in u.closure:
       for o in byId[c].outputs:
         if o.endsWith(if links: ".rlib" else: ".rmeta"):
           let path = expand(roots, o, where)
-          if path notin inputs: inputs.add path
-    var deps: seq[string]
-    for c in u.consumes: deps.add planUnitEdgeId(byId[c])
-    var scratch: seq[string]
-    if u.cargoIncrementalDir.len > 0: scratch.add outDir / "incremental"
-    if u.cwd.startsWith("${store}/"):
-      let row = rows[u.package & "@" & u.version]
+          if path notin p.inputs: p.inputs.add path
+    for c in u.consumes: p.deps.add planUnitEdgeId(byId[c])
+    if u.cargoIncrementalDir.len > 0: p.scratch.add p.outDir / "incremental"
+    if p.registry:
       try:
-        let e = registryCrateUnitEdge(row, cfg.storeRoot, RegistryCrateUnit(
-          hash: u.id[u.id.rfind('-') + 1 .. ^1], crateName: u.crateName,
-          argv: argv, cwd: cwd, env: launchEnv, outDir: outDir,
-          outputs: outputs, deps: deps, inputs: inputs,
-          scratchDirs: scratch, isolateHostEnvironment: true))
-        result.add PlanUnitEdge(unit: u, registry: true, cargoArgv: argv,
-          argvDifference: e.argvDifference, env: env, outDir: outDir,
-          depInfo: depInfo, action: e.action)
+        discard checkRegistryCrateUnit(p.row, cfg.storeRoot,
+          registryUnit(p))
       except RegistryCrateRefusal as err:
         refused.add (u.id, "is refused as a registry crate: " & err.msg)
-    else:
-      createDir(outDir)
-      result.add PlanUnitEdge(unit: u, cargoArgv: argv, env: env,
-        outDir: outDir, depInfo: depInfo,
-        action: rustcUnitAction(planUnitEdgeId(u), argv, cwd = cwd,
-          deps = deps, inputs = inputs, outputs = declared, env = launchEnv,
-          commandStatsId = MemberUnitStatsId, isolateHostEnvironment = true,
-          scratchDirs = scratch))
+        continue
+    prepared.add p
   if refused.len > 0: raiseRefusal(refused)
+
+  # 2. The edges.
+  for p in prepared:
+    if p.registry:
+      let e = registryCrateUnitEdge(p.row, cfg.storeRoot, registryUnit(p))
+      result.add PlanUnitEdge(unit: p.unit, registry: true,
+        cargoArgv: p.argv, argvDifference: e.argvDifference, env: p.env,
+        outDir: p.outDir, depInfo: p.depInfo, action: e.action)
+    else:
+      createDir(p.outDir)
+      result.add PlanUnitEdge(unit: p.unit, cargoArgv: p.argv, env: p.env,
+        outDir: p.outDir, depInfo: p.depInfo,
+        action: rustcUnitAction(planUnitEdgeId(p.unit), p.argv, cwd = p.cwd,
+          deps = p.deps, inputs = p.inputs, outputs = p.declared,
+          env = p.launchEnv, commandStatsId = MemberUnitStatsId,
+          isolateHostEnvironment = true, scratchDirs = p.scratch))

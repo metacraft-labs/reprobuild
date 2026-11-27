@@ -3529,6 +3529,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_libs_repro_cargo_edge_tests_g01",
     singleReason: ""),
   TestSpec(
+    source: "libs/repro_cargo_fetch/tests/test_registry_crate_unit_edge.nim",
+    binary: "build/test-bin/test_registry_crate_unit_edge",
+    defines: @["ssl"],
+    requiresReproBinary: true,
+    requiresMonitorShim: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "",
+    singleReason: "module-level statement runs at every start-up: let hasCargo = uncontrolledFindExe(\"cargo\").len > 0"),
+  TestSpec(
     source: "libs/repro_cargo_fetch/tests/test_rqe_cg4a_compile_edges_offline.nim",
     binary: "build/test-bin/test_rqe_cg4a_compile_edges_offline",
     defines: @["ssl"],

@@ -39,7 +39,15 @@
 ## logging wrapper saw in the real build, with the registry crate's remap as
 ## the one difference; the binaries the edges link must print what cargo's
 ## print, which names `feat`'s unified features (`fast extra leaf5`). Each
-## edge is launched from its declared environment alone.
+## edge is launched from its declared environment alone: cargo's variables
+## without those the dev shell's cargo wrapper changed for itself (`PATH`,
+## `SHLVL`, `PWD`, `OLDPWD`, `_`, checked absent), and the toolchain's
+## variables, whose `PATH` differs from the record run's and is the only
+## `PATH` an edge has. (The dev shell's rustc names its linker itself, so a
+## link does not show which `PATH` an edge had; the environment checks
+## do.) Planned again
+## with another record-run `PATH`, which moves the wrapper's `PATH` in every
+## unit's difference, every edge keeps its weak fingerprint.
 ##
 ## KNOWN DIFFERENCE, compared explicitly: the plan gives every unit its own
 ## output directory, so cargo's one `-L dependency=<deps>` becomes one
@@ -73,7 +81,10 @@
 ## an edge's argv fails the second case's argv comparison and its binaries'
 ## output; letting a fed unit through the emitter fails the first case's
 ## refusal; dropping the registry crate's remap fails the second case (its
-## argv check, and the embedded-path scan of its rlib and rmeta).
+## argv check, and the embedded-path scan of its rlib and rmeta); keeping
+## the cargo wrapper's variables in an edge's environment fails the second
+## case's PATH, wrapper-variable and fingerprint checks; leaving the
+## toolchain's variables out of the launch fails its environment checks.
 ##
 ## NO MOCKS: real cargo and rustc, the real wrapper, the real engine and
 ## monitor. The logging wrapper runs the real compiler with the arguments it
@@ -189,16 +200,16 @@ proc findTools(): Tools =
 proc recordPlan(t: Tools; ws: string; reg: RegistrySetup;
                 crates: openArray[CratePrefix];
                 devEnv: seq[(string, string)]; work: string;
-                cargoArgs: seq[string] = @[]): CargoPlan =
+                cargoArgs: seq[string] = @[]; planDir = ".plan"): CargoPlan =
   ## Lock the workspace, then plan it as the edge does.
   let lock = runClosed(@[t.cargo] & reg.sourceArgs &
     @["generate-lockfile", "--offline"], ws,
     devEnv & homeEnv(work / "lock"))
   checkpoint lock.output
   doAssert lock.code == 0, "cargo generate-lockfile failed"
-  let planRel = ".plan/app.rbsz"
+  let planRel = planDir & "/app.rbsz"
   var recordArgv = @[t.wrapper, "--cargo-plan", "--plan", planRel,
-    "--scratch", ".plan/scratch", "--cargo", t.cargo, "--rustc", t.rustc,
+    "--scratch", planDir & "/scratch", "--cargo", t.cargo, "--rustc", t.rustc,
     "--store-root", reg.store]
   for c in crates: recordArgv.add ["--crate", crateArg(c)]
   recordArgv.add "--"
@@ -298,12 +309,20 @@ proc isDirectiveValue(args: openArray[string]; i: int): bool =
 
 proc compareToOracle(argv: seq[string]; cwd: string;
                      env: seq[(string, string)]; closureDirs: seq[string];
-                     fed: bool; o: OracleUnit; oracle: Oracle; mp: Mapper) =
+                     fed: bool; o: OracleUnit; oracle: Oracle; mp: Mapper;
+                     edge = false) =
   ## One unit's command line, working directory and environment (the
   ## plan's, or an edge's) against the real build's. `closureDirs` are the
   ## closure's directories as `argv` spells them. For a fed unit the slots
   ## are left out of the plan's side and the build scripts' printed values
-  ## out of the real side.
+  ## out of the real side. For an EDGE nothing is hidden on its side: the
+  ## variables the dev shell's cargo wrapper and the logging shell set
+  ## (`CargoWrapperVariables`) must be absent from it, and are left out of
+  ## the real side only, because the edge drops them by design.
+  if edge:
+    for (name, _) in env:
+      checkpoint "edge variable " & name
+      check name notin CargoWrapperVariables
   check dependencySearch(argv) == closureDirs
   let planArgv = withoutDependencySearch(argv).filterIt(
     not it.startsWith("${slot:")).mapIt(mp.mapBack(it))
@@ -340,6 +359,7 @@ proc compareToOracle(argv: seq[string]; cwd: string;
   var realEnv = initTable[string, string]()
   for name, value in o.env:
     if name in ShellVariables or name in CargoProcessVariables: continue
+    if edge and name in CargoWrapperVariables: continue
     if oracle.base.getOrDefault(name, "\0") == value and
         not cargoSetsVariable(name, false):
       continue
@@ -360,7 +380,7 @@ proc compareToOracle(argv: seq[string]; cwd: string;
     else:
       realEnv[name] = value
   for name in toSeq(planEnv.keys) & toSeq(realEnv.keys):
-    if name in ShellVariables: continue
+    if not edge and name in ShellVariables: continue
     let p = planEnv.getOrDefault(name, "<unset>")
     let r = realEnv.getOrDefault(name, "<unset>")
     checkpoint name & ": plan " & p & " | real " & r
@@ -491,7 +511,16 @@ suite "the plan of a record run":
     let matched = matchUnits(plan, oracle)
 
     let outRoot = work / "edges-out"
-    let toolchain = @["PATH=" & storeOnlyPath()]
+    # The toolchain's PATH differs from the record run's: a directory of
+    # its own holding the linker driver, ahead of the store entries. It is
+    # the only PATH an edge gets.
+    let tcBin = work / "toolchain-bin"
+    createDir(tcBin)
+    let cc = findExe("cc")
+    require cc.len > 0
+    createSymlink(cc, tcBin / "cc")
+    let toolchain = @["PATH=" & tcBin & ":" & storeOnlyPath()]
+    check toolchain[0] != "PATH=" & storeOnlyPath()
     let edges = planUnitEdges(plan, PlanUnitsConfig(projectRoot: ws,
       storeRoot: reg.store, outRoot: outRoot, registryCrates: rows,
       toolchainEnv: toolchain))
@@ -518,20 +547,44 @@ suite "the plan of a record run":
       else:
         check e.argvDifference.len == 0
       # Launched from its declared environment alone: cargo's variables and
-      # the toolchain's, except a name cargo set itself (the dev shell's
-      # cargo is a wrapper that changes `PATH`, so cargo's difference can
-      # carry one).
+      # the toolchain's. The toolchain's PATH is the only PATH (the one the
+      # dev shell's cargo wrapper put in the unit's difference is dropped).
       check e.action.isolateHostEnvironment
-      let cargoNames = envPairsOf(e.env).mapIt(it[0])
-      check e.action.env.sorted == (e.env & toolchain.filterIt(
-        it.split('=')[0] notin cargoNames)).sorted
+      check e.action.env.sorted == (e.env & toolchain).sorted
+      check e.action.env.filterIt(it.startsWith("PATH=")) == toolchain
       check e.depInfo notin e.action.outputs
       for d in e.action.deps: check d in ids
       var closureDirs: seq[string]
       for c in u.closure: closureDirs.add outRoot / c
       closureDirs.sort()
       compareToOracle(e.cargoArgv, e.action.cwd, envPairsOf(e.env),
-        closureDirs, false, matched[u.id], oracle, mp)
+        closureDirs, false, matched[u.id], oracle, mp, edge = true)
+
+    # The record run's PATH does not reach an edge's key: planned again
+    # with another PATH (the wrapper's PATH in each unit's difference moves
+    # with it, the positive control), every edge keeps its weak fingerprint.
+    let extraBin = ws / "extra-bin"
+    createDir(extraBin)
+    let devEnv2 = @[("PATH", storeOnlyPath() & ":" & extraBin),
+      ("TMPDIR", getEnv("TMPDIR", work))]
+    let plan2 = recordPlan(t, ws, reg, crates, devEnv2, work, @["--workspace"],
+      planDir = ".plan2")
+    proc unitPaths(p: CargoPlan): seq[string] =
+      for u in p.units:
+        for (name, value) in u.env:
+          if name == "PATH": result.add u.id & " " & value
+    checkpoint "plan PATHs: " & unitPaths(plan).join(" | ")
+    check unitPaths(plan).len > 0
+    check unitPaths(plan) != unitPaths(plan2)
+    let edges2 = planUnitEdges(plan2, PlanUnitsConfig(projectRoot: ws,
+      storeRoot: reg.store, outRoot: outRoot, registryCrates: rows,
+      toolchainEnv: toolchain))
+    check edges2.len == edges.len
+    for e in edges:
+      for e2 in edges2:
+        if e2.action.id == e.action.id:
+          checkpoint "fingerprint of " & e.action.id
+          check e2.action.weakFingerprint == e.action.weakFingerprint
 
     # Through the real engine and monitor.
     let tools = prepareMonitorTools(repoRoot, work / "monitor",

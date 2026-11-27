@@ -266,7 +266,11 @@ whole build, never ones derived from the manifests or `cargo metadata`.
 - **The environment.** Each edge is launched from its declared environment
   alone: the variables cargo set for the unit, plus the toolchain variables
   the caller names (the `PATH` that finds the linker). The project's
-  development environment is not given to a compile.
+  development environment is not given to a compile, and neither are the
+  variables a shell-script `cargo` (such as a dev shell's) changes for itself
+  (`PATH`, `SHLVL`, `PWD`, `OLDPWD`, `_`), so the toolchain's `PATH` is an
+  edge's only `PATH` and a dev-shell change does not change an edge's key. A
+  toolchain variable that cargo also set, or removed, for a unit is refused.
 - **Incremental state.** Cargo's `-C incremental=` directory stays in the
   argv and is a scratch directory of the edge, emptied before every run.
 - **Outputs and ordering.** The files the unit's `--emit` writes, without
@@ -274,6 +278,8 @@ whole build, never ones derived from the manifests or `cargo metadata`.
   its key comes from what the monitor records it reading, checked by content.
 - **One builder per workspace.** A plan holding anything these edges do not
   build yet (a build script's compile or run, a unit fed by a build script, a
-  proc-macro, a crate type other than `lib`, `rlib` or `bin`, a test target)
-  is refused as a whole (`PlanUnitsRefusal`, naming each unit and why), and
-  no edge is made: such a workspace is built by cargo.
+  proc-macro, a crate type other than `lib`, `rlib` or `bin`, a test target,
+  split debug information, `-C prefer-dynamic`) is refused as a whole
+  (`PlanUnitsRefusal`, naming each unit and why). Every check, a registry
+  crate's included, is made before anything is written, so a refused plan
+  makes no edge and no directory: such a workspace is built by cargo.

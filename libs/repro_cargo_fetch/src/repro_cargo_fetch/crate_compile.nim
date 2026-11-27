@@ -586,13 +586,31 @@ type
     isolateHostEnvironment*: bool
       ## launch from `env` alone, nothing of the engine's environment
 
-proc registryCrateUnitEdge*(row: CrateRow; storeRoot: string;
-                            unit: RegistryCrateUnit): RegistryCrateEdge =
-  ## The rustc edge of ``row`` for a unit cargo planned (see the module
-  ## docstring, "The unit from cargo's plan"). The argv, working directory,
-  ## environment and outputs are ``unit``'s; this proc checks them against
-  ## the crate and adds the remap, so the edge differs from cargo's
-  ## invocation by that one flag, as the caller-supplied form does.
+type
+  RegistryCrateUnitCheck* = object
+    ## What `checkRegistryCrateUnit` established about a planned unit.
+    prefix*: string          ## the crate's verified store prefix
+    manifest*: CrateManifest
+    rmeta*, rlib*, depInfo*: string
+    declared*: seq[string]   ## the outputs the edge declares
+
+proc unitCrateTypes(argv: openArray[string]): seq[string] =
+  var i = 0
+  while i < argv.len:
+    var value = ""
+    if argv[i] == "--crate-type" and i + 1 < argv.len:
+      value = argv[i + 1]
+      inc i
+    elif argv[i].startsWith("--crate-type="):
+      value = argv[i]["--crate-type=".len .. ^1]
+    for t in value.split(','):
+      if t.len > 0: result.add t
+    inc i
+
+proc checkRegistryCrateUnit*(row: CrateRow; storeRoot: string;
+                             unit: RegistryCrateUnit): RegistryCrateUnitCheck =
+  ## Every check `registryCrateUnitEdge` makes, writing nothing, so that a
+  ## caller can check every unit of a plan before it creates anything.
   ##
   ## Raises `RegistryCrateRefusal` for a crate the store at ``storeRoot``
   ## ("" = the user's store root) does not hold (`rcrNotFetched`); whose
@@ -600,8 +618,9 @@ proc registryCrateUnitEdge*(row: CrateRow; storeRoot: string;
   ## `links` or a crate type other than a Rust library
   ## (`refuseUnbuildable`); or for a unit that is not a compile of this
   ## crate's library from its prefix (`rcrUnit`): run elsewhere than in the
-  ## prefix, under another crate name, without the crate root, with a remap
-  ## of its own, or without both an rlib and an rmeta among its outputs.
+  ## prefix, under another crate name, with a `--crate-type` other than
+  ## `lib` or `rlib`, without the library's crate root, with a remap of its
+  ## own, or without both an rlib and an rmeta among its outputs.
   validateRow(row)
   let crate = row.label
   let prefix = block:
@@ -621,16 +640,22 @@ proc registryCrateUnitEdge*(row: CrateRow; storeRoot: string;
   if unit.hash.len == 0 or not unit.hash.allCharsInSet(HexDigits):
     unitRefusal("has no hexadecimal unit hash")
   if unit.argv.len < 2: unitRefusal("has no rustc command line")
-  # The prefix the store names is the one cargo ran in: the plan's prefix is
-  # the same path when both come from this store root, as resolved paths.
-  proc same(a, b: string): bool =
-    a == b or (dirExists(a) and dirExists(b) and sameFile(a, b))
-  if not same(unit.cwd, prefix):
+  # The prefix the store names is the one cargo ran in (the same directory,
+  # whichever spelling of the store root each came from).
+  if not (unit.cwd == prefix or (dirExists(unit.cwd) and dirExists(prefix) and
+      sameFile(unit.cwd, prefix))):
     unitRefusal("runs in " & unit.cwd & ", not in the crate's prefix " &
       prefix)
   if unit.crateName != m.libName:
     unitRefusal("compiles crate " & unit.crateName & ", not the library " &
       m.libName & " of the manifest")
+  let types = unitCrateTypes(unit.argv)
+  if types.len == 0:
+    unitRefusal("names no crate type")
+  for t in types:
+    if t notin ["lib", "rlib"]:
+      unitRefusal("has crate type " & t & "; only a Rust library (lib, " &
+        "rlib) is built as a registry crate's edge")
   var root = false
   for a in unit.argv[1 .. ^1]:
     if a.startsWith("--remap-path-prefix"):
@@ -639,27 +664,36 @@ proc registryCrateUnitEdge*(row: CrateRow; storeRoot: string;
       root = true
   if not root:
     unitRefusal("does not compile the crate root " & m.libPath)
-  var rmeta, rlib, depInfo: string
-  var declared: seq[string]
+  result = RegistryCrateUnitCheck(prefix: prefix, manifest: m)
   for o in unit.outputs:
-    if o.endsWith(".d"): depInfo = o
+    if o.endsWith(".d"): result.depInfo = o
     else:
-      declared.add o
-      if o.endsWith(".rmeta"): rmeta = o
-      elif o.endsWith(".rlib"): rlib = o
-  if rmeta.len == 0 or rlib.len == 0:
+      result.declared.add o
+      if o.endsWith(".rmeta"): result.rmeta = o
+      elif o.endsWith(".rlib"): result.rlib = o
+  if result.rmeta.len == 0 or result.rlib.len == 0:
     unitRefusal("does not write both an rlib and an rmeta")
+
+proc registryCrateUnitEdge*(row: CrateRow; storeRoot: string;
+                            unit: RegistryCrateUnit): RegistryCrateEdge =
+  ## The rustc edge of ``row`` for a unit cargo planned (see the module
+  ## docstring, "The unit from cargo's plan"). The argv, working directory,
+  ## environment and outputs are ``unit``'s; this proc checks them against
+  ## the crate (`checkRegistryCrateUnit`, whose refusals it raises before it
+  ## creates anything) and adds the remap, so the edge differs from cargo's
+  ## invocation by that one flag, as the caller-supplied form does.
+  let c = checkRegistryCrateUnit(row, storeRoot, unit)
   # The remap names the prefix as the argv spells it, which is the path
   # rustc writes into its outputs.
   let difference = @[remapFlag(row, unit.cwd)]
   createDir(unit.outDir)
   let compile = rustcUnitAction(registryCrateEdgeId(row, unit.hash),
     unit.argv & difference, cwd = unit.cwd, deps = unit.deps,
-    inputs = unit.inputs, outputs = declared, env = unit.env,
+    inputs = unit.inputs, outputs = c.declared, env = unit.env,
     commandStatsId = RegistryCrateStatsId,
     isolateHostEnvironment = unit.isolateHostEnvironment,
     scratchDirs = unit.scratchDirs)
-  RegistryCrateEdge(row: row, prefix: prefix, crateName: m.libName,
-    metadataHash: unit.hash, outDir: unit.outDir, rmeta: rmeta, rlib: rlib,
-    depInfo: depInfo, cargoArgv: unit.argv, argvDifference: difference,
-    action: compile)
+  RegistryCrateEdge(row: row, prefix: c.prefix, crateName: c.manifest.libName,
+    metadataHash: unit.hash, outDir: unit.outDir, rmeta: c.rmeta,
+    rlib: c.rlib, depInfo: c.depInfo, cargoArgv: unit.argv,
+    argvDifference: difference, action: compile)
