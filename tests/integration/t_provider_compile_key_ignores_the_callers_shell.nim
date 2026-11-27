@@ -122,8 +122,15 @@ suite "the provider-compile key ignores the caller's shell":
       fail()
     else:
       # A short root: the provider compile's argv is in its action key, and a
-      # deep root makes the fixture needlessly fragile.
-      let tempRoot = "/tmp/rb-callershell-" & $getCurrentProcessId()
+      # deep root makes the fixture needlessly fragile. It sits under the
+      # host's temp dir, never a literal `/tmp`: on Windows `/tmp` is a
+      # drive-relative path that does not exist, so `repro build` refused the
+      # project ("path selector '\tmp\rb-callershell-…\project' names no
+      # file or directory") and the case failed before comparing a single
+      # variation. On every OS a literal path also ignored the `TMPDIR` the
+      # suite runner points at its per-checkout scratch. The name stays
+      # short, so only the host's temp dir adds to the argv's length.
+      let tempRoot = getTempDir() / ("rb-cs-" & $getCurrentProcessId())
       removeDir(tempRoot)
       createDir(tempRoot)
       defer: removeDir(tempRoot)
