@@ -20063,7 +20063,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_dsl_stdlib/tests/t_installed_prefix.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 14,
+      "staticCaseCount": 19,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
