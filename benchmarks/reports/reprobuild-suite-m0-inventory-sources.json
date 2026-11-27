@@ -70635,7 +70635,7 @@
     {
       "binary": "",
       "class": "unclassified",
-      "classificationReason": "imports `importlib.util`, which this scan does not recognize; refusing to call it pure rather than assuming it is",
+      "classificationReason": "imports `contextlib`, which this scan does not recognize; refusing to call it pure rather than assuming it is",
       "defines": [],
       "language": "python",
       "localDependencyShape": [],
@@ -70643,7 +70643,7 @@
       "requiresReproBinary": false,
       "source": "tests/unit/test_ct_test_surface_addressability.py",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 14,
+      "staticCaseCount": 29,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
