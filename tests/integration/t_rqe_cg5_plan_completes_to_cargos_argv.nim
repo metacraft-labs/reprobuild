@@ -43,8 +43,7 @@
 ## store root (`setupRegistry`), one with a build script. The record run is
 ## given their prefixes; the real build reads them from the test's own copy
 ## of each prefix in a vendor directory, so a prefix in the plan maps back to
-## that copy. Their units compare like any other. Registry dependencies are not in the fixture: the record run does
-## not serve cargo the fetched store prefixes yet.
+## that copy. Their units compare like any other.
 ##
 ## Falsifying mutations (applied, observed to fail, reverted; see the
 ## change's reports): mapping a vendor entry to a prefix path guessed from

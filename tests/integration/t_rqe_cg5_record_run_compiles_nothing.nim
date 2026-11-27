@@ -256,9 +256,12 @@ suite "the record-only graph-production edge":
       check found == (if c.name == "regbs": 2 else: 1)
     for r in plan.runs:
       if r.package == "regbs":
-        check expandRecorded(storeRoots, r.cwd) == reg.store &
-          r.cwd["${store}".len .. ^1]
-        check r.cwd.startsWith("${store}/")
+        # cargo runs a registry crate's build script in its package root:
+        # the crate's own prefix.
+        var regbsPrefix = ""
+        for c in reg.crates:
+          if c.name == "regbs": regbsPrefix = c.prefix
+        check expandRecorded(storeRoots, r.cwd) == regbsPrefix
     # The prefixes were only read.
     for i, c in reg.crates:
       check treeSnapshot(c.prefix) == prefixesBefore[i]

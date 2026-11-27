@@ -19,11 +19,13 @@
 ## start-up checks run the real `runCargoPlan` in a temporary directory and
 ## stop before it starts cargo. The key is the real `cargoPlanEdge`'s.
 
-import std/[os, strutils, tempfiles, unittest]
+import std/[json, os, strutils, tempfiles, unittest]
 
 import repro_core/codec
 import repro_build_engine
 import repro_cargo_edge/[cargo_plan, plan_edge, plan_run, record_mode]
+import repro_cargo_fetch/[crate_identity, crate_rows]
+import repro_local_store/prefix_paths
 
 proc unitRec(extraArgs: seq[string] = @[];
              env: seq[(string, string)] = @[];
@@ -249,6 +251,24 @@ suite "the derivation places what cargo wrote":
     check "CARGO_CRATE_NAME" in names
     check u.envRemoved == @["DROPPED_BY_CARGO"]
 
+suite "vendor entries are mapped as whole paths":
+
+  test "an entry maps only itself, never a longer name it is a prefix of":
+    let m = @[("${scratch}/vendor/foo-1.0", "${store}/p/foo/1.0-a"),
+              ("${scratch}/vendor/foo-1.0.1", "${store}/p/foo/1.0.1-b")]
+    check mapVendor("${scratch}/vendor/foo-1.0/src/lib.rs", m) ==
+      "${store}/p/foo/1.0-a/src/lib.rs"
+    check mapVendor("${scratch}/vendor/foo-1.0.1/src/lib.rs", m) ==
+      "${store}/p/foo/1.0.1-b/src/lib.rs"
+    check mapVendor("${scratch}/vendor/foo-1.0", m) == "${store}/p/foo/1.0-a"
+    check mapVendor("a=${scratch}/vendor/foo-1.0:${scratch}/vendor/" &
+      "foo-1.0.1", m) == "a=${store}/p/foo/1.0-a:${store}/p/foo/1.0.1-b"
+    # A pre-release, build metadata or another version is another entry.
+    for other in ["foo-1.0-beta", "foo-1.0+build", "foo-1.0.10", "foo-1.00"]:
+      checkpoint other
+      check mapVendor("${scratch}/vendor/" & other & "/x", m) ==
+        "${scratch}/vendor/" & other & "/x"
+
 suite "the record run's start-up checks":
 
   template keepingHome(body: untyped) =
@@ -312,43 +332,97 @@ suite "the record run's start-up checks":
 
   test "sources the record run does not serve are refused before cargo":
     const crates = "registry+https://github.com/rust-lang/crates.io-index"
-    proc lockWith(source, checksum: string): string =
+    proc lockWith(source, checksum: string; name = "dep"): string =
       "version = 4\n\n[[package]]\nname = \"app\"\nversion = \"0.1.0\"\n" &
-        "dependencies = [\"dep\"]\n\n[[package]]\nname = \"dep\"\n" &
-        "version = \"1.0.0\"\nsource = \"" & source & "\"\n" &
+        "dependencies = [\"" & name & "\"]\n\n[[package]]\nname = \"" &
+        name & "\"\nversion = \"1.0.0\"\nsource = \"" & source & "\"\n" &
         (if checksum.len > 0: "checksum = \"" & checksum & "\"\n" else: "")
     let cksum = repeat("ab", 32)
-    for (name, manifestExtra, lock, config, withPrefix, expected) in [
-        ("git source", "", lockWith("git+https://example.invalid/dep?rev=1#" &
-          repeat("c", 40), ""), "", false, "not crates.io"),
-        ("no prefix", "", lockWith(crates, cksum), "", false,
-          "no store prefix"),
-        ("patch", "\n[patch.crates-io]\ndep = { path = \"dep\" }\n",
-          lockWith(crates, cksum), "", true, "[patch]"),
-        ("replace", "\n[replace]\n\"dep:1.0.0\" = { path = \"dep\" }\n",
-          lockWith(crates, cksum), "", true, "[replace]"),
-        ("paths", "", lockWith(crates, cksum), "paths = [\"dep\"]\n", true,
-          "`paths`"),
-        ("served", "", lockWith(crates, cksum), "", true, "")]:
+    let otherCksum = repeat("cd", 32)
+    proc prefixOf(store, name, version, sum: string): string =
+      store / prefixRelativePath(name, version, crateRealizationId(
+        CrateRow(name: name, version: version, cksum: sum)))
+    proc makePrefix(dir, name, version: string) =
+      createDir(dir)
+      writeFile(dir / "Cargo.toml", "[package]\nname = \"" & name &
+        "\"\nversion = \"" & version & "\"\n")
+    for (name, expected) in [
+        ("git source", "not crates.io"),
+        ("no prefix", "no store prefix"),
+        ("patch", "[patch]"),
+        ("replace", "[replace]"),
+        ("config paths", "`paths`"),
+        ("config source", "`source`"),
+        ("config patch", "`patch`"),
+        ("config include", "`include`"),
+        ("bad checksum", "not 64 lower-case hex"),
+        ("bad name", "not a crates.io crate name"),
+        ("parent walk", "without `..`"),
+        ("outside link", "outside the store root"),
+        ("another crate's prefix", "is not the store's prefix"),
+        ("other checksum", "is not the store's prefix"),
+        ("wrong manifest", "holds the manifest of other@1.0.0"),
+        ("duplicate", "more than one prefix"),
+        ("extra", "does not lock it"),
+        ("served", "")]:
       let dir = createTempDir("cg5-plan-run-src-", "")
       defer: removeDir(dir)
       let saved = getCurrentDir()
       setCurrentDir(dir)
       defer: setCurrentDir(saved)
+      var manifestExtra, config = ""
+      var lock = lockWith(crates, cksum)
+      let store = dir / "store"
+      let good = prefixOf(store, "dep", "1.0.0", cksum)
+      makePrefix(good, "dep", "1.0.0")
+      var prefix = good
+      var extraCrates: seq[CratePrefix]
+      case name
+      of "git source":
+        lock = lockWith("git+https://example.invalid/dep?rev=1#" &
+          repeat("c", 40), "")
+      of "patch": manifestExtra = "\n[patch.crates-io]\ndep = { path = \"d\" }\n"
+      of "replace": manifestExtra = "\n[replace]\n\"dep:1.0.0\" = { path = \"d\" }\n"
+      of "config paths": config = "paths = [\"d\"]\n"
+      of "config source":
+        config = "[source.repro-store-crates]\nreplace-with = \"evil\"\n" &
+          "[source.evil]\ndirectory = \"evil\"\n"
+      of "config patch": config = "[patch.crates-io]\ndep = { path = \"d\" }\n"
+      of "config include": config = "include = \"other.toml\"\n"
+      of "bad checksum": lock = lockWith(crates, toUpperAscii(cksum))
+      of "bad name": lock = lockWith(crates, cksum, name = "a/b")
+      of "parent walk":
+        # Spelled by concatenation: `/` would fold the `..` away.
+        prefix = store & "/prefixes/../prefixes/" &
+          good[store.len + "/prefixes/".len .. ^1]
+      of "outside link":
+        makePrefix(dir / "elsewhere", "dep", "1.0.0")
+        createDir(parentDir(dir / "store" / "prefixes" / "dep" / "link"))
+        createSymlink(dir / "elsewhere", store / "prefixes" / "dep" / "link")
+        prefix = store / "prefixes" / "dep" / "link"
+      of "another crate's prefix":
+        prefix = prefixOf(store, "other", "1.0.0", cksum)
+        makePrefix(prefix, "dep", "1.0.0")
+      of "other checksum":
+        prefix = prefixOf(store, "dep", "1.0.0", otherCksum)
+        makePrefix(prefix, "dep", "1.0.0")
+      of "wrong manifest": makePrefix(good, "other", "1.0.0")
+      of "duplicate": extraCrates = @[CratePrefix(name: "dep",
+        version: "1.0.0", prefix: good)]
+      of "extra": extraCrates = @[CratePrefix(name: "more", version: "2.0.0",
+        prefix: good)]
+      else: discard
       writeFile(dir / "Cargo.toml", "[package]\nname = \"app\"\n" &
         "version = \"0.1.0\"\n" & manifestExtra)
       writeFile(dir / "Cargo.lock", lock)
       if config.len > 0:
         createDir(dir / ".cargo")
         writeFile(dir / ".cargo" / "config.toml", config)
-      let store = dir / "store"
-      createDir(store / "prefixes" / "dep" / "1.0.0-x")
-      writeFile(store / "prefixes" / "dep" / "1.0.0-x" / "Cargo.toml", "")
       var opts = options()
       opts.storeRoot = store
-      if withPrefix:
-        opts.crates = @[CratePrefix(name: "dep", version: "1.0.0",
-          prefix: store / "prefixes" / "dep" / "1.0.0-x")]
+      if name != "no prefix":
+        opts.crates = @[CratePrefix(name: (if name == "bad name": "a/b"
+          else: "dep"), version: "1.0.0", prefix: prefix)] & extraCrates
       let msg = refusal(opts)
       checkpoint name & ": " & msg
       if expected.len > 0:
@@ -359,8 +433,37 @@ suite "the record run's start-up checks":
         check "cannot start" in msg
         let entry = dir / "scratch" / VendorSubdir / "dep-1.0.0"
         check symlinkExists(entry / "Cargo.toml")
+        check expandSymlink(entry / "Cargo.toml") == good / "Cargo.toml"
         check readFile(entry / ".cargo-checksum.json") ==
           "{\"files\":{},\"package\":\"" & cksum & "\"}"
+
+  test "cargo's metadata must show every served crate read from its " &
+      "vendor entry, in this workspace":
+    let dir = createTempDir("cg5-plan-meta-", "")
+    defer: removeDir(dir)
+    let vendored = dir / "scratch" / "vendor" / "dep-1.0.0" / "Cargo.toml"
+    proc meta(root, depManifest: string; extra = ""): JsonNode =
+      parseJson("""{"workspace_root": """ & escapeJson(root) &
+        ""","packages":[{"name":"app","version":"0.1.0","source":null,""" &
+        """"manifest_path":""" & escapeJson(dir / "Cargo.toml") & """},""" &
+        """{"name":"dep","version":"1.0.0","source":"registry+https://""" &
+        """github.com/rust-lang/crates.io-index","manifest_path":""" &
+        escapeJson(depManifest) & "}" & extra & "]}")
+    let served = @[("dep", "1.0.0", vendored)]
+    checkServedManifests(meta(dir, vendored), dir, served)
+    expect PlanRunError:
+      checkServedManifests(meta(dir, dir / "evil" / "dep-1.0.0" /
+        "Cargo.toml"), dir, served)
+    expect PlanRunError:
+      checkServedManifests(meta(parentDir(dir), vendored), dir, served)
+    expect PlanRunError:
+      checkServedManifests(meta(dir, vendored, "," &
+        """{"name":"more","version":"1.0.0","source":"registry+https://""" &
+        """github.com/rust-lang/crates.io-index","manifest_path":"/x"}"""),
+        dir, served)
+    expect PlanRunError:
+      checkServedManifests(meta(dir, vendored), dir,
+        served & @[("gone", "1.0.0", "/y")])
 
   test "an environment variable that outranks the record wrapper is " &
       "refused":

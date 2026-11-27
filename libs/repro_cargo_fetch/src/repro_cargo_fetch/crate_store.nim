@@ -43,33 +43,9 @@ import repro_nimble_fetch/archive_extract
 import repro_core/zlib_inflate
 
 import ./crate_rows
+import ./crate_identity
 
-const
-  CrateAdapter* = "cargo-crate"
-    ## The adapter identity in the realization hash and the receipt.
-  CratesIoRegistry* = "crates-io"
-    ## The registry identity of crates.io. cargo writes two spellings of the
-    ## one crates.io source into `Cargo.lock`, `registry+https://github.com/
-    ## rust-lang/crates.io-index` and `sparse+https://index.crates.io/`, and
-    ## treats them as the same source (both are crates.io, the same `.crate`
-    ## bytes behind one checksum), so both name this one identity: a lock
-    ## rewritten from one protocol to the other keeps its prefixes.
-  CrateExtractLayout* = "crate-extract.v1"
-    ## The extractor's layout version: what it writes for a given archive
-    ## (the top directory stripped, files 0644 or 0755, links kept). A change
-    ## to what the extractor writes must change this, so the new layout is a
-    ## new prefix rather than a stale one served under the old name.
-
-proc crateRealizationId*(row: CrateRow): PrefixIdBytes =
-  ## The realization hash of ``row``'s prefix (see the module docstring).
-  computeRealizationHash(row.name, row.version, CrateAdapter,
-    "sha256:" & row.cksum, "", "", "sha256:" & row.cksum,
-    ["registry=" & CratesIoRegistry, "crate=cargo:" & row.name,
-     "layout=" & CrateExtractLayout])
-
-proc crateTopDirectory*(row: CrateRow): string =
-  ## The one top directory a `.crate` holds: `<name>-<version>`.
-  row.name & "-" & row.version
+export crate_identity
 
 proc presentCratePrefix*(s: var Store; row: CrateRow): string =
   ## The absolute path of ``row``'s prefix when the store's index names it

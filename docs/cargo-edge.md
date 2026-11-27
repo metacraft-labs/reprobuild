@@ -195,10 +195,19 @@ repro-rustc-wrapper --cargo-plan --plan FILE --scratch DIR \
   `--no-default-features`); a cargo configuration file in a directory above
   the workspace root, which cargo would read; a workspace package whose
   manifest lies outside the workspace root; a `Cargo.lock` package from a
-  source other than crates.io (git, another registry), or a crates.io package
-  with no checksum, no `--crate` prefix or a prefix outside the store root;
-  and a `[patch]` or `[replace]` table in the workspace's `Cargo.toml` or a
-  `paths` override in its `.cargo/config.toml`.
+  source other than crates.io (git, another registry); a crates.io package
+  with a malformed name, version or checksum, no `--crate` prefix, or a
+  prefix that is not that crate's store prefix (spelled with `..`, resolving
+  outside the store root, not named for the crate's name, version and
+  checksum, or holding another package's manifest); a `--crate` given twice
+  or for a crate the lock does not hold; a `[patch]` or `[replace]` table in
+  the workspace's `Cargo.toml`; and `paths`, `[source]`, `[patch]` or
+  `include` in its `.cargo/config.toml` or `.cargo/config`.
+- **What it checks after `cargo metadata`.** Cargo's workspace root is the
+  working directory (not an enclosing workspace with its own lock), and every
+  package with a source was read from exactly its vendor entry's
+  `Cargo.toml`: whatever a configuration might do to re-route a source,
+  cargo's own answer must show each crate coming from the store.
 
 **The derivation** turns the recordings into the plan, reading every link
 from paths cargo wrote: a unit's `--extern` paths name the units it consumes;

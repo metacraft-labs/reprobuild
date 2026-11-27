@@ -18,11 +18,16 @@
 ##    directory.
 ## 2. Refuses what it cannot plan from inside the workspace:
 ##    - a `Cargo.lock` package with a `source` other than crates.io (a git
-##      or alternate-registry dependency), a crates.io package with no
-##      checksum or no `--crate` prefix, a prefix outside the store root, a
-##      `[patch]` or `[replace]` table in the workspace's `Cargo.toml`, and a
-##      `paths` override in its `.cargo/config.toml`: the cases the edge does
-##      not cover yet, which stay with cargo as a whole;
+##      or alternate-registry dependency); a crates.io package whose name,
+##      version or checksum is malformed (`crate_rows.validateRow`), that was
+##      given no `--crate` prefix, or whose prefix is not that crate's store
+##      prefix (`checkPrefix`: no `..`, resolved under the resolved store
+##      root, named for that name, version and checksum, holding that
+##      package's manifest); a `--crate` given twice or for a crate the lock
+##      does not hold; a `[patch]` or `[replace]` table in the workspace's
+##      `Cargo.toml`; and `paths`, `[source]`, `[patch]` or `include` in its
+##      `.cargo/config.toml` (or `.cargo/config`): the cases the edge does
+##      not cover, which stay with cargo as a whole;
 ##    - a cargo configuration file (`.cargo/config.toml` or `.cargo/config`)
 ##      in any directory above the workspace root: cargo reads every one of
 ##      them, so the plan would depend on a file outside the workspace
@@ -47,7 +52,12 @@
 ##    `cargo metadata` and `cargo build` alike, on the command line so that no
 ##    configuration file outranks them. The prefixes are only read.
 ##    Saves `cargo metadata --offline --locked --format-version 1` for the
-##    recording stub, which reads each package's targets from it.
+##    recording stub, which reads each package's targets from it, and checks
+##    it (`checkServedManifests`): cargo's workspace root is the working
+##    directory, and every package with a source was read from exactly its
+##    vendor entry's manifest. That is the positive check behind the
+##    refusals above: whatever a configuration could do to re-route a
+##    source, cargo's own answer says where each crate came from.
 ## 4. Runs `cargo build --offline --locked -j 1 --target-dir <scratch>/target`
 ##    with the given arguments (the build's profile, target and package
 ##    selection) and four `--config` values: the record wrapper as
@@ -81,7 +91,7 @@
 ## Exit codes: 0 with the plan written, 2 usage, 1 any other failure (the
 ## message names it). POSIX only, as record mode is.
 
-import std/[algorithm, json, os, strutils, tables]
+import std/[algorithm, json, os, sets, strutils, tables]
 
 import toml_serialization
 import toml_serialization/types as toml_types
@@ -89,6 +99,8 @@ when defined(posix):
   import std/posix
 
 import repro_core/cargo_lock
+import repro_cargo_fetch/[crate_identity, crate_rows]
+import repro_local_store/prefix_location
 
 import ./[cargo_plan, record_mode]
 
@@ -207,11 +219,74 @@ proc hasKey(table: TomlValueRef; key: string): bool =
   not table.isNil and table.kind in {TomlKind.Table, TomlKind.InlineTable} and
     table.tableVal[].hasKey(key)
 
+proc realPath(path: string): string =
+  ## `path` with every symbolic link resolved, or "" when it does not exist.
+  try: expandFilename(path)
+  except OSError: ""
+
+proc hasParentComponent(path: string): bool =
+  for part in path.split('/'):
+    if part == "..": return true
+  false
+
+proc checkPrefix(c: CratePrefix; cksum, storeRoot: string): string =
+  ## "" when `c.prefix` IS the store prefix of `c` with checksum `cksum`,
+  ## else why not. The prefix must be spelled without `..`, resolve (links
+  ## followed) to a directory under the resolved store root, have there the
+  ## name the store gives that crate's realization (`<store>/prefixes/<name>/
+  ## <version>-<realization hash>`, a function of the name, the version and
+  ## the checksum: `crate_identity`), and hold the manifest of that package
+  ## and version.
+  let label = c.name & "@" & c.version
+  if not c.prefix.isAbsolute or hasParentComponent(c.prefix):
+    return label & "'s prefix " & c.prefix & " is not an absolute path " &
+      "without `..`"
+  if storeRoot.len == 0:
+    return label & " was given a prefix, but the edge has no store root"
+  let real = realPath(c.prefix)
+  let realStore = realPath(storeRoot)
+  if real.len == 0 or not dirExists(real):
+    return label & "'s prefix " & c.prefix & " does not exist"
+  if realStore.len == 0 or not real.startsWith(realStore & "/"):
+    return label & "'s prefix " & c.prefix & " is outside the store root"
+  let id = crateRealizationId(CrateRow(name: c.name, version: c.version,
+    cksum: cksum))
+  if not isPrefixPathOf(real[realStore.len + 1 .. ^1], c.name, c.version, id):
+    return label & "'s prefix " & c.prefix & " is not the store's prefix " &
+      "of that crate with the checksum Cargo.lock records"
+  if not fileExists(real / "Cargo.toml"):
+    return label & "'s prefix " & c.prefix & " holds no Cargo.toml"
+  let manifest = tomlTable(real / "Cargo.toml", "the crate manifest")
+  var name, version = ""
+  if manifest.hasKey("package"):
+    let pkg = manifest.tableVal[]["package"]
+    for (key, into) in [("name", addr name), ("version", addr version)]:
+      if pkg.hasKey(key) and pkg.tableVal[][key].kind == TomlKind.String:
+        into[] = pkg.tableVal[][key].stringVal
+  if name != c.name or version != c.version:
+    return label & "'s prefix " & c.prefix & " holds the manifest of " &
+      name & "@" & version
+  ""
+
+const RefusedConfigKeys = ["paths", "source", "patch", "include"]
+  ## Keys of the project's cargo configuration the record run refuses: each
+  ## changes where cargo takes a package's sources from (`paths` and
+  ## `[patch]` override packages, `[source]` can re-route the replacement
+  ## the run sets on the command line, since cargo merges the command line
+  ## with the files and follows `replace-with` through them, and `include`
+  ## pulls in other files).
+
 proc checkSources(project, storeRoot: string; crates: openArray[CratePrefix]):
     seq[(CratePrefix, string)] =
   ## The locked crates.io crates with their `Cargo.lock` checksums, each
   ## matched to its `--crate` prefix; raises on what the edge does not cover
   ## (see the module docstring, step 2).
+  var given = initTable[string, CratePrefix]()
+  for c in crates:
+    let label = c.name & "@" & c.version
+    if label in given:
+      fail("the crate " & label & " was given more than one prefix")
+    given[label] = c
   if not fileExists(project / "Cargo.toml"):
     return   # cargo itself refuses a directory with no manifest
   let manifest = tomlTable(project / "Cargo.toml", "the workspace manifest")
@@ -221,39 +296,78 @@ proc checkSources(project, storeRoot: string; crates: openArray[CratePrefix]):
         "record run does not model")
   for name in ["config.toml", "config"]:
     let config = project / ".cargo" / name
-    if fileExists(config) and
-        tomlTable(config, "the cargo configuration").hasKey("paths"):
-      fail("the cargo configuration " & config & " sets `paths`, which " &
-        "the record run does not model")
-  if not fileExists(project / "Cargo.lock"): return
-  var given = initTable[string, CratePrefix]()
-  for c in crates: given[c.name & "@" & c.version] = c
+    if fileExists(config):
+      let table = tomlTable(config, "the cargo configuration")
+      for key in RefusedConfigKeys:
+        if table.hasKey(key):
+          fail("the cargo configuration " & config & " sets `" & key &
+            "`, which the record run does not model")
   var problems: seq[string]
-  for pkg in parseCargoLock(readFile(project / "Cargo.lock")):
-    if pkg.source.len == 0: continue
-    let label = pkg.name & "@" & pkg.version
-    if not isRegistrySource(pkg.source):
-      problems.add label & " comes from " & pkg.source & ", which is not " &
-        "crates.io"
-    elif pkg.checksum.len == 0:
-      problems.add label & " has no checksum in Cargo.lock"
-    elif label notin given:
-      problems.add label & " was given no store prefix"
-    else:
-      let c = given[label]
-      if not c.prefix.isAbsolute or not dirExists(c.prefix) or
-          not fileExists(c.prefix / "Cargo.toml"):
-        problems.add label & "'s prefix " & c.prefix & " holds no crate"
-      elif storeRoot.len == 0 or
-          not absolutePath(c.prefix).startsWith(absolutePath(storeRoot) & "/"):
-        problems.add label & "'s prefix " & c.prefix & " is outside the " &
-          "store root"
+  var locked = initHashSet[string]()
+  if fileExists(project / "Cargo.lock"):
+    for pkg in parseCargoLock(readFile(project / "Cargo.lock")):
+      if pkg.source.len == 0: continue
+      let label = pkg.name & "@" & pkg.version
+      locked.incl label
+      if not isRegistrySource(pkg.source):
+        problems.add label & " comes from " & pkg.source & ", which is not " &
+          "crates.io"
+        continue
+      try:
+        validateRow(CrateRow(name: pkg.name, version: pkg.version,
+          cksum: pkg.checksum))
+      except CrateRowError as err:
+        problems.add err.msg
+        continue
+      if label notin given:
+        problems.add label & " was given no store prefix"
+        continue
+      let problem = checkPrefix(given[label], pkg.checksum, storeRoot)
+      if problem.len > 0: problems.add problem
       else:
+        # Served from the resolved prefix, the one the checks were made on.
+        var c = given[label]
+        c.prefix = realPath(c.prefix)
         result.add (c, pkg.checksum)
+  for label in given.keys:
+    if label notin locked:
+      problems.add label & " was given a prefix but Cargo.lock does not " &
+        "lock it from crates.io"
   if problems.len > 0:
     problems.sort()
     fail("Cargo.lock holds packages the record run cannot serve: " &
       problems.join("; "))
+
+proc checkServedManifests*(metadata: JsonNode; project: string;
+                           served: openArray[(string, string, string)]) =
+  ## After `cargo metadata`: the workspace is the one in `project` (cargo
+  ## found no enclosing workspace with its own lock or patches), and every
+  ## package with a source is one of `served` (name, version, the manifest
+  ## of its vendor entry) and was read from exactly that manifest, so no
+  ## configuration re-routed it. Raises `PlanRunError`.
+  let root = metadata{"workspace_root"}.getStr
+  if root.len == 0 or realPath(root) != realPath(project):
+    fail("cargo's workspace root is " & root.escape() & ", not the " &
+      "record run's working directory " & project)
+  var expected = initTable[string, string]()
+  for (name, version, manifestPath) in served:
+    expected[name & "@" & version] = manifestPath
+  var seen = initHashSet[string]()
+  for pkg in metadata{"packages"}.getElems():
+    let source = pkg{"source"}
+    if source.isNil or source.kind == JNull: continue
+    let label = pkg{"name"}.getStr & "@" & pkg{"version"}.getStr
+    let manifestPath = pkg{"manifest_path"}.getStr
+    if label notin expected:
+      fail("cargo resolved " & label & " from " & source.getStr &
+        ", which the record run did not serve")
+    if manifestPath != expected[label]:
+      fail("cargo read " & label & " from " & manifestPath & ", not from " &
+        "the record run's vendor entry " & expected[label])
+    seen.incl label
+  for label in expected.keys:
+    if label notin seen:
+      fail("cargo did not read the served crate " & label)
 
 proc writeVendorDir(vendor: string; crates: openArray[(CratePrefix, string)]):
     seq[(string, string)] =
@@ -375,6 +489,10 @@ proc runCargoPlan*(opts: PlanRunOptions): int =
     let vendor = scratch / VendorSubdir
     emptyOrAbsent(vendor, "the vendor directory")
     let vendorEntries = writeVendorDir(vendor, served)
+    var servedManifests: seq[(string, string, string)]
+    for i, (c, _) in served:
+      servedManifests.add (c.name, c.version,
+        vendorEntries[i][0] / "Cargo.toml")
     let sourceConfig = @[
       "--config", "source.crates-io.replace-with=" &
         tomlString(VendorSourceName),
@@ -412,6 +530,7 @@ proc runCargoPlan*(opts: PlanRunOptions): int =
       fail("cargo metadata failed with exit status " & $metaCode)
     block outsideMembers:
       let metadata = parseFile(metadataPath)
+      checkServedManifests(metadata, project, servedManifests)
       var outside: seq[string]
       for pkg in metadata{"packages"}.getElems():
         let source = pkg{"source"}

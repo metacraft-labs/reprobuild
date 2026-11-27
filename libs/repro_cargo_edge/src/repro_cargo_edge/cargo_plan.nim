@@ -709,7 +709,7 @@ proc validatePlan*(plan: CargoPlan) =
     for (_, value) in r.env: checkPlaced(value, where)
     for p in r.providers: checkPlaced(p.provider, where)
 
-proc mapVendor(text: string; vendorMap: openArray[(string, string)]): string =
+proc mapVendor*(text: string; vendorMap: openArray[(string, string)]): string =
   ## `text` with each vendor entry replaced by its prefix, where the entry
   ## is a whole path: followed by nothing, a `/` or a character that cannot
   ## continue a file name.
