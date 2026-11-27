@@ -189,6 +189,12 @@ proc scoopPackage*(dist: Distribution; archive: PackagedArtifact;
     extraInputs = @[hashPath],
     extraOutputs = @[outPath])
   declareProducerTool(site, edge.id, ShSelector)
+  # The substitution script runs ``mkdir``, ``dirname`` and ``cat``
+  # (coreutils), reached through the ``install`` executable's package as
+  # the hash edge reaches ``sha256sum``: without it the edge's PATH holds
+  # only the shell and it exits 127. The first real build of a Scoop
+  # manifest is what showed it; the unit tests never run the edge.
+  declareProducerTool(site, edge.id, InstallSelector)
 
   PackagedArtifact(
     format: "scoop",
