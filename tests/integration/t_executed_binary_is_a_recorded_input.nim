@@ -207,8 +207,11 @@ int main(int argc, char **argv) {
 
 ## Starts the helper through `posix_spawn` (`argv[1] == "spawn"`) or
 ## `posix_spawnp` (`"spawnp"`) and waits for it. `argv[2]` is the image as
-## handed to the call — an absolute path for `spawn`, a bare name for
-## `spawnp` — and `argv[3]` the log the helper appends to.
+## handed to the call — an absolute path for `spawn` and `spawn-nopid`, a
+## bare name for `spawnp` — and `argv[3]` the log the helper appends to.
+## `spawn-nopid` passes `posix_spawn` a NULL pid pointer, which POSIX permits,
+## and reaps whichever child exits with `wait`: the shape of a caller that
+## never asks for the pid.
 ##
 ## A compiled C program rather than a Nim one using `osproc`, so the fixture
 ## keeps the one toolchain the rest of this file already depends on; the
@@ -226,12 +229,17 @@ int main(int argc, char **argv) {
   a[0] = argv[2];
   a[1] = argv[3];
   a[2] = 0;
+  int status;
+  if (strcmp(argv[1], "spawn-nopid") == 0) {
+    if (posix_spawn(0, argv[2], 0, 0, a, environ) != 0) return 65;
+    if (wait(&status) <= 0) return 66;
+    return WIFEXITED(status) ? WEXITSTATUS(status) : 67;
+  }
   pid_t pid;
   int rc = strcmp(argv[1], "spawnp") == 0
     ? posix_spawnp(&pid, argv[2], 0, 0, a, environ)
     : posix_spawn(&pid, argv[2], 0, 0, a, environ);
   if (rc != 0) return 65;
-  int status;
   if (waitpid(pid, &status, 0) != pid) return 66;
   return WIFEXITED(status) ? WEXITSTATUS(status) : 67;
 }
@@ -399,6 +407,14 @@ proc spawnEdge(f: Fixture): BuildAction =
   ## spawner's `mrProcessSpawn`.
   f.monitoredEdge("execdep/spawn",
     [f.spawnerPath, "spawn", f.helperPath, f.logPath("spawn")])
+
+proc spawnNoPidEdge(f: Fixture): BuildAction =
+  ## `spawn-nopid` — the `spawn` shape with a NULL pid pointer, reaped with
+  ## `wait`. The child's pid is not the caller's to report, but the shim knows
+  ## it, so the `mrProcessSpawn` naming the helper must be written all the
+  ## same.
+  f.monitoredEdge("execdep/spawn-nopid",
+    [f.spawnerPath, "spawn-nopid", f.helperPath, f.logPath("spawn-nopid")])
 
 proc spawnpEdge(f: Fixture): BuildAction =
   ## `spawnp` — the same spawner handing `posix_spawnp` a BARE name; glibc
@@ -577,6 +593,20 @@ suite "the binary an action executes is a recorded input":
       let f = makeFixture()
       defer: removeDir(f.root)
       f.exerciseShape(repoRoot, f.spawnEdge(), "spawn")
+
+  test "spawn-nopid: a posix_spawn with a NULL pid pointer is in the cache key":
+    ## The `spawn` shape for a caller that discards the pid (fire-and-forget,
+    ## or reaping with `wait`). Before io-mon wrote the spawn record for it,
+    ## the record was gated on the CALLER's pid pointer although the shim
+    ## lends the call one, so no `mrProcessSpawn` was written, the helper was
+    ## in no channel, and the swap was served stale (`cdHit`).
+    if ccPath().len == 0:
+      skip("no C compiler (cc/gcc) on PATH to build the spawner and helper")
+    else:
+      let repoRoot = findRepoRoot()
+      let f = makeFixture()
+      defer: removeDir(f.root)
+      f.exerciseShape(repoRoot, f.spawnNoPidEdge(), "spawn-nopid")
 
   test "spawnp: an unresolved spawn name is never materialised against cwd":
     ## THE NEGATIVE GATE for spawns, for the reasons the `execvp` case gives:

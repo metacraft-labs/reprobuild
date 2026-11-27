@@ -6239,7 +6239,7 @@
             "f",
             "workRoot"
           ],
-          "line": 261,
+          "line": 269,
           "path": "tests/integration/t_executed_binary_is_a_recorded_input.nim",
           "patterns": [
             "cc"
@@ -6255,7 +6255,7 @@
             "f",
             "workRoot"
           ],
-          "line": 262,
+          "line": 270,
           "path": "tests/integration/t_executed_binary_is_a_recorded_input.nim",
           "patterns": [
             "cc"
@@ -6271,7 +6271,7 @@
             "f",
             "workRoot"
           ],
-          "line": 324,
+          "line": 332,
           "path": "tests/integration/t_executed_binary_is_a_recorded_input.nim",
           "patterns": [
             "cc"
@@ -6287,7 +6287,7 @@
             "f",
             "workRoot"
           ],
-          "line": 325,
+          "line": 333,
           "path": "tests/integration/t_executed_binary_is_a_recorded_input.nim",
           "patterns": [
             "cc"
@@ -6303,7 +6303,7 @@
             "f",
             "workRoot"
           ],
-          "line": 330,
+          "line": 338,
           "path": "tests/integration/t_executed_binary_is_a_recorded_input.nim",
           "patterns": [
             "cc"
@@ -50439,7 +50439,7 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_executed_binary_is_a_recorded_input.nim",
       "sourceSuiteCount": 3,
-      "staticCaseCount": 18,
+      "staticCaseCount": 19,
       "staticallyDetectedRuntimeCompilerFlow": true,
       "targetOs": "soAny"
     },
