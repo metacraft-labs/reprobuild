@@ -47,7 +47,8 @@ import runquota_core/measurement
 import runquota_exec
 import runquota_process
 import runquota_protocol
-import ./[plan_run, record_mode, rustc_args, wrapper_env]
+import ./[build_script_output, plan_run, record_mode, rustc_args,
+          wrapper_env]
 
 const
   WrapperLogEnv* = "REPRO_RUSTC_WRAPPER_LOG"
@@ -323,6 +324,11 @@ proc runWrapper*(args: seq[string]): int =
     # a record run (the switch set) the flag is not honoured, so a unit can
     # never start a nested record run.
     return runPlanCommand(args[1 .. ^1])
+  if args.len > 0 and args[0] == BuildScriptRunFlag and not recordModeOn():
+    # A build-script run edge's process (`build_script_output`): run the
+    # script and interpret its output. Not honoured inside a record run,
+    # for the same reason as the flag above.
+    return runBuildScriptCommand(args[1 .. ^1])
   if recordModeOn():
     when defined(windows):
       stderr.writeLine WrapperClientName & ": record mode is not supported " &

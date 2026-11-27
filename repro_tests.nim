@@ -3529,6 +3529,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "",
     singleReason: "no other source shares its compile options"),
   TestSpec(
+    source: "libs/repro_cargo_edge/tests/t_build_script_output.nim",
+    binary: "build/test-bin/t_build_script_output",
+    defines: @[],
+    requiresReproBinary: false,
+    requiresMonitorShim: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_libs_repro_cargo_edge_tests_g01",
+    singleReason: ""),
+  TestSpec(
     source: "libs/repro_cargo_edge/tests/t_cargo_plan.nim",
     binary: "build/test-bin/t_cargo_plan",
     defines: @[],
@@ -32965,6 +32977,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_tests_integration_g14",
     singleReason: ""),
   TestSpec(
+    source: "tests/integration/t_rqe_cg5_build_script_cfg_and_links.nim",
+    binary: "build/test-bin/t_rqe_cg5_build_script_cfg_and_links",
+    defines: @[],
+    requiresReproBinary: true,
+    requiresMonitorShim: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_tests_integration_g14",
+    singleReason: ""),
+  TestSpec(
     source: "tests/integration/t_rqe_cg5_no_mixed_rlibs.nim",
     binary: "build/test-bin/t_rqe_cg5_no_mixed_rlibs",
     defines: @["reproProviderMode"],
@@ -33550,7 +33574,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g14",
+    group: "t_group_tests_integration_g15",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_shared_clone_uses_full_repo_url_for_base_remote.nim",
@@ -34474,7 +34498,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g15",
+    group: "t_group_tests_integration_g16",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_tarball_provisioning_cold_store_extractors.nim",
@@ -35290,7 +35314,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g16",
+    group: "t_group_tests_integration_g17",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_uses_resolves_sqlite3_from_real_reprobuild_packages.nim",
@@ -36046,7 +36070,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g17",
+    group: "t_group_tests_integration_g18",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_workspace_migrate_refuses_to_endanger_work.nim",
