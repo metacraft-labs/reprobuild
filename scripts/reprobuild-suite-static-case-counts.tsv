@@ -299,6 +299,7 @@ libs/repro_build_engine/tests/test_umask_wrap_both_spawn_paths.nim	nim	8
 libs/repro_build_engine/tests/test_wrapped_monitor_evidence_ownership.nim	nim	3
 libs/repro_bundle/tests/t_repro_bundle_halves.nim	nim	43
 libs/repro_cargo_edge/tests/t_cargo_plan.nim	nim	24
+libs/repro_cargo_edge/tests/t_plan_run_spawn_environment.nim	nim	4
 libs/repro_cargo_edge/tests/t_plan_units.nim	nim	7
 libs/repro_cargo_edge/tests/t_record_mode.nim	nim	24
 libs/repro_cargo_edge/tests/t_rqe_cg3_cargo_edge.nim	nim	22

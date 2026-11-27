@@ -3505,6 +3505,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_libs_repro_cargo_edge_tests_g01",
     singleReason: ""),
   TestSpec(
+    source: "libs/repro_cargo_edge/tests/t_plan_run_spawn_environment.nim",
+    binary: "build/test-bin/t_plan_run_spawn_environment",
+    defines: @[],
+    requiresReproBinary: false,
+    requiresMonitorShim: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_libs_repro_cargo_edge_tests_g01",
+    singleReason: ""),
+  TestSpec(
     source: "libs/repro_cargo_edge/tests/t_plan_units.nim",
     binary: "build/test-bin/t_plan_units",
     defines: @[],
