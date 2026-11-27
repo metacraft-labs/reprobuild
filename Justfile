@@ -999,7 +999,7 @@ lint:
     # hour ceiling). Reads one file, under a second; beside actionlint because
     # both grade the workflow.
     python3 ./scripts/check_ci_test_budget.py 2>&1 | tee -a test-logs/lint.log
-    # The four suite-description gates, LAST, and that position is the point.
+    # The five suite-description gates, LAST, and that position is the point.
     # They hold tracked bookkeeping -- the case-count baseline, the inventory
     # entry set, the edge table -- to the tree, and bookkeeping goes stale
     # whenever anyone lands a test without regenerating it: the check can be
@@ -1041,6 +1041,13 @@ lint:
     # so the disagreement surfaces when the RULE is edited rather than when
     # the first file of a new shape lands on it.
     python3 ./scripts/reprobuild_suite_inventory.py --check-shape-parity 2>&1 | tee -a test-logs/lint.log
+    # The ADDRESSABILITY-LEDGER gate, last of the suite-description gates and
+    # for the same reason. It holds benchmarks/reports/ct-test-surface-
+    # addressability.{json,md} to the inventory the lines above hold to the
+    # tree: a source the ledger never measured, a disagreement computed against
+    # another inventory, or a markdown figure the JSON no longer carries. It is
+    # build-free; regenerating the ledger is not (it needs `ct-test`).
+    python3 ./scripts/ct_test_surface_addressability.py --check 2>&1 | tee -a test-logs/lint.log
     # The canonical `reprobuild/dsl/<module>` re-export tree against the
     # standard library it is generated from. Same class as the suite gates
     # above -- a tracked artifact that is a pure function of the tree, red

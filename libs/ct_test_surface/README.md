@@ -41,7 +41,12 @@ workspace host it is not necessarily the pinned revision.
 
 - `tests/integration/t_ct_test_surface_case_addressability.nim` — holds the
   tree to `benchmarks/reports/ct-test-surface-addressability.json`.
-- `scripts/ct_test_surface_addressability.py` — regenerates that artifact.
+- `scripts/ct_test_surface_addressability.py` — regenerates that artifact
+  and the figures block of its markdown companion, after checking that the
+  inventory it measures against is current. Its `--check` mode is the
+  build-free half of the gate: `scripts/check_suite_case_counts.sh` runs it,
+  so a suite source enrolled without regenerating the ledger is refused at the
+  push that enrolled it.
 
 ## What a reconciliation built on this can and cannot see
 

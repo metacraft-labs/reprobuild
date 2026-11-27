@@ -47,6 +47,7 @@ import ../types
 import ../runtime_contract
 import ../services
 import ../producer
+import ../powershell_completion
 import ../../fs as dslfs
 import ../../packages/wix3_tools as wix_module
 
@@ -224,6 +225,14 @@ proc hostDirectoriesWxs(dist: Distribution;
       result.add(" ".repeat(8 + 2 * j) & "</Directory>\n")
   result.add("      </Directory>\n")
 
+proc msiCompletionScripts*(tree: StagedTree): seq[StagedCompletionFile] =
+  ## The PowerShell completion scripts in ``tree`` (``addShellCompletion``
+  ## with ``windowsShellCompletionLayout``): each gets the custom actions
+  ## that write and remove the profile block loading it.
+  for staged in tree.completions:
+    if staged.shell == "powershell":
+      result.add(staged)
+
 proc needsUtilExtension*(dist: Distribution): bool =
   ## Whether the authoring requires ``WixUtilExtension``.
   ##
@@ -236,6 +245,76 @@ proc needsUtilExtension*(dist: Distribution): bool =
   for row in msiServiceRows(dist):
     if row.restartOnFailure: return true
   false
+
+proc completionActionsWxs(dist: Distribution; tree: StagedTree;
+                          fileIds: Table[string, string]): string =
+  ## The custom actions that make PowerShell load each completion script
+  ## the package installs:
+  ## for every script, a deferred quiet-exec action after the files are in
+  ## place on install, repair and upgrade, which writes the all-users block
+  ## loading it, and one before the files are removed on uninstall, which
+  ## takes the block out (``powershell_completion.msiQuietExecCommand``;
+  ## the script both run is the property ``msiCompletionRunValue``).
+  ##
+  ## The same shape as reprobuild's own MSI: ``WixQuietExec64`` from
+  ## WixUtilExtension's ``WixCA`` binary
+  ## (https://wixtoolset.org/docs/v3/customactions/qtexec/), so no console
+  ## window opens during an interactive installation and the output goes to
+  ## the installation log; deferred and not impersonating, so it runs as
+  ## LocalSystem, which can write ``$PSHOME``; ``Return="ignore"``, because
+  ## the program works without completion. Quiet exec reads its command
+  ## line from the property named after the action, which an immediate
+  ## type-51 action sets just before it. The install action names the
+  ## script by its file key, ``[#<file id>]``, which is empty for a file
+  ## being removed, so the removal action, which needs no path, has none.
+  let scripts = msiCompletionScripts(tree)
+  if scripts.len == 0:
+    return
+  var sequence = ""
+  for i, script in scripts:
+    let n = $(i + 1)
+    let ensure = "ClispecCompletionEnsure" & n
+    let remove = "ClispecCompletionRemove" & n
+    let run = "ClispecCompletionRun" & n
+    let fileId = fileIds[script.rootRelPath]
+    # The script both actions run, as a property (see
+    # ``msiCompletionRunValue``): a private one, so no command line sets it.
+    result.add("    <Property Id=\"" & run & "\" Value=\"" &
+      xmlEscape(msiCompletionRunValue(script.program)) & "\" />\n")
+    result.add("    <CustomAction Id=\"Set" & ensure & "\" Property=\"" &
+      ensure & "\" Value=\"" &
+      xmlEscape(msiQuietExecCommand("[#" & fileId & "]", run)) &
+      "\" Execute=\"immediate\" />\n")
+    result.add("    <CustomAction Id=\"" & ensure & "\" BinaryKey=\"WixCA\" " &
+      "DllEntry=\"WixQuietExec64\" Execute=\"deferred\" " &
+      "Impersonate=\"no\" Return=\"ignore\" />\n")
+    result.add("    <CustomAction Id=\"Set" & remove & "\" Property=\"" &
+      remove & "\" Value=\"" &
+      xmlEscape(msiQuietExecCommand("", run)) &
+      "\" Execute=\"immediate\" />\n")
+    result.add("    <CustomAction Id=\"" & remove & "\" BinaryKey=\"WixCA\" " &
+      "DllEntry=\"WixQuietExec64\" Execute=\"deferred\" " &
+      "Impersonate=\"no\" Return=\"ignore\" />\n")
+    sequence.add("      <Custom Action=\"Set" & remove & "\" Before=\"" &
+      remove & "\">REMOVE~=\"ALL\"</Custom>\n")
+    sequence.add("      <Custom Action=\"" & remove &
+      "\" Before=\"RemoveFiles\">REMOVE~=\"ALL\"</Custom>\n")
+    sequence.add("      <Custom Action=\"Set" & ensure & "\" Before=\"" &
+      ensure & "\">NOT (REMOVE~=\"ALL\")</Custom>\n")
+    sequence.add("      <Custom Action=\"" & ensure &
+      "\" Before=\"InstallFinalize\">NOT (REMOVE~=\"ALL\")</Custom>\n")
+  result.add("    <InstallExecuteSequence>\n")
+  result.add(sequence)
+  result.add("    </InstallExecuteSequence>\n")
+  discard dist
+
+proc msiExtensions*(dist: Distribution; tree: StagedTree): seq[string] =
+  ## The WiX extensions ``candle`` and ``light`` load for this package:
+  ## WixUtilExtension when a service has a recovery policy
+  ## (``needsUtilExtension``) or the tree carries a completion script, whose
+  ## custom actions run ``WixCA``'s quiet exec.
+  if needsUtilExtension(dist) or msiCompletionScripts(tree).len > 0:
+    result.add("WixUtilExtension")
 
 proc wxsText*(dist: Distribution; tree: StagedTree): string =
   ## Render the WiX v3 authoring for the staged tree.
@@ -287,6 +366,8 @@ proc wxsText*(dist: Distribution; tree: StagedTree): string =
   # The Directory-Id allocator. One per rendered distribution, so the
   # ordinals are a function of the tree and of nothing else.
   var dirIds = initOrderedTable[string, string]()
+  # The File Id of each staged file, for the custom actions that name one.
+  var fileIds = initTable[string, string]()
   var index = 0
   for f in tree.files:
     inc index
@@ -302,6 +383,7 @@ proc wxsText*(dist: Distribution; tree: StagedTree): string =
     # them back.
     let cmpId = msiOrdinalIdentifier("cmp", index, f.rootRelPath)
     let filId = msiOrdinalIdentifier("fil", index, f.rootRelPath)
+    fileIds[f.rootRelPath] = filId
     var body = ""
     # ``Guid="*"`` asks WiX to derive a stable GUID from the component's
     # key path and target directory. Deriving it is not a convenience:
@@ -472,25 +554,51 @@ proc wxsText*(dist: Distribution; tree: StagedTree): string =
   for cmpId in componentRefs:
     result.add("      <ComponentRef Id=\"" & cmpId & "\" />\n")
   result.add("    </Feature>\n")
+  result.add(completionActionsWxs(dist, tree, fileIds))
   result.add("  </Product>\n")
   result.add("</Wix>\n")
 
-proc msiPackage*(dist: Distribution; site = noSite()): PackagedArtifact =
-  ## Produce an ``.msi`` from the one ``Distribution`` definition.
+type
+  MsiAuthoring* = object
+    ## The host-independent half of an MSI: the payload tree and the WiX
+    ## authoring that names it. ``candle`` and ``light`` (Windows only, see
+    ## ``packages/wix3_tools.nim``) turn it into the package.
+    tree*: StagedTree
+    wxsPath*: string
+    wxsEdge*: BuildActionDef
+      ## Writes ``wxsPath``.
+
+proc msiAuthoring*(dist: Distribution; site = noSite()): MsiAuthoring =
+  ## Stage the MSI's payload and write its ``.wxs``, without the WiX tools:
+  ## what ``msiPackage`` does before ``candle``, and what a host that cannot
+  ## run them (Linux) can still build and check.
   ##
   ## The MSI tree is rooted at the PREFIX, not at ``/``: the Windows
   ## install location is chosen by the installer at install time, so
   ## there is no build-time filesystem root for the payload to be
   ## relative to. That is the same ``"msi"`` variant the tarball uses,
   ## and it is why ``stageInstallTree`` takes a variant at all.
-  let tree = stageInstallTree(dist, "msi", site)
-  let wxsPath = dist.stagingRoot & "/gen-msi/" & dist.name & ".wxs"
-  let wxsEdge = dslfs.writeText(wxsPath, wxsText(dist, tree),
+  var tree = stageInstallTree(dist, "msi", site)
+  # The PowerShell completion script of each executable with a ``cli:``
+  # description, at ``share\<program>\completions\<program>.ps1`` under
+  # the install folder; ``wxsText`` adds the custom actions that make
+  # PowerShell load it.
+  tree.addShellCompletion(windowsShellCompletionLayout(), site)
+  result.tree = tree
+  result.wxsPath = dist.stagingRoot & "/gen-msi/" & dist.name & ".wxs"
+  result.wxsEdge = dslfs.writeText(result.wxsPath, wxsText(dist, tree),
     actionId = "pkg-msi-wxs-" & dist.name)
 
+proc msiPackage*(dist: Distribution; site = noSite()): PackagedArtifact =
+  ## Produce an ``.msi`` from the one ``Distribution`` definition:
+  ## ``msiAuthoring``, then ``candle`` and ``light``.
+  let authoring = msiAuthoring(dist, site)
+  let tree = authoring.tree
+  let wxsPath = authoring.wxsPath
+  let wxsEdge = authoring.wxsEdge
+
   let objPath = dist.stagingRoot & "/gen-msi/" & dist.name & ".wixobj"
-  let extensions =
-    if needsUtilExtension(dist): @["WixUtilExtension"] else: @[]
+  let extensions = msiExtensions(dist, tree)
   let candleEdge = candleTool(
     noLogo = true,
     arch = dist.msiArchitecture,

@@ -21,19 +21,26 @@
 ## - refuse a working directory inside an enclosing workspace, whose root
 ##   (with its own lock and patches) the run would never read.
 ##
+## A refusal of a condition of the WORKSPACE (a configuration file above it,
+## a package outside it, a re-routed source) is not a failure of the run: the
+## run writes a refused plan stating the reason (`CargoPlan.refusal`, still
+## its one output) and exits 0, and the units edge then builds the workspace
+## through Mode B. A working directory inside an enclosing workspace is
+## caught by checking cargo's own answer and stays a failure.
+##
 ## HOW IT IS OBSERVED. Each case writes a one-package workspace (with a
 ## build script) under a fresh temporary directory and runs the real record
-## run on it in a closed environment, then looks at the filesystem and at
-## the run's exit status and message.
+## run on it in a closed environment, then looks at the filesystem, at the
+## plan it wrote, and at the run's exit status and message.
 ##
 ## Falsifying mutations (applied, observed to fail, reverted; see the
 ## change's report): dropping the `build.build-dir` override (the configured
 ## directory is created); dropping the empty `build.rustc-workspace-wrapper`
 ## override (the project's wrapper runs, and the derivation refuses its
 ## command lines); dropping the check of configuration files above the
-## workspace (the run succeeds); dropping the check of package manifests
-## outside the workspace (the run is refused only later, by the derivation,
-## after cargo has run, and with another message); dropping the refusal of
+## workspace (the run plans the workspace); dropping the check of package
+## manifests outside the workspace (the run fails only later, by the
+## derivation, after cargo has run, and with another message); dropping the refusal of
 ## `[source]` in the project configuration (the run is still refused, by the
 ## check of the manifests cargo read); dropping both (the re-routed run
 ## succeeds); dropping the workspace-root check (the enclosing case
@@ -79,6 +86,12 @@ proc lock(s: Setup; ws, work: string) =
     s.env & @[("HOME", home), ("CARGO_HOME", home / ".cargo")])
   checkpoint r.output
   require r.code == 0
+
+proc refusal(ws: string): string =
+  ## The reason the plan the run wrote states, "" for a plan of units.
+  let plan = readCargoPlan(ws / ".plan" / "p.rbsz")
+  check plan.units.len == 0 or plan.refusal.len == 0
+  plan.refusal
 
 proc recordRun(s: Setup; ws: string;
                extraEnv: seq[(string, string)] = @[]): ClosedRun =
@@ -145,9 +158,8 @@ suite "the record run refuses what lies outside the workspace":
     removeDir(ws / ".plan")
     writeFileIn(work / "outer", ".cargo/config.toml", "[build]\n")
     let r = s.recordRun(ws)
-    check r.code == 1
-    check (work / "outer" / ".cargo" / "config.toml") in r.output
-    check not fileExists(ws / ".plan" / "p.rbsz")
+    check r.code == 0
+    check (work / "outer" / ".cargo" / "config.toml") in refusal(ws)
 
   test "test_rqe_cg5_record_run_refuses_an_outside_member: a path package " &
       "outside the workspace root is refused before cargo builds":
@@ -161,10 +173,9 @@ suite "the record run refuses what lies outside the workspace":
     writeFileIn(work / "ext", "src/lib.rs", "pub fn g() {}\n")
     s.lock(ws, work)
     let r = s.recordRun(ws)
-    check r.code == 1
-    check "outside the workspace root" in r.output
-    check "ext" in r.output
-    check not fileExists(ws / ".plan" / "p.rbsz")
+    check r.code == 0
+    check "outside the workspace root" in refusal(ws)
+    check "ext" in refusal(ws)
     # Refused before cargo built anything: no target directory was made.
     check not dirExists(ws / ".plan" / "scratch" / "target" / "debug")
 
@@ -211,12 +222,15 @@ suite "the record run refuses what lies outside the workspace":
       "[source.repro-store-crates]\nreplace-with = \"evil\"\n" &
       "[source.evil]\ndirectory = \"evil\"\n")
     let r = run()
-    check r.code == 1
-    # Refused by the configuration check, or, behind it, by the check of
-    # where cargo read each crate from; never by anything else.
-    check "sets `source`" in r.output or
-      "not from the record run's vendor entry" in r.output
-    check not fileExists(ws / ".plan" / "p.rbsz")
+    # Refused by the configuration check (a refused plan), or, behind it,
+    # by the check of where cargo read each crate from (a failure); never by
+    # anything else, and never planned.
+    if r.code == 0:
+      check "sets `source`" in refusal(ws)
+    else:
+      check r.code == 1
+      check "not from the record run's vendor entry" in r.output
+      check not fileExists(ws / ".plan" / "p.rbsz")
 
   test "test_rqe_cg5_record_run_refuses_an_enclosing_workspace: a " &
       "workspace whose root is above the working directory is refused":

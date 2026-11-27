@@ -146,7 +146,11 @@ proc originUrlOf*(cfg: CrateFetchConfig; row: CrateRow): string =
   if cfg.originBase.len == 0: ""
   else: cfg.originBase & row.name & "/" & row.version & "/download"
 
-proc crateFetchEdgeId*(row: CrateRow): string = "cargo.fetch/" & row.label
+const CrateFetchEdgePrefix* = "cargo.fetch/"
+  ## The id prefix of every `cargo.fetch` edge, which the executor is
+  ## registered under (`registerSourceFetchExecutor`).
+
+proc crateFetchEdgeId*(row: CrateRow): string = CrateFetchEdgePrefix & row.label
 
 proc defaultCrateFetchConfig*(stateDir: string;
                               mirrors: seq[Mirror] = @[]): CrateFetchConfig =
@@ -308,22 +312,91 @@ proc receiptPathOf(cfg: CrateFetchConfig; row: CrateRow): string =
   absolutePath(cfg.stateDir) / "edges" / "cargo-fetch" / hexKey(row.name,
     row.version, row.cksum, cfg.mirrorList, cfg.originBase, storeRootOf(cfg))
 
+proc crateFetchEntries(row: CrateRow; cfg: CrateFetchConfig): seq[string] =
+  ## What the edge's executor needs to fetch ``row`` exactly as its key says:
+  ## the row, the store root, the origin base and the mirrors, in order.
+  ## Carried on the action (`BuildAction.builtinEntries`) so an executor
+  ## registered for a whole build (`crateFetchSourceExecutor`) needs no
+  ## table of its own.
+  result.add "row\t" & row.name & "\t" & row.version & "\t" & row.cksum
+  result.add "store\t" & storeRootOf(cfg)
+  result.add "origin\t" & cfg.originBase
+  for m in cfg.mirrors: result.add "mirror\t" & m.location
+
+proc crateFetchAction*(row: CrateRow; cfg: CrateFetchConfig;
+                       receipt: string; cacheable: bool): BuildAction =
+  ## The `cargo.fetch` edge of ``row``: `netFetch`, with every location it
+  ## may contact as a tracked destination; its declared output is
+  ## ``receipt``. Keyed on the row, the mirror list, the origin base and
+  ## the store root.
+  ##
+  ## ``cacheable`` false is the form `repro build` runs: the edge is then
+  ## executed on every build and, when the store holds the prefix, contacts
+  ## nothing (step 1 of the module docstring), so a prefix removed from the
+  ## store is always fetched again before anything reads it.
+  validateRow(row)
+  let id = crateFetchEdgeId(row)
+  builtinAction(bakSourceFetch, id,
+    governingLockIdentity = lockIdentityOutsideSolvedGraph(),
+    outputs = [receipt], cacheable = cacheable,
+    weakFingerprint = weakFingerprintFromText(ReceiptKind & "\n" & id &
+      "\n" & row.cksum & "\n" & cfg.mirrorList & "\n" & cfg.originBase &
+      "\n" & storeRootOf(cfg)),
+    text = "cargo.fetch " & row.label & " sha256:" & row.cksum,
+    entries = crateFetchEntries(row, cfg),
+    networkMode = netFetch, netDestinations = cfg.destinationsOf(row))
+
 proc crateFetchActions*(rows: openArray[CrateRow];
                         cfg: CrateFetchConfig): seq[BuildAction] =
-  ## One `cargo.fetch` edge per row. Each is `netFetch`, with every
-  ## location it may contact as a tracked destination; its declared output
-  ## is a receipt under the state directory.
+  ## One `cargo.fetch` edge per row (`crateFetchAction`), cacheable, with
+  ## its receipt under the state directory.
   for r in rows:
-    validateRow(r)
-    let id = crateFetchEdgeId(r)
-    result.add builtinAction(bakSourceFetch, id,
-      governingLockIdentity = lockIdentityOutsideSolvedGraph(),
-      outputs = [cfg.receiptPathOf(r)], cacheable = true,
-      weakFingerprint = weakFingerprintFromText(ReceiptKind & "\n" & id &
-        "\n" & r.cksum & "\n" & cfg.mirrorList & "\n" & cfg.originBase &
-        "\n" & storeRootOf(cfg)),
-      text = "cargo.fetch " & r.label & " sha256:" & r.cksum,
-      networkMode = netFetch, netDestinations = cfg.destinationsOf(r))
+    result.add crateFetchAction(r, cfg, cfg.receiptPathOf(r), cacheable = true)
+
+proc crateFetchOf*(action: BuildAction): tuple[row: CrateRow,
+                                              cfg: CrateFetchConfig] =
+  ## The row and configuration a `cargo.fetch` edge was made with
+  ## (`crateFetchEntries`). Raises `CrateFetchError` for an action that is
+  ## not one.
+  proc bad(why: string) {.noreturn.} =
+    raise newException(CrateFetchError, action.id & " is not a cargo.fetch " &
+      "edge: " & why)
+  if action.kind != bakSourceFetch or
+      not action.id.startsWith(CrateFetchEdgePrefix):
+    bad("wrong kind or id")
+  if action.outputs.len != 1:
+    bad("it must declare exactly its receipt as output")
+  result.cfg = defaultCrateFetchConfig("", @[])
+  result.cfg.originBase = ""
+  var sawRow, sawStore, sawOrigin = false
+  for entry in action.builtinEntries:
+    let f = entry.split('\t')
+    case f[0]
+    of "row":
+      if f.len != 4 or sawRow: bad("malformed row entry")
+      result.row = CrateRow(name: f[1], version: f[2], cksum: f[3])
+      sawRow = true
+    of "store":
+      if f.len != 2 or sawStore or not f[1].isAbsolute:
+        bad("malformed store entry")
+      result.cfg.storeRoot = f[1]
+      sawStore = true
+    of "origin":
+      if f.len != 2 or sawOrigin: bad("malformed origin entry")
+      result.cfg.originBase = f[1]
+      sawOrigin = true
+    of "mirror":
+      if f.len != 2: bad("malformed mirror entry")
+      try: result.cfg.mirrors.add parseMirror(f[1])
+      except CatchableError as e: bad("mirror " & f[1] & ": " & e.msg)
+    else:
+      bad("unknown entry " & f[0].escape())
+  if not (sawRow and sawStore and sawOrigin):
+    bad("it lacks its row, store or origin entry")
+  try: validateRow(result.row)
+  except CatchableError as e: bad(e.msg)
+  if crateFetchEdgeId(result.row) != action.id:
+    bad("its id does not name its row")
 
 proc encodeReceipt(p: CrateFetch): string =
   result = ReceiptKind & "\n"
@@ -345,6 +418,40 @@ proc failureText*(p: CrateFetch): string =
     lines.add "no mirror and no origin is configured"
   "cargo.fetch " & p.row.label & " (sha256:" & p.row.cksum &
     ") failed:\n  " & lines.join("\n  ")
+
+var executorDowngraded {.threadvar.}: HashSet[string]
+  ## The mirrors `crateFetchSourceExecutor` has seen serve wrong bytes in
+  ## this build (tried last from then on, as in one wave).
+
+proc crateFetchSourceExecutor*(): SourceFetchExecutor =
+  ## (Each call starts a new build's record of downgraded mirrors.)
+  ## The executor of `cargo.fetch` edges in a build of their own graph
+  ## (`repro build`), registered under `CrateFetchEdgePrefix`: each edge is
+  ## fetched from what it carries (`crateFetchOf`), and its receipt is
+  ## written only when its content changes, so an unchanged prefix does not
+  ## touch it.
+  executorDowngraded.clear()
+  result = proc(action: BuildAction): ActionResult {.gcsafe.} =
+    {.cast(gcsafe).}:
+      result = ActionResult(id: action.id, status: asSucceeded, exitCode: 0,
+        launched: true)
+      try:
+        let (row, cfg) = crateFetchOf(action)
+        let p = cfg.fetchCrate(row, executorDowngraded)
+        if p.state == csFailed:
+          result.status = asFailed
+          result.exitCode = 1
+          result.stderr = p.failureText()
+          return
+        let receipt = action.outputs[0]
+        let text = encodeReceipt(p)
+        if not fileExists(receipt) or readFile(receipt) != text:
+          createDir(parentDir(receipt))
+          writeFile(receipt, text)
+      except CatchableError as e:
+        result.status = asFailed
+        result.exitCode = 1
+        result.stderr = action.id & ": " & e.msg
 
 proc fetchLockedCrates*(rows: seq[CrateRow];
                         cfg: CrateFetchConfig): CrateFetchResult =
@@ -401,7 +508,7 @@ proc fetchLockedCrates*(rows: seq[CrateRow];
         result.status = asFailed
         result.exitCode = 1
         result.stderr = action.id & ": " & e.msg
-  registerSourceFetchExecutor(executor)
+  registerSourceFetchExecutor(CrateFetchEdgePrefix, executor)
   try:
     var ecfg = defaultBuildEngineConfig(stateDir / "engine-cache")
     ecfg.maxParallelism = 1
@@ -409,7 +516,7 @@ proc fetchLockedCrates*(rows: seq[CrateRow];
     ecfg.deferLocalOutputBlobs = false
     discard runBuild(g, ecfg)
   finally:
-    clearSourceFetchExecutor()
+    clearSourceFetchExecutor(CrateFetchEdgePrefix)
   result.executed = executed
   result.ok = true
   var s = openStore(storeRootOf(cfg))

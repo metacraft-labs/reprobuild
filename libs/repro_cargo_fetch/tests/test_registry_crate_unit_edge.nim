@@ -29,10 +29,12 @@ import repro_core/ambient_execution
 import repro_test_support/reasoned_skip
 
 import ./crate_fixtures
+import repro_lock/identity
 
 proc unitFor(prefix, outDir: string): RegistryCrateUnit =
   let h = "00112233aabbccdd"
-  RegistryCrateUnit(hash: h, crateName: "rqu",
+  RegistryCrateUnit(governingLockIdentity: lockIdentityOutsideSolvedGraph(),
+      hash: h, crateName: "rqu",
     argv: @["rustc", "--crate-name", "rqu", "--edition=2021",
       prefix / "src" / "lib.rs", "--crate-type", "lib",
       "--emit=dep-info,metadata,link", "-C", "embed-bitcode=no",

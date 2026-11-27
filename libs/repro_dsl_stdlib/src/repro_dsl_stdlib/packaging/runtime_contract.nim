@@ -139,6 +139,16 @@ type
       ## MSI's ``ServiceInstall``, a future ``.desktop`` emitter — read
       ## this rather than re-deriving "which of these is the real one".
 
+  StagedCompletionFile* = object
+    ## One shell completion file ``addShellCompletion`` staged.
+    program*: string
+      ## The name the script completes and is named after (the
+      ## component's install name, without ``.exe``).
+    shell*: string
+      ## ``bash``, ``zsh``, ``fish`` or ``powershell``.
+    rootRelPath*: string
+      ## Where it is in the tree, as ``StagedFile.rootRelPath``.
+
   StagedTree* = object
     ## What a producer consumes. Deliberately carries no
     ## ``RuntimeContract``: see the header note on enforcing "once"
@@ -164,6 +174,12 @@ type
       ## packaged. Found by ``t_packaging_content_addressed.nim``'s
       ## id-uniqueness case, which is there for exactly this.
     files*: seq[StagedFile]
+    completions*: seq[StagedCompletionFile]
+      ## The shell completion files among ``files``, as
+      ## ``addShellCompletion`` staged them. A producer that has to do more
+      ## than carry a file for a shell to find it (the MSI's custom actions,
+      ## the Scoop manifest's hooks, which write a PowerShell profile block)
+      ## reads them here, so it acts on exactly the files the tree holds.
     terminal*: seq[BuildActionDef]
       ## Every edge a producer must be ordered after. A producer passes
       ## this as ``after =`` and the staged paths as ``extraInputs``,
@@ -1999,13 +2015,16 @@ type
       ## ``<dir>/<program>.fish``.
     powershellDir*: string
       ## ``<dir>/<program>.ps1``. No Linux format has a place PowerShell
-      ## loads a script from by itself, so the Linux layouts leave it empty.
+      ## loads a script from by itself, so the Linux layouts leave it empty;
+      ## the Windows one names a directory a profile block loads it from.
+      ##
+      ## Any of the four may contain ``CompletionProgramToken``, which
+      ## stands for the program's name: clispec's Windows location is a
+      ## directory of the program's own (``share\<program>\completions``).
 
-  StagedCompletionFile* = object
-    ## One completion file a producer staged.
-    program*: string
-    shell*: string
-    rootRelPath*: string
+const CompletionProgramToken* = "{program}"
+  ## Replaced by the program's name in a ``ShellCompletionLayout``
+  ## directory.
 
 proc prefixShellCompletionLayout*(prefixToRoot: string = ""):
     ShellCompletionLayout =
@@ -2033,6 +2052,20 @@ proc systemShellCompletionLayout*(zshDir = "usr/share/zsh/site-functions"):
     bashDir: "usr/share/bash-completion/completions",
     zshDir: zshDir,
     fishDir: "usr/share/fish/vendor_completions.d")
+
+proc windowsShellCompletionLayout*(): ShellCompletionLayout =
+  ## The layout of a Windows-shaped tree (an MSI's, or a tarball for a
+  ## Windows target), which is the PREFIX: the PowerShell script alone, at
+  ## ``share/<program>/completions/<program>.ps1``. That is clispec's
+  ## ``cpfWindows`` row (``clispec/completion_install``,
+  ## ``cliSystemCompletionDirs``), the path reprobuild's own MSI installs
+  ## its script at. No Bash, Zsh or Fish on Windows reads a directory a
+  ## Windows package installs into, so there is no file for them.
+  ## PowerShell loads no completion file by itself either: a profile block
+  ## has to (``powershell_completion``), which the MSI and the Scoop
+  ## manifest write and an archive cannot.
+  ShellCompletionLayout(
+    powershellDir: "share/" & CompletionProgramToken & "/completions")
 
 proc completionInstallName(shell, program: string): string =
   case shell
@@ -2070,11 +2103,13 @@ proc addShellCompletion*(tree: var StagedTree; layout: ShellCompletionLayout;
     {.discardable.} =
   ## Stage the completion files of every executable component of
   ## ``tree.dist`` that has them (``componentCompletionFiles``) at
-  ## ``layout``'s places, mode 0644, after the completion edge that writes
-  ## them; nothing when ``tree.dist.omitShellCompletion``. A producer calls
-  ## this after ``stageInstallTree`` and before anything that lists the
-  ## tree's files (an rpm ``%files``, an Arch ``.MTREE``). Returns what it
-  ## staged.
+  ## ``layout``'s places, after the completion edge that writes them:
+  ## mode 0644 in a POSIX tree, and in a Windows tree copied by the
+  ## engine's copy builtin, as the rest of its staging is. Nothing when
+  ## ``tree.dist.omitShellCompletion``. A producer calls this after
+  ## ``stageInstallTree`` and before anything that lists the tree's files
+  ## (an rpm ``%files``, an Arch ``.MTREE``, an MSI's ``.wxs``). Records
+  ## what it staged in ``tree.completions`` and returns it.
   if tree.dist.omitShellCompletion:
     return
   let posix = tree.dist.targetOs != toWindows
@@ -2084,6 +2119,7 @@ proc addShellCompletion*(tree: var StagedTree; layout: ShellCompletionLayout;
       continue
     for file in set.files:
       let dir = completionDirFor(layout, file.shell)
+        .replace(CompletionProgramToken, set.program)
       if dir.len == 0:
         continue
       let rootRel = dir.strip(chars = {'/'}) & "/" &
@@ -2119,8 +2155,10 @@ proc addShellCompletion*(tree: var StagedTree; layout: ShellCompletionLayout;
       tree.files.add(StagedFile(rootRelPath: rootRel, edge: edge,
         role: crDataFile, isPublicEntryPoint: false))
       tree.terminal.add(edge)
-      result.add(StagedCompletionFile(program: set.program,
-        shell: file.shell, rootRelPath: rootRel))
+      let staged = StagedCompletionFile(program: set.program,
+        shell: file.shell, rootRelPath: rootRel)
+      tree.completions.add(staged)
+      result.add(staged)
 
 # ---------------------------------------------------------------------------
 # The reprobuild instance of the contract.

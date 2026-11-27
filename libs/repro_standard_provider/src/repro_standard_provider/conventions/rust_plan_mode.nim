@@ -6,9 +6,9 @@
 ## only, from `cargo metadata --no-deps`, and has no unit to pass `--extern`
 ## for a registry crate. A workspace whose external dependencies all come
 ## from crates.io can instead be built from cargo's PLAN (the record-only
-## graph-production run of `repro_cargo_edge/plan_run`), in which every
-## library and binary unit, members and registry crates alike, has the
-## command line, working directory and environment cargo gave it.
+## graph-production edge, `repro_cargo_edge/plan_edge` and `plan_run`), in
+## which every library and binary unit, members and registry crates alike,
+## has the command line, working directory and environment cargo gave it.
 ##
 ## THE GATE. The lift is behind the switch `REPRO_CARGO_MODE_A_REGISTRY`,
 ## which only the exact value `on` turns on; it is off by default. With it
@@ -18,53 +18,69 @@
 ## fragment it emits (`environmentInput`, a host fact keyed by a digest of
 ## the value), so turning the switch on or off re-decides the workspace.
 ##
-## GRAPH PRODUCTION, in this order, each step a reason for Mode B when it
-## cannot be taken (`PlanGraph.reason`):
+## GRAPH PRODUCTION IS EDGES. Evaluating the workspace runs nothing: it
+## declares, from `Cargo.lock` and the toolchain alone,
 ##
-## 1. The lock's crates.io rows (`crate_rows`). A package from any other
-##    source keeps the workspace in Mode B.
-## 2. The fetch wave (`repro_cargo_fetch.fetchLockedCrates`): each crate's
-##    store prefix, from the store root when it is there, else from the
-##    configured locations (crates.io's origin; no mirror is configured
-##    yet). Its receipts and engine cache are the project's own, under
-##    `.repro/build/cargo-fetch`.
-## 3. The record run (`plan_run`, the process of the record-only edge,
-##    `plan_edge.cargoPlanArgv`), run under the io monitor in the workspace
-##    root, from a closed environment (`closedRecordEnv`: the toolchain's
-##    `PATH` and a private `TMPDIR`), in a directory of its own. What it read, outside its own scratch directory and plan, is
-##    reported as the fragment's evaluation inputs, so a change of a
-##    manifest, the lock, a prefix or a tool re-runs graph production, as
-##    does a change of the toolchain or the `PATH` it was resolved from
-##    (`toolchainEvaluationInputs`). Its directory is never evidence.
-## 4. The plan's edges (`plan_units.planUnitEdges`). A plan with a unit these
-##    edges do not build (a build script, a fed unit, a proc-macro, ...) is
-##    refused as a whole, and the workspace goes to Mode B: it is built
-##    either wholly by these edges or wholly by cargo.
+## 1. one `cargo.fetch/<name>@<version>` edge per locked crates.io crate
+##    (`repro_cargo_fetch`, executed by `repro build` itself), which puts the
+##    crate's prefix in the store, or finds it there;
+## 2. the plan edge `cargo.plan/<workspace>`, the record-only `cargo build`
+##    over those prefixes, whose one output is the plan. It is relocatable
+##    and keyed on what it reads, so an unchanged workspace reuses its plan
+##    and two checkouts of it share one;
+## 3. the Mode B record edge, which writes the record of the workspace's
+##    Mode B build edge (`repro_cargo_edge/mode_b.modeBBuildSpec`, the edge
+##    the static Mode B fragment declares);
+## 4. the units edge `cargo.plan-units/<workspace>`
+##    (`repro_cargo_edge/plan_units_edge`), which reads the plan and writes a
+##    dynamic graph fragment: one `create-action` record per unit
+##    (`plan_units.planUnitEdges`), or, when the plan holds a unit these
+##    edges do not build or the record run refused the workspace, the Mode B
+##    edge's record. A workspace is built either wholly by these edges or
+##    wholly by cargo;
+## 5. the collector `cargo.workspace/<workspace>`, in the default target,
+##    whose `dynamicDepsFile` is that fragment: the engine creates the
+##    fragment's actions when the collector is about to run, and the
+##    collector waits for them.
+##
+## What evaluation still decides is only what needs no tool run: the lock's
+## sources (a package from any other source keeps the workspace in Mode B)
+## and whether the record wrapper is installed.
 ##
 ## The record run plans `cargo build --release --workspace`, the selection
 ## and profile of Mode B's delegated build, so the workspace builds the same
 ## units in either mode.
 
-import std/[os, strutils, tables, tempfiles, times]
+import std/[os, strutils]
 
 import repro_provider_runtime
 import repro_cargo_fetch
-import repro_cargo_edge/[cargo_plan, plan_edge, plan_run, plan_units,
-                         wrapper_env]
-
-import repro_standard_provider/conventions/observed_reads
+import repro_cargo_edge/[plan_edge, plan_run, plan_units_edge, wrapper_env]
+import repro_local_store/store
 
 const
   ModeARegistrySwitch* = "REPRO_CARGO_MODE_A_REGISTRY"
     ## The temporary gate on item 6's registry lift. Only `on` turns it on.
   ModeARegistrySwitchOn* = "on"
   PlanDirRel* = ".repro/build/cargo-plan"
-    ## The record run's directory under the workspace root.
+    ## The graph-production edges' files under the workspace root.
   PlanFileRel* = PlanDirRel & "/plan.rbsz"
+    ## The plan edge's one output.
+  PlanScratchRel* = PlanDirRel & "/scratch"
+    ## The plan edge's scratch directory.
+  ModeBRecordRel* = PlanDirRel & "/mode-b.record"
+    ## The Mode B edge's `create-action` record.
+  UnitsFragmentRel* = PlanDirRel & "/units.rbdyn"
+    ## The units edge's fragment.
   UnitsOutRel* = ".repro/build/cargo-units"
     ## `${out}`: the root of the plan's per-unit output directories.
   FetchStateRel* = ".repro/build/cargo-fetch"
+    ## The fetch edges' receipts.
   PlanCargoArgs* = ["--release", "--workspace"]
+  StoreRootEvaluationVariables* = [StoreRootEnvVar, "HOME", "XDG_CACHE_HOME",
+                                   "LOCALAPPDATA", "USERPROFILE"]
+    ## What the store root is resolved from (`resolveStoreRoot`): the fetch
+    ## edges and the plan edge name it, so each is an evaluation input.
 
 proc modeARegistryLiftOn*(): bool =
   ## Whether the switch turns the lift on: exactly `on`, nothing else.
@@ -75,50 +91,6 @@ proc modeARegistrySwitchInput*(): GraphEvaluationInput =
   environmentInput(ModeARegistrySwitch)
 
 type
-  PlanGraph* = object
-    ## The outcome of graph production for one workspace.
-    ok*: bool
-    reason*: string
-      ## Why the workspace is not built from the plan, when not `ok`.
-    edges*: seq[PlanUnitEdge]
-    planFile*: string
-    observed*: ObservedReads
-      ## What the record run read (empty when it did not run).
-    stamps*: Table[string, string]
-      ## Their states, taken after the run.
-    reusable*: bool
-      ## False when the run's reads are not a key (an incomplete capture, an
-      ## input that changed while it ran).
-
-proc underAny(path: string; roots: openArray[string]): bool =
-  for root in roots:
-    if path == root or path.startsWith(root & "/"):
-      return true
-  false
-
-proc withoutOwnPaths(observed: ObservedReads;
-                     own: openArray[string]): ObservedReads =
-  ## The record run's reads without its scratch directory, its plan and the
-  ## monitor's capture files, which are the edge's own and never evidence.
-  result.incomplete = observed.incomplete
-  result.envNames = observed.envNames
-  for f in observed.files:
-    if not f.underAny(own): result.files.add f
-  for d in observed.directories:
-    if not d.underAny(own): result.directories.add d
-  for w in observed.rewritten:
-    if not w.underAny(own): result.rewritten.add w
-
-proc emptyDir(path: string) =
-  ## Remove `path` (read-only entries included) so the record run finds its
-  ## scratch directory empty, as the engine leaves an edge's.
-  if not dirExists(path): return
-  for entry in walkDirRec(path, yieldFilter = {pcDir}):
-    try: setFilePermissions(entry, getFilePermissions(entry) + {fpUserWrite})
-    except OSError: discard
-  removeDir(path)
-
-type
   PlanToolchain* = object
     ## The tools graph production runs and the edges are given, resolved by
     ## the caller and keyed by it (`toolchainEvaluationInputs`).
@@ -127,7 +99,7 @@ type
       ## The C driver rustc links with ("" when there is none).
 
 proc toolchainPath*(t: PlanToolchain): string =
-  ## The `PATH` of the record run's closed environment and of every unit
+  ## The `PATH` of the plan edge's closed environment and of every unit
   ## edge: the directories of cargo, rustc and the C driver, nothing else.
   var dirs: seq[string]
   for exe in [t.cargo, t.rustc, t.cc]:
@@ -137,45 +109,64 @@ proc toolchainPath*(t: PlanToolchain): string =
 
 proc toolchainEvaluationInputs*(t: PlanToolchain): seq[GraphEvaluationInput] =
   ## What the toolchain was resolved from and what it is: the `PATH` it was
-  ## found on, and the content of each tool. A change of either re-runs
-  ## graph production.
+  ## found on, and the content of each tool. A change of either re-evaluates
+  ## the workspace.
   result.add environmentInput("PATH")
   for exe in [t.cargo, t.rustc, t.cc]:
     if exe.len > 0: result.add fileReadInput(exe)
 
-proc closedRecordEnv*(t: PlanToolchain; tmp: string): seq[string] =
-  ## The record run's closed environment (`plan_run --env`): the
-  ## toolchain's `PATH` and a private `TMPDIR`. The run adds the edge-private
-  ## `CARGO_HOME` and `HOME`; nothing of the provider's environment reaches
-  ## cargo, so no variable cargo reads (`RUSTFLAGS`, `CARGO_PROFILE_*`,
-  ## `CARGO_BUILD_*`, `CARGO_TARGET_<triple>_*`, ...) shapes the plan.
-  @["PATH=" & toolchainPath(t), "TMPDIR=" & tmp]
+type
+  PlanFetchEdge* = object
+    ## One `cargo.fetch` edge of the workspace's lock.
+    row*: CrateRow
+    receipt*: string    ## its one output, absolute
 
-proc publishPlan(runPlan, planFile: string) =
-  ## Copy the run's plan to `planFile`, the workspace's last plan, for
-  ## inspection; replaced in one rename, so a concurrent reader sees a whole
-  ## plan.
-  createDir(parentDir(planFile))
-  let staged = runPlan & ".publish"
-  copyFile(runPlan, staged)
-  moveFile(staged, planFile)
+  PlanGraph* = object
+    ## The graph-production edges of one workspace, or why it is not built
+    ## from the plan.
+    ok*: bool
+    reason*: string
+      ## Why the workspace is built by cargo, when not `ok`.
+    name*: string
+      ## The workspace's name in the edges' ids.
+    storeRoot*: string
+    fetches*: seq[PlanFetchEdge]
+    planEdge*: CargoPlanEdgeConfig
+    units*: PlanUnitsOptions
+      ## The units edge's arguments; its fragment, plan and Mode B record
+      ## are relative to the workspace root.
+    helper*: string
+      ## The standard provider's image, which runs the units edge, the
+      ## collector and the thin cargo edge.
+    wrapper*: string
+      ## The record wrapper, the plan edge's process.
 
-proc planWorkspace*(projectRoot: string; tools: PlanToolchain): PlanGraph =
-  ## Graph production for the workspace at `projectRoot` (the module
-  ## docstring). Never raises for a workspace it cannot build from the plan:
-  ## it returns `ok = false` with the reason.
-  ##
-  ## Each record run has a directory of its own under `PlanDirRel`
-  ## (`run-*`), holding its scratch directory, the monitor's capture files,
-  ## its temporary directory and its plan, and removed when the run is done:
-  ## two evaluations of one workspace at once never empty each other's
-  ## state. The plan is then copied to `PlanFileRel`.
+proc receiptPath*(root: string; row: CrateRow): string =
+  ## Where the fetch edge of ``row`` writes its receipt.
+  root / FetchStateRel / "receipts" / (row.name & "@" & row.version &
+    ".receipt")
+
+proc edgeName*(root: string): string =
+  ## The workspace's name in its edges' ids: its directory's name, with
+  ## anything outside `[A-Za-z0-9._-]` spelt `_`.
+  for ch in root.extractFilename:
+    result.add(if ch in {'a' .. 'z', 'A' .. 'Z', '0' .. '9', '-', '_', '.'}: ch
+               else: '_')
+  if result.len == 0: result = "workspace"
+
+proc planWorkspace*(projectRoot: string; tools: PlanToolchain;
+                    helper: string): PlanGraph =
+  ## The graph-production edges of the workspace at `projectRoot` (the
+  ## module docstring). Runs no tool and writes nothing. Never raises for a
+  ## workspace it cannot build from the plan: it returns `ok = false` with
+  ## the reason.
   let root = absolutePath(projectRoot)
-  result.planFile = root / PlanFileRel
+  result.name = edgeName(root)
+  result.helper = helper
   when not defined(posix):
     result.reason = "the record run is not supported on this platform"
     return
-  # 1. The lock's crates.io rows.
+  # The lock's crates.io rows.
   var locked: LockedCrates
   try:
     locked = lockedCratesOf(readFile(root / "Cargo.lock"))
@@ -189,104 +180,30 @@ proc planWorkspace*(projectRoot: string; tools: PlanToolchain): PlanGraph =
       " from " & p.source & " (" & p.reason & "); only crates.io crates " &
       "are built from the plan"
     return
-  let wrapper = wrapperBinaryPath(parentDir(getAppFilename()),
+  result.wrapper = wrapperBinaryPath(parentDir(getAppFilename()),
     getEnv(WrapperPathEnv))
-  if wrapper.len == 0:
+  if result.wrapper.len == 0:
     result.reason = "the record wrapper (" & WrapperBinaryName & ") is " &
       "not installed beside " & getAppFilename() & " and " & WrapperPathEnv &
       " names none"
     return
-  # 2. The fetch wave.
-  var fetchCfg = defaultCrateFetchConfig(root / FetchStateRel, @[])
-  fetchCfg.originBase = CratesIoOrigin
-  let store = storeRootOf(fetchCfg)
+  result.storeRoot = resolveStoreRoot()
   var crates: seq[CratePrefix]
-  try:
-    let fetched = fetchLockedCrates(locked.rows, fetchCfg)
-    if not fetched.ok:
-      for c in fetched.crates:
-        if c.state == csFailed:
-          result.reason = "the crate " & c.row.label & " could not be " &
-            "fetched: " & failureText(c)
-          return
-      result.reason = "the fetch wave failed"
-      return
-    for c in fetched.crates:
-      crates.add CratePrefix(name: c.row.name, version: c.row.version,
-        prefix: c.prefix)
-  except CatchableError as err:
-    result.reason = "the fetch wave failed: " & err.msg
-    return
-  # 3. The record run, in a directory of its own.
-  var runDir = ""
-  try:
-    createDir(root / PlanDirRel)
-    runDir = createTempDir("run-", "", root / PlanDirRel)
-    createDir(runDir / "tmp")
-  except OSError as err:
-    result.reason = "the record run's directory cannot be made: " & err.msg
-    return
-  defer:
-    try: emptyDir(runDir)
-    except OSError: discard
-  let runPlan = runDir / "plan.rbsz"
-  let argv = cargoPlanArgv(CargoPlanEdgeConfig(name: "workspace",
-    projectRoot: root, planFile: relativePath(runPlan, root),
-    scratchDir: relativePath(runDir / "scratch", root),
-    wrapper: wrapper, cargo: tools.cargo, rustc: tools.rustc,
-    storeRoot: store, cargoArgs: @PlanCargoArgs, crates: crates,
-    closedEnv: closedRecordEnv(tools, runDir / "tmp")))
-  var observed: ObservedReads
-  let started = getTime()
-  var run: MonitoredRun
-  try:
-    run = runMonitoredTool(argv, root, runDir / "capture", "record",
-      "cargo plan", observed)
-  except MonitorUnavailableError as err:
-    result.reason = err.msg
-    return
-  result.observed = observed.withoutOwnPaths([runDir, result.planFile])
-  result.stamps = observedStamps(result.observed)
-  result.reusable = result.observed.incomplete.len == 0 and
-    unstableObservedReads(result.observed, initTable[string, string](),
-      result.stamps, started).len == 0
-  if run.exitCode != 0:
-    result.reason = "the record run could not plan the workspace: " &
-      (run.stderr & run.stdout).strip()
-    return
-  # 4. The plan's edges.
-  try:
-    let plan = readCargoPlan(runPlan)
-    publishPlan(runPlan, result.planFile)
-    result.edges = planUnitEdges(plan, PlanUnitsConfig(projectRoot: root,
-      storeRoot: store, outRoot: root / UnitsOutRel,
-      registryCrates: locked.rows,
-      toolchainEnv: @["PATH=" & toolchainPath(tools)]))
-  except PlanUnitsRefusal as err:
-    result.reason = err.msg
-    return
-  except CatchableError as err:
-    result.reason = "the plan cannot be built as edges: " & err.msg
-    return
+  var fetchIds: seq[string]
+  for row in locked.rows:
+    result.fetches.add PlanFetchEdge(row: row, receipt: receiptPath(root, row))
+    fetchIds.add crateFetchEdgeId(row)
+    crates.add CratePrefix(name: row.name, version: row.version,
+      prefix: cratePrefixPath(result.storeRoot, row))
+  result.planEdge = CargoPlanEdgeConfig(name: result.name, projectRoot: root,
+    planFile: PlanFileRel, scratchDir: PlanScratchRel,
+    wrapper: result.wrapper, cargo: tools.cargo, rustc: tools.rustc,
+    storeRoot: result.storeRoot, cargoArgs: @PlanCargoArgs,
+    devEnv: @["PATH=" & toolchainPath(tools)], fetchEdges: fetchIds,
+    crates: crates)
+  result.units = PlanUnitsOptions(planFile: PlanFileRel,
+    fragmentFile: UnitsFragmentRel, modeBFile: ModeBRecordRel,
+    collector: planCollectorId(result.name), projectRoot: root,
+    storeRoot: result.storeRoot, outRoot: root / UnitsOutRel,
+    toolchainEnv: @["PATH=" & toolchainPath(tools)], crates: locked.rows)
   result.ok = true
-
-proc observedEvaluationInputs*(observed: ObservedReads;
-                               stamps: Table[string, string];
-                               reusable: bool;
-                               unobservedIdentity: string):
-    seq[GraphEvaluationInput] =
-  ## `registerObservedReads` as a list, for a fragment built outside the
-  ## build proc that registers inputs (the Mode B fragment of a workspace
-  ## whose plan was refused).
-  for file in observed.files:
-    if file in stamps:
-      if stamps[file] != "directory":
-        result.add recordedFileReadInput(file, stamps[file])
-    elif not dirExists(file):
-      result.add fileReadInput(file)
-  for dir in observed.directories:
-    result.add recordedDirectoryEnumerationInput(dir, directoryMemberNames(dir))
-  for name in observed.envNames:
-    result.add environmentInput(name)
-  if observed.incomplete.len > 0 or not reusable:
-    result.add unobservedEvaluationInput(unobservedIdentity)

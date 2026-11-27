@@ -97,7 +97,8 @@
 ## bounds-checked before it is encoded, and a decoded plan is checked as the
 ## derivation checks the one it writes (`validatePlan`): unique ids, every
 ## reference resolved, every output under its unit's directory, no path of
-## the record run left. Schema version 2 added `PlanRun.fedBy`.
+## the record run left. Schema version 2 added `PlanRun.fedBy`; version 3
+## added `CargoPlan.refusal`.
 
 import std/[algorithm, os, sequtils, sets, strutils, tables]
 when defined(posix):
@@ -110,7 +111,7 @@ import ./record_mode
 
 const
   CargoPlanMagic* = "reprobuild.cargoPlan.v1"
-  CargoPlanSchemaVersion* = 2'u16
+  CargoPlanSchemaVersion* = 3'u16
   OutRootLabel* = "out"
     ## The root every rewritten target-directory path is under.
   TargetRootLabel* = "target"
@@ -178,6 +179,11 @@ type
   CargoPlan* = object
     units*: seq[PlanUnit]  ## sorted by id
     runs*: seq[PlanRun]    ## sorted by id
+    refusal*: string
+      ## Why the record run did not plan the workspace, when a condition of
+      ## the workspace refused it before cargo ran (`plan_run.PlanRefusal`):
+      ## the workspace is then built by cargo as a whole. A refused plan
+      ## holds no unit and no run; "" for a plan.
 
 proc fail(msg: string) {.noreturn.} =
   raise newException(CargoPlanError, msg)
@@ -676,7 +682,10 @@ proc checkNoPhysicalPath(text, where: string) =
 proc validatePlan*(plan: CargoPlan) =
   ## The checks every plan passes, written or read: unique ids, every
   ## reference resolved, outputs under their unit's directory, no path of
-  ## the record run and no sentinel left. Raises `CargoPlanError`.
+  ## the record run and no sentinel left; a refused plan holds nothing but
+  ## its reason. Raises `CargoPlanError`.
+  if plan.refusal.len > 0 and (plan.units.len > 0 or plan.runs.len > 0):
+    fail("a refused cargo plan holds units or runs")
   var units = initHashSet[string]()
   var runs = initHashSet[string]()
   for u in plan.units:
@@ -915,6 +924,7 @@ type
   CargoPlanSsz = object
     units: List[PlanUnitSsz, MaxPlanListItems]
     runs: List[PlanRunSsz, MaxPlanListItems]
+    refusal: SszText
 
 proc toText(s: string): SszText =
   if s.len > MaxPlanTextBytes:
@@ -1024,7 +1034,8 @@ proc encodeCargoPlan*(plan: CargoPlan): seq[byte] =
   for r in plan.runs: runs.add toWire(r)
   let wire = CargoPlanSsz(
     units: List[PlanUnitSsz, MaxPlanListItems].init(units),
-    runs: List[PlanRunSsz, MaxPlanListItems].init(runs))
+    runs: List[PlanRunSsz, MaxPlanListItems].init(runs),
+    refusal: toText(plan.refusal))
   var payload: seq[byte]
   try:
     payload = SSZ.encode(wire)
@@ -1069,6 +1080,7 @@ proc decodeCargoPlan*(bytes: openArray[byte]): CargoPlan =
     fail("an unreadable cargo plan payload: " & err.msg)
   for u in wire.units.asSeq(): result.units.add fromWire(u)
   for r in wire.runs.asSeq(): result.runs.add fromWire(r)
+  result.refusal = fromText(wire.refusal)
   validatePlan(result)
 
 proc writeCargoPlan*(path: string; plan: CargoPlan) =

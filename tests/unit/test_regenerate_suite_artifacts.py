@@ -50,6 +50,14 @@ half reads the YAML with line/indentation matching rather than a YAML parser,
 because PyYAML is not available in every interpreter this suite runs under; it
 looks only at the one job it is about and fails rather than guesses when that
 job is absent.
+
+The gate also holds the `ct test` addressability ledger to the inventory, and
+measuring that ledger needs a CodeTracer `ct-test` build. The fixture's ledger
+is therefore written by the real script's own `measure` and `write_ledger`,
+fed a hand-built discovery response that reports exactly the inventory's
+cases for every source: what these cases need is a ledger the gate's fifth
+check accepts, and the check itself is tested in
+`tests/unit/test_ct_test_surface_addressability.py`.
 """
 
 import importlib.util
@@ -68,6 +76,7 @@ SCRIPTS = REPO_ROOT / "scripts"
 REGENERATE = Path("scripts/regenerate_suite_artifacts.py")
 INVENTORY = Path("scripts/reprobuild_suite_inventory.py")
 GATE = Path("scripts/check_suite_case_counts.sh")
+LEDGER_SCRIPT = Path("scripts/ct_test_surface_addressability.py")
 BARE_SKIPS = Path("scripts/check_bare_skips.py")
 WORKFLOW = REPO_ROOT / ".github" / "workflows" / "suite-case-counts.yml"
 RETIRE = Path("scripts/retire_regeneration_pr.sh")
@@ -105,6 +114,41 @@ TEST_SPEC = (
     "    selfInterposes: false),\n"
 )
 SOURCES = ("tests/unit/t_regen_a.nim", "tests/unit/t_regen_b.nim")
+
+
+# Writes the fixture's addressability ledger and its markdown companion with
+# the real script's producer, from a discovery response in which the surface
+# sees every tracked Nim source with exactly its inventory case count. Run in
+# the fixture's working directory; see the module docstring for why there is
+# no real surface here.
+WRITE_FIXTURE_LEDGER = """\
+import importlib.util, json, pathlib, sys
+root = pathlib.Path.cwd()
+spec = importlib.util.spec_from_file_location(
+    "ledger", root / "scripts" / "ct_test_surface_addressability.py")
+ledger = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(ledger)
+inventory = json.loads((root / ledger.INVENTORY_RELATIVE).read_text())
+items = []
+for entry in inventory["tests"]:
+    if entry.get("language") != "nim":
+        continue
+    source = entry["source"]
+    items.append({"kind": "suite", "file": source, "id": source + "::s",
+                  "range": {"startLine": 1}})
+    for i in range(entry.get("staticCaseCount", 0)):
+        items.append({"kind": "case", "file": source,
+                      "id": source + "::s::c" + str(i),
+                      "range": {"startLine": i + 2}})
+response = {"catalogs": [{"provider": {"id": "nim-unittest"}, "items": items}]}
+surface = root.parent / "ct-test"
+surface.write_bytes(b"fixture stand-in surface")
+markdown = root / ledger.MARKDOWN_RELATIVE
+markdown.write_text(
+    "# fixture ledger\\n\\n" + ledger.MARKDOWN_BEGIN + "\\n" + ledger.MARKDOWN_END + "\\n")
+ledger.write_ledger(
+    root, ledger.measure(root, str(surface), "environment", response))
+"""
 
 
 # Stand-in for scripts/check_bare_skips.py (see the header for why the real
@@ -224,6 +268,9 @@ class RegenerationFixture(unittest.TestCase):
         for flag in ("--write-static-case-counts", "--write-inventory-sources"):
             result = self.run_python(INVENTORY, flag)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        shutil.copy2(REPO_ROOT / LEDGER_SCRIPT, self.work / LEDGER_SCRIPT)
+        result = self.run_python("-c", WRITE_FIXTURE_LEDGER)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.git("add", "-A")
         self.git("commit", "-qm", "clean")
         # Positive control: the fixture starts green on every check the

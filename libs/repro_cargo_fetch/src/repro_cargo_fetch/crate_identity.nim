@@ -8,6 +8,8 @@
 ## can compute the name a prefix must have without linking the store. See
 ## `crate_store`'s module docstring for what enters the hash and why.
 
+import std/os
+
 import repro_local_store/prefix_paths
 import repro_local_store/realization_hash
 
@@ -39,3 +41,12 @@ proc crateRealizationId*(row: CrateRow): PrefixIdBytes =
 proc crateTopDirectory*(row: CrateRow): string =
   ## The one top directory a `.crate` holds: `<name>-<version>`.
   row.name & "-" & row.version
+
+proc cratePrefixPath*(storeRoot: string; row: CrateRow): string =
+  ## Where the store at ``storeRoot`` (absolute) puts ``row``'s prefix:
+  ## `<store root>/prefixes/<name>/<version>-<realization hash>`, a function
+  ## of the row alone, so a graph can name the prefix before the fetch edge
+  ## that makes it has run. Crate prefixes were first written after the
+  ## store's prefix names were widened to 160 bits, so no crate prefix lives
+  ## at the older, shorter name (`legacyPrefixRelativePath`).
+  storeRoot / prefixRelativePath(row.name, row.version, crateRealizationId(row))

@@ -1,18 +1,14 @@
-## Shared pieces of the cases that build a crates.io workspace through the
-## Rust convention's Mode A path: the environment the convention is run in,
-## the emitted fragment's actions, and the engine run of those actions.
+## Shared pieces of the cases that look at the Rust convention's Mode A path
+## for a crates.io workspace: the environment the convention is run in, the
+## emitted fragment's actions, the actions its units edge created, and where
+## the rlibs of a build came from.
 ##
-## WHAT IS RE-DONE HERE, AND WHY. The Rust convention emits `BuildActionDef`s
-## into a provider fragment; `repro build` lowers each through the CLI's
-## `lowerGraphAction`, which is private to `repro_cli_support`.
-## `toEngineAction` passes the emitted argv, working directory, ordering,
-## inputs, outputs, environment, scratch directories and the
-## `isolateHostEnvironment` flag to the engine's `action` constructor
-## unchanged, with the policies the emitter states (content-checked,
-## gathered by the automatic monitor). It is the step the Rust Mode A cases
-## already re-do (`t_rust_mode_a_depfile_is_read_not_cached`). Everything
-## else is real: `cargo metadata`, the emitter, the fetch wave, the record
-## run under the io monitor, the plan, the engine and its monitor, cargo and
+## The fragment of a workspace built from cargo's plan holds its
+## graph-production edges (`rust_plan_mode`); the unit edges are created
+## while the build runs, from the units edge's fragment, so the cases build
+## with `repro build` (`rqe_cg5_repro_build_support`) and read the created
+## actions from that fragment (`unitRecords`). Everything is real: `cargo
+## metadata`, the emitter, the CLI, the engine and its monitor, cargo and
 ## rustc.
 
 import std/[os, sequtils, strutils]
@@ -70,30 +66,6 @@ proc runsCargo*(def: BuildActionDef): bool =
 proc envEntries*(def: BuildActionDef): seq[string] =
   for (name, value) in def.env: result.add name & "=" & value
 
-proc toEngineAction*(def: BuildActionDef; projectRoot: string): BuildAction =
-  ## The emitted edge as the engine sees it (see the module header).
-  let argv = inlineArgvOf(def)
-  doAssert argv.len > 0, "edge " & def.id & " has no inline argv"
-  let cwd = block:
-    let declared = def.callArg("cwd")
-    if declared.len > 0: declared else: projectRoot
-  doAssert def.actionCachePolicy == acfpHybrid, def.id
-  doAssert def.dependencyPolicy.kind == bdpAutomaticMonitor, def.id
-  result = action(def.id, argv,
-    cwd = cwd,
-    deps = def.deps,
-    inputs = def.inputs,
-    outputs = def.outputs,
-    pool = def.pool,
-    cacheable = def.cacheable,
-    commandStatsId = def.commandStatsId,
-    actionCachePolicy = ffpHybrid,
-    dependencyPolicy = automaticMonitorGatheringPolicy(),
-    isolateHostEnvironment = def.isolateHostEnvironment,
-    env = def.envEntries,
-    governingLockIdentity = lockIdentityOutsideSolvedGraph())
-  result.scratchDirs = def.scratchDirs
-
 type ModeAEnv* = object
   ## What the convention needs from its process to plan a workspace.
   tools*: MonitorTools
@@ -124,16 +96,19 @@ proc prepareModeAEnv*(work, tag: string): ModeAEnv =
 
 const SteeringMarker* = "steered_by_the_host"
 
+proc cargoSteering*(): seq[(string, string)] =
+  ## Variables through which a shell would steer cargo's plan if they
+  ## reached cargo: extra rustc flags naming `SteeringMarker`, another
+  ## release opt-level and a target directory. None of them may shape a unit.
+  @[("RUSTFLAGS", "--cfg " & SteeringMarker),
+    ("CARGO_ENCODED_RUSTFLAGS", "--cfg\x1f" & SteeringMarker),
+    ("CARGO_BUILD_RUSTFLAGS", "--cfg " & SteeringMarker),
+    ("CARGO_PROFILE_RELEASE_OPT_LEVEL", "1"),
+    ("CARGO_TARGET_DIR", "/nonexistent/steered-target")]
+
 proc exportCargoSteering*() =
-  ## Export, in this process, variables through which a shell would steer
-  ## cargo's plan if it reached cargo: extra rustc flags naming
-  ## `SteeringMarker`, another release opt-level, a target directory and a
-  ## rustc wrapper. None of them may shape a unit.
-  putEnv("RUSTFLAGS", "--cfg " & SteeringMarker)
-  putEnv("CARGO_ENCODED_RUSTFLAGS", "--cfg\x1f" & SteeringMarker)
-  putEnv("CARGO_BUILD_RUSTFLAGS", "--cfg " & SteeringMarker)
-  putEnv("CARGO_PROFILE_RELEASE_OPT_LEVEL", "1")
-  putEnv("CARGO_TARGET_DIR", "/nonexistent/steered-target")
+  ## Export `cargoSteering` in this process.
+  for (k, v) in cargoSteering(): putEnv(k, v)
 
 proc steeredUnits*(argvs: openArray[seq[string]]): seq[string] =
   ## The command lines that show a steering variable: the marker, or
@@ -165,14 +140,21 @@ proc engineConfig*(env: ModeAEnv; cacheRoot: string): BuildEngineConfig =
 
 proc isPlanEdge*(def: BuildActionDef): bool = def.id.startsWith("cargo.rustc/")
 
-proc buildFragment*(env: ModeAEnv; fragment: GraphFragment;
-                    projectRoot, cacheRoot: string): BuildRunResult =
-  ## Build the fragment's default target: its plan edges (the `test`
-  ## target, Mode B's, is not run).
-  var actions: seq[BuildAction]
-  for def in actionDefs(fragment):
-    if def.isPlanEdge: actions.add toEngineAction(def, projectRoot)
-  runBuild(graph(actions), engineConfig(env, cacheRoot))
+const GraphProductionPrefixes* = ["cargo.fetch/", "cargo.plan/",
+  "cargo.mode-b-record/", "cargo.plan-units/", "cargo.workspace/"]
+  ## The ids of a workspace's graph-production edges (`rust_plan_mode`).
+
+proc isGraphProductionEdge*(def: BuildActionDef): bool =
+  for prefix in GraphProductionPrefixes:
+    if def.id.startsWith(prefix): return true
+  false
+
+proc unitRecords*(ws: string): seq[CreatedActionSpec] =
+  ## The actions the units edge's fragment creates, as its records state
+  ## them, after a build of the workspace.
+  for line in readFile(ws / UnitsFragmentRel).splitLines():
+    if line.startsWith("create-action\t"):
+      result.add parseCreatedActionSpec(line["create-action\t".len .. ^1])
 
 proc switchInputDigest*(fragment: GraphFragment): string =
   ## The digest the fragment recorded for the registry lift's switch, or
@@ -206,16 +188,18 @@ type RlibProvenance* = object
     ## non-empty rlibs in the record run's scratch directory (its
     ## placeholders are empty: nothing is compiled there)
 
-proc rlibProvenance*(fragment: GraphFragment; ws: string): RlibProvenance =
-  let defs = actionDefs(fragment)
-  for def in defs:
-    if def.runsCargo and not def.id.startsWith("crude-test"):
-      result.cargoEdges.add def.id
-    if def.id.startsWith("cargo.rustc/"):
-      for o in def.outputs:
+proc rlibProvenance*(units: openArray[CreatedActionSpec];
+                     ws: string): RlibProvenance =
+  ## Where every rlib of a build of ``ws`` came from, given the actions the
+  ## units edge created (`unitRecords`).
+  for u in units:
+    if u.argv.anyIt(isCargoProgram(it)) or EdgeHelperFlag in u.argv:
+      result.cargoEdges.add u.id
+    if u.id.startsWith("cargo.rustc/"):
+      for o in u.outputs:
         if o.endsWith(".rlib"): result.edgeOutputs.add o
-  for def in defs:
-    let argv = inlineArgvOf(def)
+  for u in units:
+    let argv = u.argv
     if "bin" notin argv: continue
     for i, a in argv:
       if i + 1 >= argv.len: break

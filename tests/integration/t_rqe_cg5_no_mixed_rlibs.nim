@@ -20,9 +20,9 @@
 ## 2. The same workspace without that crate (`writeRegistryWorkspace`:
 ##    members `app` and `util`, and the crates.io crates `regleaf` and
 ##    `regmid`) builds with no cargo-built rlib. With the registry lift on,
-##    the convention emits one rustc edge per unit of cargo's plan and
-##    nothing that runs cargo; built through the real engine and monitor,
-##    every rlib each binary edge is given (its `--extern` files and the
+##    `repro build` creates one rustc edge per unit of cargo's plan (the
+##    units edge's fragment) and nothing that runs cargo; every rlib each
+##    binary edge is given (its `--extern` files and the
 ##    rlibs in its `-L dependency=` directories) and every rlib in the
 ##    workspace is the declared output of one of those edges, each of which
 ##    ran in this build; no record run's directory is left with a compiled
@@ -31,21 +31,19 @@
 ##    here.)
 ##
 ## Falsifying mutation (applied, observed to fail, reverted; see the
-## change's report): adding Mode B's delegated cargo edge to the plan's
-## fragment beside the rustc edges (cargo then builds its own rlibs in the
+## change's report): the units edge writing Mode B's delegated cargo edge
+## beside the rustc edges (cargo then builds its own rlibs in the
 ## workspace's `target` directory) fails the second half.
 ##
-## MOCKS: none. See `rqe_cg5_mode_a_support` for the one step re-done here
-## (turning an emitted `BuildActionDef` into an engine action).
+## MOCKS: none. The real CLI, engine and monitor, cargo and rustc.
 
-import std/[os, sequtils, strutils, tempfiles, unittest]
+import std/[json, os, sequtils, strutils, tempfiles, unittest]
 
-import repro_build_engine
 import repro_test_support/reasoned_skip
-import repro_standard_provider/conventions/rust as rust_convention
 
 import ./rqe_cg5_plan_fixture
 import ./rqe_cg5_mode_a_support
+import ./rqe_cg5_repro_build_support
 
 suite "no mixed rlibs":
 
@@ -64,26 +62,23 @@ suite "no mixed rlibs":
     writeRegistryWorkspace(ws)
     let reg = setupRegistry(work, smReal, withRegmid = true)
     lockWorkspace(ws, work, reg)
-    let env = prepareModeAEnv(work, "cg5-no-mixed")
-    putEnv("REPRO_STORE_ROOT", reg.store)
-    putEnv(ModeARegistrySwitch, "on")
-    defer: delEnv(ModeARegistrySwitch)
-
-    let fragment = emitWorkspace(ws)
-    let defs = actionDefs(fragment).filterIt(it.isPlanEdge)
-    checkpoint "actions: " & defs.mapIt(it.id).join(" ")
-    check defs.len == 5
-    check defs.allIt(it.id.startsWith("cargo.rustc/"))
-    let run = buildFragment(env, fragment, ws, work / "engine-cache")
+    let built = reproBuild(reproBuildEnv(work, reg), ws)
+    checkpoint built.describe
+    require built.code == 0
+    let units = unitRecords(ws)
+    checkpoint "units: " & units.mapIt(it.id).join(" ")
+    check units.len == 5
+    check units.allIt(it.id.startsWith("cargo.rustc/"))
     var ran: seq[string]
-    for r in run.results:
-      checkpoint r.id & ": " & $r.status & " " & r.reason &
-        (if r.stderr.len > 0: "\nstderr: " & r.stderr else: "")
-      check r.status == asSucceeded
-      if r.status == asSucceeded: ran.add r.id
-    check ran.len == defs.len
+    for u in units:
+      let r = built.action(u.id)
+      checkpoint u.id & ": " & r{"status"}.getStr()
+      check r{"status"}.getStr() == "asSucceeded"
+      if r{"launched"}.getBool(): ran.add u.id
+    check ran.len == units.len
+    check built.idsWithPrefix("crude-build-").len == 0
 
-    let p = rlibProvenance(fragment, ws)
+    let p = rlibProvenance(units, ws)
     checkpoint "edge rlibs: " & p.edgeOutputs.join(" ")
     checkpoint "linked: " & p.linked.join(" ")
     checkpoint "foreign: " & p.foreign.join(" ")
@@ -96,8 +91,8 @@ suite "no mixed rlibs":
       checkpoint path
       check fileExists(path) and getFileSize(path) > 0
       var owner = ""
-      for def in defs:
-        if path in def.outputs: owner = def.id
+      for u in units:
+        if path in u.outputs: owner = u.id
       check owner in ran
     check p.scratchCompiled.len == 0
     check not dirExists(ws / "target")

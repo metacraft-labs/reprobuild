@@ -90,6 +90,8 @@ when defined(reproImageIdentityTest):
     self_spawn_image.resetRunningImageReproCliMarkForTest
 import repro_core/nix_evaluation_policy
 import repro_build_engine
+from repro_cargo_fetch/fetch import CrateFetchEdgePrefix, crateFetchSourceExecutor, crateFetchAction, CrateFetchConfig, defaultCrateFetchConfig
+from repro_cargo_fetch/crate_rows import CrateRow
 import repro_cmake_trycompile
 import repro_dev_env_activation
 import repro_depfile
@@ -3843,6 +3845,35 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
       requiresElevation = payload.requiresElevation)
     lowered.expandsArgFiles = expandsArgFiles
     return lowered
+
+  # A `cargo.fetch` edge (`builtinCargoFetchCall`): one crates.io crate of
+  # a Rust workspace built from cargo's plan, fetched into the store and
+  # verified against its lock checksum by the engine's `bakSourceFetch`
+  # executor, which `runProjectGraph` registers for the build. Not cacheable
+  # in a project build: it runs every build, contacts nothing when the store
+  # holds the prefix, and so fetches a prefix the store lost before anything
+  # reads it. Its key and destinations are `crateFetchAction`'s.
+  if payload.call.packageName == "reprobuild.builtin" and
+      payload.call.executableName == BuiltinCargoExecutable:
+    if payload.call.subcommand != BuiltinCargoFetch:
+      raise newException(ValueError,
+        "unknown built-in cargo operation: " & payload.call.subcommand)
+    let receipt = argValue("receipt")
+    let storeRoot = argValue("storeRoot")
+    if receipt.len == 0 or storeRoot.len == 0 or not storeRoot.isAbsolute:
+      raise newException(ValueError, "action " & payload.id &
+        " (cargo fetch) needs its receipt and an absolute store root")
+    var cfg = defaultCrateFetchConfig("")
+    cfg.storeRoot = storeRoot
+    cfg.originBase = argValue("originBase")
+    var fetch = crateFetchAction(CrateRow(name: argValue("name"),
+      version: argValue("version"), cksum: argValue("cksum")), cfg,
+      materialProjectPath(projectRoot, receipt), cacheable = false)
+    if fetch.id != payload.id:
+      raise newException(ValueError, "action " & payload.id &
+        " (cargo fetch) must be named " & fetch.id)
+    fetch.deps = payload.deps
+    return fetch
 
   if payload.call.packageName == "reprobuild.builtin" and
       payload.call.executableName == "fs":
@@ -13533,6 +13564,25 @@ proc applyRunEdgeDevEnv(actions: var seq[BuildAction];
                         announce: bool)
   ## Defined beside ``computePublicDevEnv``, which it needs; see there.
 
+proc runProjectGraph(g: BuildGraph; config: BuildEngineConfig):
+    BuildRunResult =
+  ## `runBuild` of a project's lowered graph, with the executors its
+  ## built-in edges need registered for the run: the `cargo.fetch` edges a
+  ## Rust workspace built from cargo's plan declares
+  ## (`repro_cargo_fetch.crateFetchSourceExecutor`). Registered under the
+  ## edges' id prefix, so a fetch wave nested inside the build registers
+  ## and clears its own without removing this one.
+  var cargoFetch = false
+  for a in g.actions:
+    if a.kind == bakSourceFetch and a.id.startsWith(CrateFetchEdgePrefix):
+      cargoFetch = true
+      break
+  if not cargoFetch:
+    return runBuild(g, config)
+  registerSourceFetchExecutor(CrateFetchEdgePrefix, crateFetchSourceExecutor())
+  defer: clearSourceFetchExecutor(CrateFetchEdgePrefix)
+  runBuild(g, config)
+
 proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
                         publicCliPath: string;
                         selectDefaultAction = false;
@@ -14341,7 +14391,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
         buildResult = publishMaterializedBinaryCacheEntries(
           scheduledGraph, engineConfig.binaryCachePublisher)
       else:
-        buildResult = runBuild(scheduledGraph, engineConfig)
+        buildResult = runProjectGraph(scheduledGraph, engineConfig)
     except CatchableError:
       progressRenderer.finishProgress()
       raise
@@ -16198,7 +16248,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
         buildResult = publishMaterializedBinaryCacheEntries(
           scheduledGraph, engineConfig.binaryCachePublisher)
       else:
-        buildResult = runBuild(scheduledGraph, engineConfig)
+        buildResult = runProjectGraph(scheduledGraph, engineConfig)
     except CatchableError:
       progressRenderer.finishProgress()
       raise

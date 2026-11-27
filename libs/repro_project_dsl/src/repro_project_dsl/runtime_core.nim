@@ -2269,6 +2269,25 @@ proc builtinHcrCall(command: string; arguments: openArray[PublicCliArg]):
   publicCliCall(BuiltinPackageName, BuiltinHcrExecutable, command,
     BuiltinPackageName & "." & BuiltinHcrExecutable & "." & command, arguments)
 
+const
+  BuiltinCargoExecutable* = "cargo"
+  BuiltinCargoFetch* = "fetch"
+
+proc builtinCargoFetchCall*(name, version, cksum, receipt, storeRoot,
+                            originBase: string): PublicCliCall =
+  ## The call of a `cargo.fetch/<name>@<version>` edge: one crates.io crate
+  ## of a `Cargo.lock`, fetched into the store root (absolute) from
+  ## ``originBase`` and verified against ``cksum``, its receipt at
+  ## ``receipt``. Lowered to the engine's `bakSourceFetch` edge of
+  ## `repro_cargo_fetch` (`crateFetchAction`), which `repro build` executes
+  ## itself: no tool is run.
+  publicCliCall(BuiltinPackageName, BuiltinCargoExecutable, BuiltinCargoFetch,
+    BuiltinPackageName & "." & BuiltinCargoExecutable & "." &
+      BuiltinCargoFetch, [
+    cliArg("name", name), cliArg("version", version), cliArg("cksum", cksum),
+    outputArg("receipt", receipt), cliArg("storeRoot", storeRoot),
+    cliArg("originBase", originBase)])
+
 proc inlineExecCall*(argv: openArray[string]; cwd = ""): PublicCliCall {.dynOrStatic.} =
   ## Builds a PublicCliCall that, when lowered by the engine, runs `argv`
   ## directly via the OS spawn primitive without consulting any package

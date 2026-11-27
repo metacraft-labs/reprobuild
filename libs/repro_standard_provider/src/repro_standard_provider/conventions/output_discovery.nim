@@ -27,6 +27,7 @@ from repro_core/ambient_execution import uncontrolledFindExe,
   uncontrolledStartProcess
 import repro_project_dsl
 import repro_cargo_edge/edge_cli
+import repro_cargo_edge/plan_units_edge
 
 type DiscoveredOutputs* = object
   outputs*: seq[string]
@@ -1223,6 +1224,17 @@ proc runOutputDiscoveryCommand*(args: seq[string]): bool =
     # final products are read from its JSON. It ends the process itself with
     # cargo's exit status, which is the action's.
     let code = runEdge(args[1 .. ^1], "repro-standard-provider " & EdgeHelperFlag)
+    if code != 0:
+      quit(code)
+    return true
+  if args.len > 0 and args[0] in [PlanUnitsFlag, PlanCollectFlag]:
+    # A Rust workspace built from cargo's plan: the units edge, which turns
+    # the plan into the fragment of its edges, and the collector that names
+    # the fragment (libs/repro_cargo_edge/plan_units_edge). Each ends the
+    # process with its status, which is the action's.
+    let code =
+      if args[0] == PlanUnitsFlag: runPlanUnitsCommand(args[1 .. ^1])
+      else: runPlanCollectCommand(args[1 .. ^1])
     if code != 0:
       quit(code)
     return true

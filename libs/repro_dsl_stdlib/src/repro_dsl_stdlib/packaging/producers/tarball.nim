@@ -65,11 +65,16 @@ proc tarballPackage*(dist: Distribution;
   ## one place, which is not what a tarball is for.
   var tree = stageInstallTree(dist, "tar", site)
   # The shell completion of each executable with a ``cli:`` description,
-  # under the prefix's ``share/`` (the tree IS the prefix): read by the
-  # shells when the tarball is unpacked into a prefix they search
-  # (``/usr/local``, a profile). A Windows-shaped tree's PowerShell script
-  # is not placed here; Windows packages are a separate change.
-  if dist.targetOs != toWindows:
+  # under the prefix's ``share/`` (the tree IS the prefix). A POSIX tree
+  # gets the Bash, Zsh and Fish scripts, read by the shells when the
+  # tarball is unpacked into a prefix they search (``/usr/local``, a
+  # profile); a Windows tree gets the PowerShell script alone, at
+  # ``share/<program>/completions/<program>.ps1``, which nothing loads
+  # until whatever installs the archive writes a profile block (the Scoop
+  # manifest over this tarball does).
+  if dist.targetOs == toWindows:
+    tree.addShellCompletion(windowsShellCompletionLayout(), site)
+  else:
     tree.addShellCompletion(prefixShellCompletionLayout(), site)
   let outPath = dist.outputDir & "/" & tarballArtifactName(dist)
   let edge = tarTool(

@@ -124,6 +124,7 @@ const
   TargetSubdir* = "target"
   CargoHomeSubdir* = "cargo-home"
   HomeSubdir* = "home"
+  TmpSubdir* = "tmp"
   MetadataFile* = "metadata.json"
   VendorSubdir* = "vendor"
   VendorSourceName = "repro-store-crates"
@@ -153,9 +154,19 @@ type
     env*: seq[(string, string)]
 
   PlanRunError* = object of CatchableError
+  PlanRefusal* = object of PlanRunError
+    ## A condition of the WORKSPACE the record run does not model (a
+    ## `[patch]` table, a package from another source, a cargo configuration
+    ## outside the workspace, ...), as opposed to a failure of the run. The
+    ## workspace is then built by cargo as a whole: the run writes a refused
+    ## plan stating the reason (`CargoPlan.refusal`) and succeeds, and the
+    ## units edge creates the Mode B edge from it (`plan_units_edge`).
 
 proc fail(msg: string) {.noreturn.} =
   raise newException(PlanRunError, msg)
+
+proc refuse(msg: string) {.noreturn.} =
+  raise newException(PlanRefusal, msg)
 
 proc parsePlanRunArgs*(args: openArray[string]): PlanRunOptions =
   ## The options after `--cargo-plan`. Raises `PlanRunError` on a usage error.
@@ -333,7 +344,7 @@ proc checkSources(project, storeRoot: string; crates: openArray[CratePrefix]):
   let manifest = tomlTable(project / "Cargo.toml", "the workspace manifest")
   for key in ["patch", "replace"]:
     if manifest.hasKey(key):
-      fail("the workspace manifest has a [" & key & "] table, which the " &
+      refuse("the workspace manifest has a [" & key & "] table, which the " &
         "record run does not model")
   for name in ["config.toml", "config"]:
     let config = project / ".cargo" / name
@@ -341,9 +352,9 @@ proc checkSources(project, storeRoot: string; crates: openArray[CratePrefix]):
       let table = tomlTable(config, "the cargo configuration")
       for key in RefusedConfigKeys:
         if table.hasKey(key):
-          fail("the cargo configuration " & config & " sets `" & key &
+          refuse("the cargo configuration " & config & " sets `" & key &
             "`, which the record run does not model")
-  var problems: seq[string]
+  var problems, unserved: seq[string]
   var locked = initHashSet[string]()
   if fileExists(project / "Cargo.lock"):
     for pkg in parseCargoLock(readFile(project / "Cargo.lock")):
@@ -351,14 +362,14 @@ proc checkSources(project, storeRoot: string; crates: openArray[CratePrefix]):
       let label = pkg.name & "@" & pkg.version
       locked.incl label
       if not isRegistrySource(pkg.source):
-        problems.add label & " comes from " & pkg.source & ", which is not " &
+        unserved.add label & " comes from " & pkg.source & ", which is not " &
           "crates.io"
         continue
       try:
         validateRow(CrateRow(name: pkg.name, version: pkg.version,
           cksum: pkg.checksum))
       except CrateRowError as err:
-        problems.add err.msg
+        unserved.add err.msg
         continue
       if label notin given:
         problems.add label & " was given no store prefix"
@@ -374,7 +385,13 @@ proc checkSources(project, storeRoot: string; crates: openArray[CratePrefix]):
     if label notin locked:
       problems.add label & " was given a prefix but Cargo.lock does not " &
         "lock it from crates.io"
+  if unserved.len > 0:
+    # The lock's own content: a condition of the workspace.
+    unserved.sort()
+    refuse("Cargo.lock holds packages the record run cannot serve: " &
+      unserved.join("; "))
   if problems.len > 0:
+    # What the edge was given does not match the lock: the edge's defect.
     problems.sort()
     fail("Cargo.lock holds packages the record run cannot serve: " &
       problems.join("; "))
@@ -542,7 +559,7 @@ proc runCargoPlan*(opts: PlanRunOptions): int =
         for name in ["config.toml", "config"]:
           let config = dir / ".cargo" / name
           if fileExists(config):
-            fail("cargo would read the configuration file " & config &
+            refuse("cargo would read the configuration file " & config &
               ", which is outside the workspace")
         let up = parentDir(dir)
         if up == dir or up.len == 0: break
@@ -564,6 +581,19 @@ proc runCargoPlan*(opts: PlanRunOptions): int =
 
     putEnv("CARGO_HOME", cargoHome)
     putEnv("HOME", home)
+    # A private temporary directory, set here rather than declared, so the
+    # edge's declared environment names no path of the checkout and two
+    # checkouts give it one key.
+    # Restored when the run returns: a caller that runs it in its own
+    # process (a test) keeps its temporary directory.
+    let tmp = scratch / TmpSubdir
+    emptyOrAbsent(tmp, "the edge-private TMPDIR")
+    createDir(tmp)
+    let callerTmp = (existsEnv("TMPDIR"), getEnv("TMPDIR"))
+    defer:
+      if callerTmp[0]: putEnv("TMPDIR", callerTmp[1])
+      else: delEnv("TMPDIR")
+    putEnv("TMPDIR", tmp)
 
     var rootLines = @["project=" & project, TargetRootLabel & "=" & targetDir,
       ScratchRootLabel & "=" & scratch]
@@ -603,7 +633,7 @@ proc runCargoPlan*(opts: PlanRunOptions): int =
           outside.add pkg{"name"}.getStr & " (" & manifest & ")"
       if outside.len > 0:
         outside.sort()
-        fail("workspace packages outside the workspace root: " &
+        refuse("workspace packages outside the workspace root: " &
           outside.join(", ") & "; their paths would name files of this " &
           "host only")
 
@@ -650,6 +680,20 @@ proc runPlanCommand*(args: openArray[string]): int =
     return 2
   try:
     runCargoPlan(opts)
+  except PlanRefusal as err:
+    # Not a failure: the plan states the refusal, and the workspace is built
+    # by cargo as a whole.
+    try:
+      let planPath = absolutePath(opts.planFile)
+      createDir(parentDir(planPath))
+      writeCargoPlan(planPath, CargoPlan(refusal: err.msg))
+    except CatchableError as writeErr:
+      stderr.writeLine "repro-rustc-wrapper " & PlanRunFlag & ": " &
+        writeErr.msg
+      return 1
+    stderr.writeLine "repro-rustc-wrapper " & PlanRunFlag & ": the " &
+      "workspace is not planned, and cargo builds it as a whole: " & err.msg
+    0
   except CatchableError as err:
     stderr.writeLine "repro-rustc-wrapper " & PlanRunFlag & ": " & err.msg
     1

@@ -191,7 +191,10 @@ libs/repro_build_engine/tests/t_canonical_work_tree_reproduces_split_bundle.nim	
 libs/repro_build_engine/tests/t_child_cpu_stats_row.nim	nim	7
 libs/repro_build_engine/tests/t_container_output_is_not_restored_from_a_snapshot.nim	nim	2
 libs/repro_build_engine/tests/t_create_action_record_carries_dependency_policy.nim	nim	19
+libs/repro_build_engine/tests/t_create_action_record_isolates_and_scratches.nim	nim	5
 libs/repro_build_engine/tests/t_create_action_record_keys_its_argv.nim	nim	6
+libs/repro_build_engine/tests/t_create_action_record_round_trips.nim	nim	6
+libs/repro_build_engine/tests/t_created_action_joins_producer_targets.nim	nim	5
 libs/repro_build_engine/tests/t_cross_checkout_sharing_refusal.nim	nim	11
 libs/repro_build_engine/tests/t_da1i_evidence_scope.nim	nim	30
 libs/repro_build_engine/tests/t_da6_declared_interest_keeps_every_consumer.nim	nim	9
@@ -303,6 +306,7 @@ libs/repro_cargo_edge/tests/t_plan_run_spawn_environment.nim	nim	4
 libs/repro_cargo_edge/tests/t_plan_units.nim	nim	7
 libs/repro_cargo_edge/tests/t_record_mode.nim	nim	24
 libs/repro_cargo_edge/tests/t_rqe_cg3_cargo_edge.nim	nim	22
+libs/repro_cargo_edge/tests/test_rqe_cg5_plan_unit_key_equals_created_key.nim	nim	4
 libs/repro_cargo_fetch/tests/test_registry_crate_unit_edge.nim	nim	1
 libs/repro_cargo_fetch/tests/test_rqe_cg4a_compile_edges_offline.nim	nim	1
 libs/repro_cargo_fetch/tests/test_rqe_cg4a_crate_fetch_checked.nim	nim	7
@@ -616,6 +620,7 @@ libs/repro_dsl_stdlib/tests/t_packaging_service_exec_args.nim	nim	4
 libs/repro_dsl_stdlib/tests/t_packaging_shipped_payload.nim	nim	21
 libs/repro_dsl_stdlib/tests/t_packaging_source_root_stagers.nim	nim	3
 libs/repro_dsl_stdlib/tests/t_packaging_third_party_producer.nim	nim	6
+libs/repro_dsl_stdlib/tests/t_packaging_windows_completion.nim	nim	8
 libs/repro_dsl_stdlib/tests/t_packaging_windows_loader_closure.nim	nim	8
 libs/repro_dsl_stdlib/tests/t_packaging_wrapper_keeps_project_source_roots_private.nim	nim	3
 libs/repro_dsl_stdlib/tests/t_pinned_fetch.nim	nim	5
@@ -2115,6 +2120,7 @@ tests/integration/t_content_id_refuses_states_with_no_honest_identifier.nim	nim	
 tests/integration/t_content_id_uses_a_temporary_index_and_leaves_staging_untouched.nim	nim	5
 tests/integration/t_content_id_vectors_match_the_conformance_suite.nim	nim	2
 tests/integration/t_cose_rfc9052_vectors.nim	nim	21
+tests/integration/t_created_actions_portable_lookup.nim	nim	2
 tests/integration/t_cross_repo_nim_library_required_gitlink_source.nim	nim	1
 tests/integration/t_cross_repo_nim_library_src_threaded_onto_consumer_path.nim	nim	3
 tests/integration/t_cross_targeting_axes_do_not_silently_disagree.nim	nim	5
@@ -2754,7 +2760,7 @@ tests/integration/t_rqe_cg5_plan_edges_lower_isolated.nim	nim	1
 tests/integration/t_rqe_cg5_record_mode_compiles_nothing.nim	nim	3
 tests/integration/t_rqe_cg5_record_run_compiles_nothing.nim	nim	1
 tests/integration/t_rqe_cg5_record_run_refusals.nim	nim	6
-tests/integration/t_rqe_cg5_registry_lift_graph_production.nim	nim	4
+tests/integration/t_rqe_cg5_registry_lift_graph_production.nim	nim	3
 tests/integration/t_rqe_cg5_registry_lift_is_gated.nim	nim	1
 tests/integration/t_rqe_m15_action_exports_its_lease.nim	nim	1
 tests/integration/t_rqe_m15_nim_edge_bounded.nim	nim	1
@@ -3057,9 +3063,11 @@ tests/integration/test_cs_m14_package_build_generates_completion_files.nim	nim	4
 tests/integration/test_cs_m14_repro_collects_tests_per_entry.nim	nim	6
 tests/integration/test_cs_m14_reprobuild_repro_nim_imports_thin.nim	nim	2
 tests/integration/test_cs_m14_shim_answers_tests_entry.nim	nim	2
-tests/integration/test_cs_m8d_generated_packages_add_completion.nim	nim	4
+tests/integration/test_cs_m8d_generated_packages_add_completion.nim	nim	10
 tests/integration/test_dev_env_local_flake_root.py	python	3
 tests/integration/test_nix_daemon_cache.py	python	4
+tests/integration/test_rqe_cg5_fetch_edges_run_in_repro_build.nim	nim	2
+tests/integration/test_rqe_cg5_refused_plan_builds_through_mode_b.nim	nim	1
 tests/test_dev_env_m9_policy.py	python	11
 tests/unit/t_a_pinned_block_is_not_a_dependency_to_the_recipe_text_scanners.nim	nim	2
 tests/unit/t_a_read_only_store_prefix_is_published_read_only_and_still_collectable.nim	nim	10
@@ -3355,7 +3363,7 @@ tests/unit/test_clingo_windows_arm64_producer.py	python	18
 tests/unit/test_cmake_generator_competitiveness_bench.py	python	18
 tests/unit/test_cmake_prereq_sdk.py	python	11
 tests/unit/test_continuous_benchmarking_policy.py	python	7
-tests/unit/test_ct_test_surface_addressability.py	python	14
+tests/unit/test_ct_test_surface_addressability.py	python	29
 tests/unit/test_daemon_worker_confinement_systemd_analyze.py	python	15
 tests/unit/test_dev_shell_hook_scope.py	python	7
 tests/unit/test_downstream_recorder_sibling_pins.py	python	13

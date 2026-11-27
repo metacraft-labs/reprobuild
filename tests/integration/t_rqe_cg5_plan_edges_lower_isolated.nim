@@ -1,36 +1,33 @@
-## The plan's rustc edges keep their isolation through the CLI's lowering
-## and the lowered-graph cache, and their keys do not depend on the recipe.
+## The isolated graph-production edges of a workspace built from cargo's
+## plan keep their isolation through the CLI's lowering and the lowered-graph
+## cache, and their keys do not depend on the recipe.
 ##
-## THE CONTRACT. The Rust convention emits each edge of cargo's plan as an
-## action launched from its declared environment alone
+## THE CONTRACT. The Rust convention declares the plan edge and the units
+## edge as actions launched from their declared environment alone
 ## (`isolateHostEnvironment`). `repro build` lowers the emitted fragment
 ## (`lowerProviderSnapshot`) and caches the lowered actions
 ## (`encodeLoweredAction`, the lowered-graph cache's codec). Both must carry
 ## the flag, or a warm or cold build hands the edge the engine's own
-## environment. An isolated edge's key covers its argv, working directory
-## and complete declared environment; the recipe's revision is not part of
-## what it computes, so editing or removing the project file leaves every
-## edge's weak fingerprint unchanged (as for a relocatable edge).
+## environment, and the host's cargo steering reaches the plan. An isolated
+## edge's key covers its argv, working directory and complete declared
+## environment; the recipe's revision is not part of what it computes, so
+## editing or removing the project file leaves every such edge's weak
+## fingerprint unchanged. (The unit edges are not lowered: the units edge's
+## fragment creates them, with `planUnitEdges`' keys,
+## `test_rqe_cg5_plan_unit_key_equals_created_key`.)
 ##
 ## THE CASE. The crates.io workspace of `writeRegistryWorkspace`, emitted with
 ## the registry lift on, wrapped in a provider snapshot and lowered by the
-## real `lowerProviderSnapshot`, each plan edge selected by its id:
+## real `lowerProviderSnapshot`, each isolated edge selected by its id:
 ##
-## - every lowered plan edge is isolated, has the toolchain's `PATH` as its
-##   only `PATH` and no `OUT_MIRROR`, and decodes from the lowered-graph
-##   cache's codec with the flag intact;
-## - the lowered actions build through the real engine and monitor and the
-##   binary prints `util:5 51`;
+## - each lowered edge is isolated, the plan edge has the toolchain's `PATH`
+##   as its only `PATH`, neither has `OUT_MIRROR`, and each decodes from the
+##   lowered-graph cache's codec with the flag intact;
 ## - with each payload's recipe revision replaced (another project file's
 ##   digest, and none at all, as without a project file), every lowered
 ##   edge's weak fingerprint is the same; the positive control: the same
-##   edges not isolated are keyed on the revision.
-##
-## What this does not establish: that a lowered edge's weak fingerprint
-## equals the one `planUnitEdges` gives its own engine action. They differ
-## by construction: the lowering keys an inline edge on its whole payload and
-## governs it by the workspace lock, the emitter's action on its id and
-## outside any solved graph.
+##   edges not isolated (and the plan edge not relocatable) are keyed on the
+##   revision.
 ##
 ## Falsifying mutations (applied, observed to fail, reverted; see the
 ## change's report): not stamping the flag in `lowerGraphAction` fails the
@@ -38,10 +35,9 @@
 ## codec fails the round trip; keying an isolated edge on its payload with
 ## the recipe revision in it fails the fingerprint comparison.
 ##
-## MOCKS: none. The production emitter, lowering, cache codec, engine and
-## monitor.
+## MOCKS: none. The production emitter, lowering and cache codec.
 
-import std/[os, osproc, sequtils, strutils, tables, tempfiles, unittest]
+import std/[os, sequtils, strutils, tables, tempfiles, unittest]
 
 import repro_build_engine
 import repro_cli_support
@@ -66,15 +62,18 @@ proc snapshotOf(fragment: GraphFragment): ProviderGraphSnapshot =
       edges: fragment.edges,
       evaluationInputs: fragment.evaluationInputs)])
 
+proc isIsolatedEdge(id: string): bool =
+  id.startsWith("cargo.plan/") or id.startsWith("cargo.plan-units/")
+
 proc lowerDefault(fragment: GraphFragment; ws: string): seq[BuildAction] =
-  ## The lowered plan edges, each selected by its id. (Loops, not `filterIt`:
-  ## `BuildAction` has no default value.)
+  ## The lowered isolated edges, each selected by its id. (Loops, not
+  ## `filterIt`: `BuildAction` has no default value.)
   var selectors: seq[string]
   for def in actionDefs(fragment):
-    if def.isPlanEdge: selectors.add def.id
+    if def.id.isIsolatedEdge: selectors.add def.id
   for a in lowerProviderSnapshot(snapshotOf(fragment), PathOnlyBuildIdentity(),
       ws, selectors).actions:
-    if a.id.startsWith("cargo.rustc/"): result.add a
+    if a.id.isIsolatedEdge: result.add a
 
 proc ids(actions: seq[BuildAction]): string =
   var names: seq[string]
@@ -86,26 +85,29 @@ proc fingerprints(actions: seq[BuildAction]): Table[string, string] =
 
 proc withRevision(fragment: GraphFragment; revision: string;
                   isolated: bool): GraphFragment =
-  ## `fragment` with every plan edge's recipe revision replaced and its
-  ## isolation set as given.
+  ## `fragment` with every isolated edge's recipe revision replaced and its
+  ## isolation (and the plan edge's relocation) set as given.
   result = fragment
   for node in result.nodes.mitems:
     if node.kind != gnkAction: continue
     var bytes = newSeq[byte](node.payload.len)
     for i, c in node.payload: bytes[i] = byte(c)
     var def = decodeBuildActionPayload(bytes)
-    if not def.isPlanEdge: continue
+    if not def.id.isIsolatedEdge: continue
     def.recipeRevisionFingerprint = revision
     def.isolateHostEnvironment = isolated
+    # Only the plan edge is declared relocatable (the units edge's argv
+    # names the checkout); the control takes that away with the isolation.
+    if def.id.startsWith("cargo.plan/"): def.relocatable = isolated
     node.payload = actionPayload(def)
 
 proc recipeRevisions(fragment: GraphFragment): seq[string] =
   for def in actionDefs(fragment):
-    if def.isPlanEdge: result.add def.recipeRevisionFingerprint
+    if def.id.isIsolatedEdge: result.add def.recipeRevisionFingerprint
 
 suite "the plan's edges through the lowering":
 
-  test "lowered plan edges stay isolated, survive the lowered-graph " &
+  test "lowered isolated edges stay isolated, survive the lowered-graph " &
       "cache and are keyed without the recipe":
     let work = createTempDir("cg5-lower-", "")
     defer: removeTestTree(work)
@@ -113,7 +115,7 @@ suite "the plan's edges through the lowering":
     writeRegistryWorkspace(ws)
     let reg = setupRegistry(work, smReal, withRegmid = true)
     lockWorkspace(ws, work, reg)
-    let env = prepareModeAEnv(work, "cg5-lower")
+    discard prepareModeAEnv(work, "cg5-lower")
     putEnv("REPRO_STORE_ROOT", reg.store)
     putEnv(ModeARegistrySwitch, "on")
     defer: delEnv(ModeARegistrySwitch)
@@ -121,29 +123,17 @@ suite "the plan's edges through the lowering":
     let fragment = emitWorkspace(ws)
     let lowered = lowerDefault(fragment, ws)
     checkpoint "lowered: " & ids(lowered)
-    check lowered.len == 5
+    check lowered.len == 2
     for a in lowered:
       checkpoint a.id
       check a.isolateHostEnvironment
-      check a.env.filterIt(it.startsWith("PATH=")).len == 1
+      if a.id.startsWith("cargo.plan/"):
+        check a.env.filterIt(it.startsWith("PATH=")).len == 1
       check not a.env.anyIt(it.startsWith("OUT_MIRROR="))
       let cached = decodeLoweredAction(encodeLoweredAction(a))
       check cached.isolateHostEnvironment
       check cached.env == a.env
       check $cached.weakFingerprint == $a.weakFingerprint
-
-    let run = runBuild(graph(lowered), engineConfig(env, work / "cache"))
-    for r in run.results:
-      checkpoint r.id & ": " & $r.status & " " & r.reason &
-        (if r.stderr.len > 0: "\nstderr: " & r.stderr else: "")
-      check r.status == asSucceeded
-    var app = ""
-    for a in lowered:
-      if "bin" in a.argv and a.id.startsWith("cargo.rustc/app@"):
-        for o in a.outputs:
-          if extractFilename(o).startsWith("app-"): app = o
-    require app.len > 0
-    check execProcess(app, options = {}).strip() == "util:5 51"
 
     # The recipe's revision, as an edited project file (another digest) and
     # as no project file at all (none), in otherwise identical payloads. (A

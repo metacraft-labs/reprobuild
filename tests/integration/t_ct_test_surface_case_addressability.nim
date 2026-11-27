@@ -44,6 +44,17 @@
 ##    each one is exactly what ``ctTestItemIdFor`` predicts from the case's
 ##    file, suite and name.
 ##
+## The build-free half
+## --------------------
+## This test needs the surface, so it cannot run where the suite's other
+## bookkeeping is checked, and for a while it was the only thing that read
+## the ledger: a source enrolled without regenerating the ledger failed it at
+## the NEXT, unrelated change. ``scripts/ct_test_surface_addressability.py
+## --check`` now runs in ``scripts/check_suite_case_counts.sh`` and refuses,
+## without the surface, a ledger that never measured a source the inventory
+## tracks or that was computed against another inventory. Count drift on a
+## source the ledger already measured is still this test's alone to find.
+##
 ## The negative control
 ## --------------------
 ## The claim this file makes must not be satisfiable by the Reprobuild-only
