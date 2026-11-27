@@ -29,7 +29,9 @@
 ## * D6, the check: a stored blob whose bytes were altered is refused (the
 ##   trace names the output and "digest mismatch"), removed, and the edge
 ##   executes and produces the right bytes; a record made under the
-##   `timestamp` policy stored no bytes and restores nothing.
+##   `timestamp` policy stored no bytes and restores nothing. The edge that
+##   re-ran reproduced the recorded bytes, so its dependent, un-resolved with
+##   it, is served at dispatch against them.
 ##
 ## No mocks: real builtin actions run by the engine, real files, the real
 ## portable memo plane and output store under a fresh action-cache root.
@@ -194,8 +196,16 @@ suite "a portable hit restores the outputs a checkout on this host stored":
     check failures.len == 1 and
       failures[0] == "project:out/libmathlib.a: digest mismatch"
     check second.resultOf(ArchiveId).launched
-    check second.resultOf(AppId).launched
+    # The archive's re-run reproduced the recorded library, so the app,
+    # un-resolved with it, is looked up again at dispatch against those bytes
+    # and served from its record (`latePortableLookup`).
+    check not second.resultOf(AppId).launched
+    # Resolved by the pre-pass, un-resolved with the archive, resolved
+    # again at dispatch.
+    check second.details(AppId, "portable-resolved").len == 2
+    check second.details(AppId, "portable-unresolved").len == 1
     check readFile(b / "out" / "libmathlib.a") == recorded
+    check readFile(b / "out" / "app") == readFile(a / "out" / "app")
     # The altered blob was removed, and B's own run stored the right bytes.
     check blobHolding(shared, "altered library bytes\n").len == 0
     check blobHolding(shared, recorded).len > 0

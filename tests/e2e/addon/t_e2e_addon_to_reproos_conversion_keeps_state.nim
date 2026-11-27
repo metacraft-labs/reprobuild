@@ -86,16 +86,16 @@
 ## - ``REPRO_A13_MUTATION=rev-inode-reuse`` (the restored validator directory
 ##   replaced in place by an empty one; ext4 usually hands it the freed
 ##   inode): the apply refuses with ``ECarriedStatePending``; red there;
-## - engine build ``restore-not-required-by-units``: at the boot after the
-##   restored validator directory is replaced and the archives damaged, the
-##   validator starts although the restore failed; red.
+## - engine build ``restore-not-required-by-units``: at the boot between
+##   ``install-unit`` and the first apply after it, the carried units start
+##   although the restore failed; red at the install-unit-alone step;
 ## - engine build ``restore-unordered`` with seams (no ordering on the
 ##   restore): the execution client, without default dependencies, starts
 ##   while the restore is held at its seam, not waiting on its start job;
 ##   red at the ordering step;
 ## - engine build ``restore-required-by-link`` (round 2's ``.requires/``
 ##   link): the disable and preset of the restore unit remove it, and the
-##   validator starts; red at the same step;
+##   carried units start; red at the install-unit-alone step too;
 ## - engine build ``carried-reach-by-unit-name``: the renamed unit that
 ##   reaches the carried directory only by its path is applied before the
 ##   restore; red at the path-reach step.
@@ -104,7 +104,12 @@
 ## restore. The restore unit is installed with ``repro system state
 ## install-unit``, which makes every carried unit require it; with the
 ## validator's directory replaced and the archives damaged, the next boot's
-## restore fails and the validator does not start.
+## restore fails and the validator does not start. An earlier boot, between
+## the ``install-unit`` that follows decision 195's retire and the apply
+## after it, is the only one at which install-unit's own drop-in is the
+## carried units' sole requirement on the restore (an apply adds the
+## generation's, with the same requirement); there the restore is made to
+## fail and the carried units must stay down (A13 review round 15).
 ##
 ## Opt-in: ``REPRO_ADDON_VM_GATES=1``, ``REPRO_ADDON_ENGINE_CLOSURE`` (the
 ## full engine built from this tree) and ``REPRO_A12_PACKAGES``. Bases:
@@ -919,6 +924,34 @@ proc mountKeep(g: Guest; format: bool) =
 proc monotonicOf(g: Guest; unit, prop: string): int64 =
   try: parseBiggestInt(g.run("systemctl show -P " & prop & " " & unit).strip())
   except ValueError: -1
+
+proc restoreSettleScript(units: openArray[string]): string =
+  ## The guest script the boot-path steps run after a reboot. The restore
+  ## unit is started more than once at boot (a carried unit's start queues
+  ## it again after the first failure), so a single read can race a later
+  ## run (A13 review round 12: conv-debian-12 at 6b8fa94fc6 read it
+  ## `activating`). It waits until the restore has left `activating` for
+  ## 15 s in a row, up to 120 s (``TIMEOUT``: the caller fails the step),
+  ## and at every poll prints ``ACTIVE <unit> <uptime>`` for any of
+  ## ``units`` that is active, so one that starts between the restore's
+  ## runs is caught.
+  "calm=0; i=0\nwhile [ $i -lt 240 ]; do\n" &
+    "  for u in " & units.join(" ") & "; do\n" &
+    "    systemctl is-active --quiet $u && echo \"ACTIVE $u $(cut -d' ' -f1 /proc/uptime)\"\n" &
+    "  done\n" &
+    "  s=$(systemctl show -p ActiveState --value " & RestoreUnit & ")\n" &
+    "  if [ \"$s\" = activating ]; then calm=0; else calm=$((calm+1)); fi\n" &
+    "  [ $calm -ge 30 ] && { echo \"SETTLED $s\"; exit 0; }\n" &
+    "  i=$((i+1)); sleep 0.5\ndone\necho TIMEOUT\n"
+
+proc startedThisBoot(g: Guest; units: openArray[string]): seq[string] =
+  ## Each of ``units`` that is active now or has a ``Started`` line in this
+  ## boot's journal, with its state and that count.
+  for u in units:
+    let st = g.exec("systemctl is-active " & u).stdout.strip()
+    let n = g.exec("journalctl -b -u " & u &
+      " --no-pager | grep -c 'Started' || true").stdout.strip()
+    if st == "active" or n != "0": result.add(u & " " & st & ", starts " & n)
 
 proc runBase(b: BaseImage; record: JsonNode): seq[string] =
   var old, nw: Guest
@@ -2501,6 +2534,82 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
         "/system_next.nim --host " & AgentTarget & " --no-preview",
         timeoutSec = 3600)
       let reinst = nw.exec(eng & " system state install-unit --from " & CarriedDir)
+      # --- 5c. install-unit alone (A13 review round 15). Between
+      # `install-unit` and the first apply after it, the carried units are
+      # required by install-unit's own drop-in (80-repro-state-restore.conf)
+      # and by nothing else: the retire above removed every generation
+      # requirement (50-repro-state-restore.conf), and the apply before
+      # install-unit (back1) wrote none, as no carried state was installed
+      # then. A reboot in this window -- a converted host's first boot is
+      # one -- must keep them down when the restore fails. The gate's other
+      # boot-path step runs after an apply, whose 50- drop-in carries the
+      # same requirement: it masked the engine builds
+      # restore-not-required-by-units and restore-required-by-link, which
+      # were green there at 1fde6d601e. Red under both here.
+      # The restore is made to fail by a drop-in on it (ExecStartPre= that
+      # exits 1; removed after the boot): this step is about what the
+      # requirement does with a failed restore, not about why it failed,
+      # and the carried directories are left as they are, so the restore
+      # that runs at the next apply has nothing to do and succeeds. As at
+      # the later boot-path step, the restore unit is disabled and preset
+      # first, which removes every link to it (round 2's `.requires/` link
+      # among them).
+      var carriedUnits: seq[string]
+      for e in manifest["entries"]:
+        if e["disposition"].getStr() == "carry":
+          for u in e["units"]:
+            if u.getStr() notin carriedUnits: carriedUnits.add(u.getStr())
+      const FailDir = "/etc/systemd/system/" & RestoreUnit & ".d"
+      const FailDropIn = FailDir & "/96-a13-restore-fails.conf"
+      discard nw.run("mkdir -p " & FailDir & " && printf '[Service]\\n" &
+        "ExecStartPre=/bin/false\\n' > " & FailDropIn & " && systemctl " &
+        "disable " & RestoreUnit & "; systemctl preset " & RestoreUnit &
+        " || true; systemctl daemon-reload")
+      # What requires the restore at this point: no generation drop-in
+      # anywhere, and in the carried units' own drop-in directories only
+      # install-unit's 80- (none at all under restore-not-required-by-units).
+      let gen50 = nw.exec("ls /etc/systemd/system/*.d/50-repro-state-restore.conf " &
+        "2>/dev/null || true").stdout.strip()
+      var unitReqs: seq[string]
+      for u in carriedUnits:
+        for l in nw.exec("grep -l -F " & RestoreUnit & " /etc/systemd/system/" &
+            u & ".d/*.conf 2>/dev/null || true").stdout.splitLines():
+          if l.strip().len > 0: unitReqs.add(l.strip())
+      var only80 = gen50.len == 0
+      for f in unitReqs:
+        if not f.endsWith("/80-repro-state-restore.conf"): only80 = false
+      let links = nw.exec("find /etc/systemd/system -name " & RestoreUnit &
+        " -path '*.requires/*' 2>/dev/null || true").stdout.strip()
+      writeFile(work / "a13-restore-settle-5c.sh",
+        restoreSettleScript(carriedUnits))
+      nw.rebootGuest()
+      nw.copyTo(work / "a13-restore-settle-5c.sh", "/run/a13-restore-settle-5c.sh")
+      let settleA = nw.exec("bash /run/a13-restore-settle-5c.sh",
+        timeoutSec = 200).stdout
+      let settledA = "SETTLED " in settleA and "TIMEOUT" notin settleA
+      var activeA: seq[string]
+      for l in settleA.splitLines():
+        if l.startsWith("ACTIVE "): activeA.add(l)
+      let rresA = nw.run("systemctl show -p Result -p ActiveState " & RestoreUnit)
+      let badA = nw.startedThisBoot(carriedUnits)
+      let journalA = nw.serviceJournal(@[RestoreUnit] & carriedUnits)
+      discard nw.run("rm -f " & FailDropIn & "; rmdir " & FailDir &
+        " 2>/dev/null; systemctl daemon-reload; systemctl reset-failed " &
+        RestoreUnit & " " & carriedUnits.join(" ") & " || true")
+      record["installUnitAlone"] = %*{"carriedUnits": carriedUnits,
+        "generationDropIns": gen50, "unitRequirements": unitReqs,
+        "requiresLinks": links, "only80": only80, "settled": settledA,
+        "activeDuring": activeA, "final": rresA, "started": badA}
+      step("install-unit alone: with only install-unit's drop-in requiring " &
+           "the restore (no generation drop-in), the carried units stay " &
+           "down at a boot whose restore fails",
+           only80 and settledA and activeA.len == 0 and
+             "Result=success" notin rresA and badA.len == 0,
+           "generation drop-ins: " & gen50 & "\nrequirements on " &
+           carriedUnits.join(", ") & ":\n" & unitReqs.join("\n") &
+           "\n.requires/ links after the disable: " & links &
+           "\nsettle: " & settleA & "\n" & rresA & "\nstarted: " &
+           badA.join("; ") & "\n" & journalA)
       let back2 = nw.exec(env & eng & " infra apply --profile " & RefDir &
         "/system_next.nim --host " & AgentTarget & " --no-preview",
         timeoutSec = 3600)
@@ -2552,23 +2661,9 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     record["bootPathSetup"] = %(nw.exec("systemctl is-enabled " & RestoreUnit &
       " || true").stdout & "damaged " & validatorArchive)
     nw.rebootGuest()
-    # The restore unit is started more than once at boot (a carried unit's
-    # start queues it again after the first failure), so a single read can
-    # race a later run (A13 review round 12: conv-debian-12 at 6b8fa94fc6
-    # read it `activating`). Wait on the guest until it has left
-    # `activating` for 15 s in a row, up to 120 s -- a timeout fails the
-    # step -- and, at every poll of the wait, record any carried unit that
-    # is active, so one that starts between the restore's runs is caught.
+    # Wait for the restore to settle (``restoreSettleScript``).
     let settleUnits = [DefaultValidatorUnit, Exe, ShadowUnit, R5DistUnit]
-    writeFile(work / "a13-restore-settle.sh",
-      "calm=0; i=0\nwhile [ $i -lt 240 ]; do\n" &
-      "  for u in " & settleUnits.join(" ") & "; do\n" &
-      "    systemctl is-active --quiet $u && echo \"ACTIVE $u $(cut -d' ' -f1 /proc/uptime)\"\n" &
-      "  done\n" &
-      "  s=$(systemctl show -p ActiveState --value " & RestoreUnit & ")\n" &
-      "  if [ \"$s\" = activating ]; then calm=0; else calm=$((calm+1)); fi\n" &
-      "  [ $calm -ge 30 ] && { echo \"SETTLED $s\"; exit 0; }\n" &
-      "  i=$((i+1)); sleep 0.5\ndone\necho TIMEOUT\n")
+    writeFile(work / "a13-restore-settle.sh", restoreSettleScript(settleUnits))
     nw.copyTo(work / "a13-restore-settle.sh", "/run/a13-restore-settle.sh")
     let settle = nw.exec("bash /run/a13-restore-settle.sh", timeoutSec = 200).stdout
     let settled = "SETTLED " in settle and "TIMEOUT" notin settle
@@ -2576,12 +2671,7 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     for l in settle.splitLines():
       if l.startsWith("ACTIVE "): activeDuring.add(l)
     let rres = nw.run("systemctl show -p Result -p ActiveState " & RestoreUnit)
-    var bad: seq[string]
-    for u in [DefaultValidatorUnit, Exe, ShadowUnit, R5DistUnit]:
-      let st = nw.exec("systemctl is-active " & u).stdout.strip()
-      let n = nw.exec("journalctl -b -u " & u &
-        " --no-pager | grep -c 'Started' || true").stdout.strip()
-      if st == "active" or n != "0": bad.add(u & " " & st & ", starts " & n)
+    let bad = nw.startedThisBoot(settleUnits)
     record["bootPathSettle"] = %*{"settled": settled,
       "activeDuring": activeDuring, "final": rres}
     step("a carried unit does not start at boot while its restore fails",

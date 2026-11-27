@@ -718,7 +718,7 @@ proc fetchLocked*(rows: seq[NimbleLockRow]; cfg: FetchConfig): FetchResult =
         result.status = asFailed
         result.exitCode = 1
         result.stderr = action.id & ": " & e.msg
-  registerSourceFetchExecutor(executor)
+  registerSourceFetchExecutor("nimble.", executor)
   var failures: seq[string]
   try:
     var ecfg = defaultBuildEngineConfig(stateDir / "engine-cache")
@@ -730,7 +730,7 @@ proc fetchLocked*(rows: seq[NimbleLockRow]; cfg: FetchConfig): FetchResult =
       if res.status == asFailed:
         failures.add res.stderr
   finally:
-    clearSourceFetchExecutor()
+    clearSourceFetchExecutor("nimble.")
     if prefetchDir.len > 0:
       # Plain files the workers wrote, in a directory private to this run.
       removeDir(prefetchDir)

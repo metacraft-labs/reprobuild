@@ -6107,8 +6107,352 @@ proc keyedOnCreatedActionPolicy*(fingerprint: ContentDigest; kind: string;
     framed.add($depfile.len & "\x1f" & depfile & "\x1e")
   blake3DomainDigest(framed.textBytes(), hdActionFingerprint)
 
+type
+  CreatedActionSpec* = object
+    ## Every field of a ``create-action`` record, as the engine reads it.
+    ##
+    ## A created action is built from one of these by `createdAction`, and
+    ## the record a producer writes is `createActionRecord` of one, so the
+    ## record's text and the action it stands for cannot disagree: an
+    ## emitter that builds its actions with `createdAction` (the cargo plan's
+    ## unit edges do) gets exactly the key the engine computes for the
+    ## record it writes (`t_create_action_record_round_trips`).
+    id*: string
+    argv*: seq[string]
+    cwd*: string
+    inputs*, outputs*, optionalOutputs*, deps*: seq[string]
+    env*: seq[string]
+      ## `NAME=value` per entry, as a declared edge's `env`.
+    envPassthrough*: seq[string]
+      ## Names whose value is the host's (a declared edge's `envPassthrough`).
+    isolateHostEnvironment*: bool
+      ## Launch from the declared environment alone (`BuildAction.
+      ## isolateHostEnvironment`): nothing of the engine's own environment
+      ## reaches the action except `env` and `envPassthrough`. Keyed.
+    scratchDirs*: seq[string]
+      ## Emptied before every run and never evidence (`BuildAction.
+      ## scratchDirs`); the engine refuses one that is or holds the cwd, an
+      ## input or an output.
+    targetNames*: seq[string]
+      ## Named targets the action belongs to. Each must be a target the
+      ## PRODUCER (the action whose `dynamicDepsFile` the record is in)
+      ## belongs to: a fragment adds members to the targets the build
+      ## selected, never a target of its own (`createdActionTargetRefusal`).
+      ## Not keyed, as for a lowered edge.
+    pool*: string
+    poolUnits*: uint32
+    cpuMilli*, cpuMinMilli*, cpuPreferredMilli*: uint32
+    widthFlag*: string
+    commandStatsId*: string
+    cacheable*: bool
+    actionCachePolicy*: FileFingerprintPolicy
+    policyKind*: string
+      ## `CreatedActionAutomaticMonitor` or `CreatedActionMakeDepfile`; ""
+      ## only for a record that is not cacheable and names no policy (the
+      ## engine then monitors it).
+    policyDepfiles*: seq[string]
+
+proc initCreatedActionSpec*(id: string; argv: openArray[string]): CreatedActionSpec =
+  ## A spec with the defaults a record that names nothing else gets.
+  CreatedActionSpec(id: id, argv: @argv, poolUnits: 1'u32, cpuMilli: 1000'u32,
+    actionCachePolicy: ffpTimestamp)
+
+proc createdActionPolicyName(policy: FileFingerprintPolicy): string =
+  case policy
+  of ffpTimestamp: CreatedActionTimestampCheck
+  of ffpHybrid: CreatedActionHybridCheck
+  of ffpChecksum: CreatedActionChecksumCheck
+
+proc createdActionSpecProblem*(spec: CreatedActionSpec): string =
+  ## Why ``spec`` is not a valid created action, or "". The checks a record
+  ## is refused for, made on the spec so an emitter and the parser apply
+  ## the same ones.
+  if spec.id.len == 0:
+    return "'id' must be non-empty"
+  for name in spec.envPassthrough:
+    if name.len == 0 or '=' in name:
+      return "field 'envPassthrough' holds variable names, not '" & name & "'"
+  for entry in spec.env:
+    if entry.find('=') <= 0:
+      return "field 'env' holds NAME=value entries, not '" & entry & "'"
+  for dir in spec.scratchDirs:
+    if dir.len == 0:
+      return "field 'scratchDirs' must contain only non-empty paths"
+  for name in spec.targetNames:
+    if name.len == 0:
+      return "field 'targetNames' must contain only non-empty names"
+  case spec.policyKind
+  of CreatedActionAutomaticMonitor:
+    if spec.policyDepfiles.len > 0:
+      return "dependency policy '" & CreatedActionAutomaticMonitor &
+        "' takes no 'depfiles'; use '" & CreatedActionMakeDepfile & "'"
+  of CreatedActionMakeDepfile:
+    if spec.policyDepfiles.len == 0:
+      return "dependency policy '" & CreatedActionMakeDepfile &
+        "' needs at least one path in 'depfiles'"
+    for d in spec.policyDepfiles:
+      if d.len == 0:
+        return "'dependencyPolicy.depfiles' must contain only non-empty " &
+          "strings"
+  of "":
+    if spec.policyDepfiles.len > 0:
+      return "'dependencyPolicy.depfiles' needs a policy 'kind'"
+    if spec.cacheable:
+      return "'" & spec.id & "' is cacheable but declares no " &
+        "'dependencyPolicy'. A cached action is keyed on what it read, and " &
+        "the policy says how that is learnt: add \"dependencyPolicy\": " &
+        "{\"kind\": \"" & CreatedActionAutomaticMonitor & "\"} (or a '" &
+        CreatedActionMakeDepfile & "' policy with its 'depfiles'), or drop " &
+        "'cacheable'"
+  else:
+    return "unknown dependency policy kind '" & spec.policyKind &
+      "'; expected '" & CreatedActionAutomaticMonitor & "' or '" &
+      CreatedActionMakeDepfile & "'"
+  ""
+
+proc createdAction*(spec: CreatedActionSpec;
+                    governingLockIdentity: LockIdentity): BuildAction =
+  ## THE constructor of a dynamically created action, used by the
+  ## ``create-action`` parser and by every emitter that wants the key the
+  ## engine will give its record. Raises `ValueError` for a spec
+  ## `createdActionSpecProblem` refuses.
+  ##
+  ## `governingLockIdentity` is the identity of the producer (Named-Lock-Files
+  ## §4.1: an edge is built under the lock of the consumer that pulled it in);
+  ## an emitter that computes keys ahead of the engine passes the identity
+  ## its producer will have.
+  ##
+  ## The record's id names the action, not the command: two records with one
+  ## id and different command lines must not share a cache record, nor two
+  ## records that gather their dependencies differently, so the key mixes in
+  ## the argv, the cwd and the dependency policy (`keyedOnCreatedActionPolicy`)
+  ## before `action` adds the environment, the isolation, the tool root and
+  ## the lock.
+  let problem = createdActionSpecProblem(spec)
+  if problem.len > 0:
+    raise newException(ValueError, "create-action " & problem)
+  let policyKind =
+    if spec.policyKind.len > 0: spec.policyKind
+    else: CreatedActionAutomaticMonitor
+  let dependencyPolicy =
+    if spec.policyKind == CreatedActionMakeDepfile:
+      some(makeDepfileGatheringPolicy(spec.policyDepfiles))
+    elif spec.policyKind == CreatedActionAutomaticMonitor:
+      some(automaticMonitorGatheringPolicy())
+    else:
+      none(DependencyGatheringPolicy)
+  let weakFingerprint = keyedOnCreatedActionPolicy(
+    keyedOnArgv(weakFingerprintFromText(spec.id), spec.argv, spec.cwd),
+    policyKind, spec.policyDepfiles)
+  result = action(spec.id, spec.argv, cwd = spec.cwd, deps = spec.deps,
+    inputs = spec.inputs, outputs = spec.outputs,
+    optionalOutputs = spec.optionalOutputs,
+    pool = spec.pool, poolUnits = spec.poolUnits, cpuMilli = spec.cpuMilli,
+    cpuMinMilli = spec.cpuMinMilli, cpuPreferredMilli = spec.cpuPreferredMilli,
+    widthFlag = spec.widthFlag,
+    commandStatsId = spec.commandStatsId, cacheable = spec.cacheable,
+    weakFingerprint = weakFingerprint, env = spec.env,
+    envPassthrough = spec.envPassthrough,
+    isolateHostEnvironment = spec.isolateHostEnvironment,
+    actionCachePolicy = spec.actionCachePolicy,
+    dependencyPolicy = dependencyPolicy,
+    governingLockIdentity = governingLockIdentity)
+  result.scratchDirs = spec.scratchDirs
+  result.targetNames = spec.targetNames
+
+proc createActionRecord*(spec: CreatedActionSpec): string =
+  ## The single-line JSON payload of the ``create-action`` record of
+  ## ``spec`` (without the ``create-action\t`` prefix). Fields at their
+  ## defaults are left out. Raises `ValueError` for a spec
+  ## `createdActionSpecProblem` refuses, so an emitter never writes a record
+  ## the engine would refuse.
+  let problem = createdActionSpecProblem(spec)
+  if problem.len > 0:
+    raise newException(ValueError, "create-action " & problem)
+  var node = newJObject()
+  node["id"] = %spec.id
+  node["argv"] = %spec.argv
+  if spec.cwd.len > 0: node["cwd"] = %spec.cwd
+  template seqField(name: string; value: seq[string]) =
+    if value.len > 0: node[name] = %value
+  seqField("inputs", spec.inputs)
+  seqField("outputs", spec.outputs)
+  seqField("optionalOutputs", spec.optionalOutputs)
+  seqField("deps", spec.deps)
+  seqField("env", spec.env)
+  seqField("envPassthrough", spec.envPassthrough)
+  seqField("scratchDirs", spec.scratchDirs)
+  seqField("targetNames", spec.targetNames)
+  if spec.isolateHostEnvironment: node["isolateHostEnvironment"] = %true
+  if spec.pool.len > 0: node["pool"] = %spec.pool
+  if spec.poolUnits != 1'u32: node["poolUnits"] = %spec.poolUnits
+  if spec.cpuMilli != 1000'u32: node["cpuMilli"] = %spec.cpuMilli
+  if spec.cpuMinMilli != 0'u32: node["cpuMinMilli"] = %spec.cpuMinMilli
+  if spec.cpuPreferredMilli != 0'u32:
+    node["cpuPreferredMilli"] = %spec.cpuPreferredMilli
+  if spec.widthFlag.len > 0: node["widthFlag"] = %spec.widthFlag
+  if spec.commandStatsId.len > 0:
+    node["commandStatsId"] = %spec.commandStatsId
+  if spec.cacheable: node["cacheable"] = %true
+  if spec.actionCachePolicy != ffpTimestamp:
+    node["actionCachePolicy"] = %createdActionPolicyName(spec.actionCachePolicy)
+  if spec.policyKind.len > 0:
+    var policy = newJObject()
+    policy["kind"] = %spec.policyKind
+    if spec.policyDepfiles.len > 0: policy["depfiles"] = %spec.policyDepfiles
+    node["dependencyPolicy"] = policy
+  $node
+
+const CreatedActionFields = ["id", "argv", "cwd", "inputs", "outputs",
+  "optionalOutputs", "deps", "env", "envPassthrough", "scratchDirs",
+  "targetNames", "isolateHostEnvironment", "pool", "poolUnits", "cpuMilli",
+  "cpuMinMilli", "cpuPreferredMilli", "widthFlag", "commandStatsId",
+  "cacheable", "actionCachePolicy", "dependencyPolicy"]
+  ## Every member a record may have. Any other is refused, not ignored: a
+  ## misspelt `isolateHostEnvironment` would otherwise launch the action
+  ## with the engine's whole environment and key it as if it had not.
+
+proc parseCreatedActionSpec*(payload: string): CreatedActionSpec =
+  ## The spec of a ``create-action`` JSON payload. Raises `ValueError`
+  ## naming the problem for a payload that is not a valid record.
+  proc fail(message: string) {.noreturn.} =
+    raise newException(ValueError, message)
+  var node: JsonNode
+  try:
+    node = parseJson(payload)
+  except JsonParsingError as err:
+    fail("malformed JSON payload: " & err.msg)
+  if node.kind != JObject:
+    fail("payload must be a JSON object")
+  for key in node.keys:
+    if key notin CreatedActionFields:
+      fail("has unknown member '" & key & "'")
+
+  proc stringField(name: string; required = false): string =
+    if not node.hasKey(name):
+      if required:
+        fail("missing string field '" & name & "'")
+      return ""
+    if node[name].kind != JString:
+      fail("field '" & name & "' must be a string")
+    node[name].getStr()
+
+  proc stringSeqField(name: string): seq[string] =
+    if not node.hasKey(name):
+      return @[]
+    if node[name].kind != JArray:
+      fail("field '" & name & "' must be an array of strings")
+    for item in node[name]:
+      if item.kind != JString:
+        fail("field '" & name & "' must contain only strings")
+      result.add(item.getStr())
+
+  proc boolField(name: string): bool =
+    if not node.hasKey(name):
+      return false
+    if node[name].kind != JBool:
+      fail("field '" & name & "' must be a boolean")
+    node[name].getBool()
+
+  proc uintField(name: string; default: uint32): uint32 =
+    if not node.hasKey(name):
+      return default
+    if node[name].kind != JInt:
+      fail("field '" & name & "' must be an integer")
+    let value = node[name].getBiggestInt()
+    # Refused, not converted: `uint32` of a negative or oversized value
+    # raises a defect instead of a graph error the user can read.
+    if value < 0 or value > BiggestInt(high(uint32)):
+      fail("field '" & name & "' must be between 0 and " & $high(uint32))
+    uint32(value)
+
+  result = initCreatedActionSpec(stringField("id", required = true),
+    stringSeqField("argv"))
+  result.cwd = stringField("cwd")
+  result.inputs = stringSeqField("inputs")
+  result.outputs = stringSeqField("outputs")
+  result.optionalOutputs = stringSeqField("optionalOutputs")
+  result.deps = stringSeqField("deps")
+  result.env = stringSeqField("env")
+  result.envPassthrough = stringSeqField("envPassthrough")
+  result.scratchDirs = stringSeqField("scratchDirs")
+  result.targetNames = stringSeqField("targetNames")
+  result.isolateHostEnvironment = boolField("isolateHostEnvironment")
+  result.pool = stringField("pool")
+  result.poolUnits = uintField("poolUnits", 1'u32)
+  result.cpuMilli = uintField("cpuMilli", 1000'u32)
+  result.cpuMinMilli = uintField("cpuMinMilli", 0'u32)
+  result.cpuPreferredMilli = uintField("cpuPreferredMilli", 0'u32)
+  result.widthFlag = stringField("widthFlag")
+  result.commandStatsId = stringField("commandStatsId")
+  result.cacheable = boolField("cacheable")
+  # The input-check policy, as a declared edge's `actionCachePolicy`:
+  # `timestamp` (the default) trusts an input whose metadata is unchanged
+  # and misses when it moved; `hybrid` re-hashes an input whose metadata
+  # moved and is a hit when its content did not (a per-test binary rebuilt
+  # byte-identical); `checksum` always hashes. As for a declared edge, the
+  # policy is not mixed into the key: a lookup is served only records made
+  # under the same policy (`repro_local_store`).
+  let cachePolicyName = stringField("actionCachePolicy")
+  result.actionCachePolicy =
+    case cachePolicyName
+    of "", CreatedActionTimestampCheck: ffpTimestamp
+    of CreatedActionHybridCheck: ffpHybrid
+    of CreatedActionChecksumCheck: ffpChecksum
+    else:
+      fail("unknown 'actionCachePolicy' '" & cachePolicyName &
+        "'; expected '" & CreatedActionTimestampCheck & "', '" &
+        CreatedActionHybridCheck & "' or '" & CreatedActionChecksumCheck & "'")
+  # The dependency policy, in the vocabulary of the DSL's static edges:
+  #   {"kind": "automaticMonitor"}
+  #   {"kind": "makeDepfile", "depfiles": ["<path>", ...]}
+  # A cached action is keyed on what it read, and only the policy says how
+  # the engine learns that. A cacheable record without one would be keyed on
+  # its declared inputs alone, the declared-only shape
+  # `repro_core/dependency_gathering.nim` forbids, so `createdActionSpecProblem`
+  # refuses it. A record that is not cacheable keeps the engine's default
+  # (the monitor).
+  if node.hasKey("dependencyPolicy"):
+    let policyNode = node["dependencyPolicy"]
+    if policyNode.kind != JObject:
+      fail("field 'dependencyPolicy' must be an object with a 'kind'")
+    for key in policyNode.keys:
+      if key notin ["kind", "depfiles"]:
+        # Refused rather than ignored: a misspelt field would otherwise
+        # quietly drop the evidence the author meant to declare.
+        fail("field 'dependencyPolicy' has unknown member '" & key & "'")
+    if not policyNode.hasKey("kind") or policyNode["kind"].kind != JString:
+      fail("field 'dependencyPolicy' must name its 'kind' as a string")
+    result.policyKind = policyNode["kind"].getStr()
+    if result.policyKind.len == 0:
+      fail("field 'dependencyPolicy' must name a non-empty 'kind'")
+    if policyNode.hasKey("depfiles"):
+      if policyNode["depfiles"].kind != JArray:
+        fail("'dependencyPolicy.depfiles' must be an array of strings")
+      for item in policyNode["depfiles"]:
+        if item.kind != JString:
+          fail("'dependencyPolicy.depfiles' must contain only non-empty " &
+            "strings")
+        result.policyDepfiles.add(item.getStr())
+  let problem = createdActionSpecProblem(result)
+  if problem.len > 0:
+    fail(problem)
+
+proc createdActionTargetRefusal*(spec: CreatedActionSpec;
+                                 producerTargets: openArray[string]): string =
+  ## Why ``spec`` may not name the targets it names, or "": every name must
+  ## be a target its producer belongs to.
+  for name in spec.targetNames:
+    if name notin producerTargets:
+      return "names the target '" & name & "', which its producer is not " &
+        "a member of" & (if producerTargets.len == 0: " (it is in none)"
+        else: " (it is in " & @producerTargets.join(", ") & ")") &
+        "; a fragment may add actions only to targets the build selected"
+  ""
+
 proc parseCreateActionRecord(payload, path: string; lineNo: int;
-                             governingLockIdentity: LockIdentity): BuildAction =
+                             governingLockIdentity: LockIdentity;
+                             producerTargets: openArray[string]): BuildAction =
   ## Decode an M25 ``create-action`` JSON payload into a BuildAction. The
   ## payload format is a single-line JSON object; embedded newlines are
   ## forbidden so the surrounding line-oriented fragment parser stays
@@ -6134,173 +6478,27 @@ proc parseCreateActionRecord(payload, path: string; lineNo: int;
   ## simply omit it and the engine would have to invent something. That is the
   ## silent-incompleteness shape the structural check exists to remove. The
   ## producer does not get to decide; the engine supplies it.
+  ##
+  ## `producerTargets` are the producer's target names; a record may name
+  ## only those (`createdActionTargetRefusal`).
   proc fail(message: string) {.noreturn.} =
     raiseEngine(path & ":" & $lineNo & ": create-action " & message)
-
-  var node: JsonNode
+  var spec: CreatedActionSpec
   try:
-    node = parseJson(payload)
-  except JsonParsingError as err:
-    fail("malformed JSON payload: " & err.msg)
-  if node.kind != JObject:
-    fail("payload must be a JSON object")
-
-  proc stringField(name: string; required = true; default = ""): string =
-    if not node.hasKey(name):
-      if required:
-        fail("missing string field '" & name & "'")
-      return default
-    if node[name].kind != JString:
-      fail("field '" & name & "' must be a string")
-    node[name].getStr()
-
-  proc stringSeqField(name: string): seq[string] =
-    if not node.hasKey(name):
-      return @[]
-    if node[name].kind != JArray:
-      fail("field '" & name & "' must be an array of strings")
-    for item in node[name]:
-      if item.kind != JString:
-        fail("field '" & name & "' must contain only strings")
-      result.add(item.getStr())
-
-  proc boolField(name: string; default = false): bool =
-    if not node.hasKey(name):
-      return default
-    if node[name].kind != JBool:
-      fail("field '" & name & "' must be a boolean")
-    node[name].getBool()
-
-  proc uintField(name: string; default: uint32): uint32 =
-    if not node.hasKey(name):
-      return default
-    if node[name].kind != JInt:
-      fail("field '" & name & "' must be an integer")
-    let value = node[name].getBiggestInt()
-    # Refused, not converted: `uint32` of a negative or oversized value
-    # raises a defect instead of a graph error the user can read.
-    if value < 0 or value > BiggestInt(high(uint32)):
-      fail("field '" & name & "' must be between 0 and " & $high(uint32))
-    uint32(value)
-
-  let id = stringField("id")
-  if id.len == 0:
-    fail("'id' must be non-empty")
-  let argv = stringSeqField("argv")
-  let cwd = stringField("cwd", required = false)
-  let inputs = stringSeqField("inputs")
-  let outputs = stringSeqField("outputs")
-  let deps = stringSeqField("deps")
-  let env = stringSeqField("env")
-  # Names whose value is the host's, as a declared edge's `envPassthrough`
-  # (a nim compile's temp-directory names, for one): the names are keyed by
-  # `action()`, the values are not.
-  let envPassthrough = stringSeqField("envPassthrough")
-  for name in envPassthrough:
-    if name.len == 0 or '=' in name:
-      fail("field 'envPassthrough' holds variable names, not '" & name & "'")
-  let pool = stringField("pool", required = false)
-  let poolUnits = uintField("poolUnits", 1'u32)
-  let cpuMilli = uintField("cpuMilli", 1000'u32)
-  let cpuMinMilli = uintField("cpuMinMilli", 0'u32)
-  let cpuPreferredMilli = uintField("cpuPreferredMilli", 0'u32)
-  let widthFlag = stringField("widthFlag", required = false)
-  let commandStatsId = stringField("commandStatsId", required = false)
-  let cacheable = boolField("cacheable", default = false)
-  # The input-check policy, as a declared edge's `actionCachePolicy`:
-  # `timestamp` (the default) trusts an input whose metadata is unchanged
-  # and misses when it moved; `hybrid` re-hashes an input whose metadata
-  # moved and is a hit when its content did not (a per-test binary rebuilt
-  # byte-identical); `checksum` always hashes. As for a declared edge, the
-  # policy is not mixed into the key: a lookup is served only records made
-  # under the same policy (`repro_local_store`).
-  let cachePolicyName = stringField("actionCachePolicy", required = false)
-  let actionCachePolicy =
-    case cachePolicyName
-    of "", CreatedActionTimestampCheck: ffpTimestamp
-    of CreatedActionHybridCheck: ffpHybrid
-    of CreatedActionChecksumCheck: ffpChecksum
-    else:
-      fail("unknown 'actionCachePolicy' '" & cachePolicyName &
-        "'; expected '" & CreatedActionTimestampCheck & "', '" &
-        CreatedActionHybridCheck & "' or '" & CreatedActionChecksumCheck & "'")
-
-  # The dependency policy, in the vocabulary of the DSL's static edges:
-  #   {"kind": "automaticMonitor"}
-  #   {"kind": "makeDepfile", "depfiles": ["<path>", ...]}
-  # A cached action is keyed on what it read, and only the policy says how
-  # the engine learns that. A cacheable record without one would be keyed on
-  # its declared inputs alone, the declared-only shape
-  # `repro_core/dependency_gathering.nim` forbids, so it is refused. A
-  # record that is not cacheable keeps the engine's default (the monitor).
-  var policyKind = ""
-  var policyDepfiles: seq[string] = @[]
-  var dependencyPolicy = none(DependencyGatheringPolicy)
-  if node.hasKey("dependencyPolicy"):
-    let policyNode = node["dependencyPolicy"]
-    if policyNode.kind != JObject:
-      fail("field 'dependencyPolicy' must be an object with a 'kind'")
-    for key in policyNode.keys:
-      if key notin ["kind", "depfiles"]:
-        # Refused rather than ignored: a misspelt field would otherwise
-        # quietly drop the evidence the author meant to declare.
-        fail("field 'dependencyPolicy' has unknown member '" & key & "'")
-    if not policyNode.hasKey("kind") or policyNode["kind"].kind != JString:
-      fail("field 'dependencyPolicy' must name its 'kind' as a string")
-    policyKind = policyNode["kind"].getStr()
-    if policyNode.hasKey("depfiles"):
-      if policyNode["depfiles"].kind != JArray:
-        fail("'dependencyPolicy.depfiles' must be an array of strings")
-      for item in policyNode["depfiles"]:
-        if item.kind != JString or item.getStr().len == 0:
-          fail("'dependencyPolicy.depfiles' must contain only non-empty " &
-            "strings")
-        policyDepfiles.add(item.getStr())
-    case policyKind
-    of CreatedActionAutomaticMonitor:
-      if policyDepfiles.len > 0:
-        fail("dependency policy '" & CreatedActionAutomaticMonitor &
-          "' takes no 'depfiles'; use '" & CreatedActionMakeDepfile & "'")
-      dependencyPolicy = some(automaticMonitorGatheringPolicy())
-    of CreatedActionMakeDepfile:
-      if policyDepfiles.len == 0:
-        fail("dependency policy '" & CreatedActionMakeDepfile &
-          "' needs at least one path in 'depfiles'")
-      dependencyPolicy = some(makeDepfileGatheringPolicy(policyDepfiles))
-    else:
-      fail("unknown dependency policy kind '" & policyKind & "'; expected '" &
-        CreatedActionAutomaticMonitor & "' or '" & CreatedActionMakeDepfile &
-        "'")
-  elif cacheable:
-    fail("'" & id & "' is cacheable but declares no 'dependencyPolicy'. " &
-      "A cached action is keyed on what it read, and the policy says how " &
-      "that is learnt: add \"dependencyPolicy\": {\"kind\": \"" &
-      CreatedActionAutomaticMonitor & "\"} (or a '" &
-      CreatedActionMakeDepfile & "' policy with its 'depfiles'), or drop " &
-      "'cacheable'")
-  else:
-    policyKind = CreatedActionAutomaticMonitor
-
-  # The record's id names the action, not the command: two records with one
-  # id and different command lines must not share a cache record, nor two
-  # records that gather their dependencies differently.
-  let weakFingerprint = keyedOnCreatedActionPolicy(
-    keyedOnArgv(weakFingerprintFromText(id), argv, cwd),
-    policyKind, policyDepfiles)
-  result = action(id, argv, cwd = cwd, deps = deps, inputs = inputs,
-    outputs = outputs, optionalOutputs = stringSeqField("optionalOutputs"),
-    pool = pool, poolUnits = poolUnits, cpuMilli = cpuMilli,
-    cpuMinMilli = cpuMinMilli, cpuPreferredMilli = cpuPreferredMilli,
-    widthFlag = widthFlag,
-    commandStatsId = commandStatsId, cacheable = cacheable,
-    weakFingerprint = weakFingerprint, env = env,
-    envPassthrough = envPassthrough,
-    actionCachePolicy = actionCachePolicy,
-    dependencyPolicy = dependencyPolicy,
-    governingLockIdentity = governingLockIdentity)
+    spec = parseCreatedActionSpec(payload)
+  except ValueError as err:
+    fail(err.msg)
+  let refusal = createdActionTargetRefusal(spec, producerTargets)
+  if refusal.len > 0:
+    fail("'" & spec.id & "' " & refusal)
+  try:
+    createdAction(spec, governingLockIdentity)
+  except ValueError as err:
+    fail(err.msg)
 
 proc readDynamicGraphFragment(path: string;
-                              governingLockIdentity: LockIdentity):
+                              governingLockIdentity: LockIdentity;
+                              producerTargets: openArray[string] = []):
     DynamicGraphFragment =
   if path.len == 0 or not fileExists(extendedPath(path)):
     raiseEngine("dynamic dependency fragment missing: " & path)
@@ -6344,7 +6542,7 @@ proc readDynamicGraphFragment(path: string;
       # of cross-action invariants (unique id, no cycle, dep targets
       # exist) happens at ingest time in applyDynamicDeps.
       result.createdActions.add(parseCreateActionRecord(
-        rest, path, lineNo + 1, governingLockIdentity))
+        rest, path, lineNo + 1, governingLockIdentity, producerTargets))
     else:
       raiseEngine(path & ":" & $(lineNo + 1) &
         ": unsupported dynamic graph record kind: " & kind)
@@ -19127,7 +19325,13 @@ proc finishConcurrent(executor: ConcurrentBuiltinExecutor; action: BuildAction;
 
 var workspaceVcsExecutor {.threadvar.}: WorkspaceVcsExecutor
 var catalogIndexExecutor {.threadvar.}: CatalogIndexExecutor
-var sourceFetchExecutor {.threadvar.}: SourceFetchExecutor
+var sourceFetchExecutors {.threadvar.}: seq[(string, SourceFetchExecutor)]
+  ## The registered ``bakSourceFetch`` executors, each with the id prefix of
+  ## the edges it serves (`cargo.fetch/`, the Nimble fetch's), most recent
+  ## last. A stack rather than one slot: `repro build` registers the cargo
+  ## executor for its whole run, and a fetch wave run inside it (a nested
+  ## engine of its own) registers and clears one for its duration without
+  ## removing the outer one.
 var lockUpdateExecutor {.threadvar.}: LockUpdateExecutor
 var foreignProvisionExecutors {.threadvar.}: Table[string, ForeignProvisionExecutor]
 var binaryCacheSubstituteExecutor {.threadvar.}: BinaryCacheSubstituteExecutor
@@ -19209,13 +19413,32 @@ proc registerCatalogIndexExecutor*(executor: CatalogIndexExecutor) =
 proc clearCatalogIndexExecutor*() =
   catalogIndexExecutor = nil
 
-proc registerSourceFetchExecutor*(executor: SourceFetchExecutor) =
-  ## Register the per-thread executor for ``bakSourceFetch`` edges
-  ## (NPC-AREQ20). The Nimble source fetch installs one bound to its run.
-  sourceFetchExecutor = executor
+proc registerSourceFetchExecutor*(idPrefix: string;
+                                  executor: SourceFetchExecutor) =
+  ## Register the per-thread executor for the ``bakSourceFetch`` edges whose
+  ## ids start with ``idPrefix`` (NPC-AREQ20). The latest registration whose
+  ## prefix matches an edge's id executes it; `clearSourceFetchExecutor`
+  ## removes the latest one for ``idPrefix``. An empty prefix matches every
+  ## edge.
+  if executor.isNil:
+    raise newException(ValueError, "a source-fetch executor is required")
+  sourceFetchExecutors.add((idPrefix, executor))
 
-proc clearSourceFetchExecutor*() =
-  sourceFetchExecutor = nil
+proc clearSourceFetchExecutor*(idPrefix: string) =
+  ## Remove the latest registration for ``idPrefix``, leaving any earlier
+  ## one (an outer run's) in place.
+  for i in countdown(sourceFetchExecutors.high, 0):
+    if sourceFetchExecutors[i][0] == idPrefix:
+      sourceFetchExecutors.delete(i)
+      return
+
+proc sourceFetchExecutorFor*(actionId: string): SourceFetchExecutor =
+  ## The executor of the ``bakSourceFetch`` edge ``actionId``: the latest
+  ## registration whose prefix the id starts with; nil when there is none.
+  for i in countdown(sourceFetchExecutors.high, 0):
+    if actionId.startsWith(sourceFetchExecutors[i][0]):
+      return sourceFetchExecutors[i][1]
+  nil
 
 proc registerForeignProvisionExecutor*(provisioner: string;
                                        executor: ForeignProvisionExecutor) =
@@ -20440,10 +20663,11 @@ proc executeBuiltinAction*(action: BuildAction): ActionResult =
     of bakSourceFetch:
       # Fail CLOSED when nothing is registered: a fetch edge that quietly
       # no-ops would hand a build a store path nobody verified.
+      let sourceFetchExecutor = sourceFetchExecutorFor(action.id)
       if sourceFetchExecutor.isNil:
         raiseEngine(
-          "bakSourceFetch action requires registerSourceFetchExecutor " &
-          "before runBuild: " & action.id)
+          "bakSourceFetch action requires a registerSourceFetchExecutor " &
+          "whose prefix its id starts with, before runBuild: " & action.id)
       let sfRes = sourceFetchExecutor(action)
       result.status = sfRes.status
       result.exitCode = sfRes.exitCode
@@ -24437,6 +24661,653 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     for output in action.outputs & action.optionalOutputs:
       declaredOutputs.incl(output)
 
+  var portableSatisfied = initTable[string, string]()
+
+  # The portable lookup's state, shared by the pre-pass and by the lookup at
+  # dispatch (`latePortableLookup`), so an action looked up late is resolved
+  # against the same records the pre-pass resolved its ancestors from.
+  let portableRoots = config.portableRoots
+  let portableMemoRoot = sharedRoot / "portable-memo"
+  var portableResolved = initTable[string, PortableMemoRecord]()
+    ## Actions resolved from a portable record, by id.
+  var portableProducedOutputs = initTable[string, PortableOutput]()
+    ## The outputs those records state, by logical path.
+  var portableProducer = initTable[string, string]()
+    ## Which graph action produces each logical path (created actions are
+    ## added when they are registered: `notePortableProducer`).
+  var unmaterializedResolved = 0
+    ## How many resolved actions have their outputs not yet in place, so an
+    ## action whose ancestors need none skips the walk
+    ## (`materializeResolvedAncestors`).
+  var portableLookedUp = initHashSet[string]()
+    ## Actions a lookup has been made for, by the pre-pass or at dispatch,
+    ## so none is looked up twice.
+
+  proc portableLookupConfigured(): bool =
+    # A portable record carries no captured output, so a caller that needs
+    # each hit's output is served by the local records alone.
+    config.portableLookup and portableRoots.len > 0 and
+      not config.forceRebuild and not config.replayCachedActionOutput
+
+  proc portableLogicalKey(physical: string): string =
+    let lp = toLogicalPath(portableRoots, physical)
+    if lp.kind == lpkTracked: lp.label & ":" & lp.rel else: ""
+
+  proc portableParentKey(key: string): string =
+    let colon = key.find(':')
+    let slash = key.rfind('/')
+    if slash > colon: key[0 ..< slash]
+    elif colon >= 0 and colon < key.high: key[0 .. colon]
+    else: ""
+
+  proc notePortableProducer(action: BuildAction) =
+    ## Record what ``action`` produces: a read below a produced directory
+    ## depends on bytes no record states file by file.
+    for physical in portablePhysicalOutputsOf(action):
+      let key = portableLogicalKey(physical)
+      if key.len > 0:
+        portableProducer[key] = action.id
+
+  proc completedOnDisk(id: string): bool =
+    ## Whether ``id`` has completed in this run with its outputs on disk:
+    ## executed, served by a local record, or up to date. Those outputs are
+    ## the ones this run made or verified, so an action looked up after it
+    ## completed identifies them from disk. One resolved from a portable
+    ## record is identified from that record instead, materialized or not.
+    id notin portableResolved and
+      statuses.getOrDefault(id, asPending) in {asSucceeded, asCacheHit,
+                                                asUpToDate}
+
+  const Unresolved = "unresolved-upstream-output"
+    ## An identity no real input has, so a path set that names an output
+    ## of an unresolved action computes a strong fingerprint no record has.
+
+  proc findEntry(entries: seq[TreeEntry]; rel: string): int =
+    var lo = 0
+    var hi = entries.high
+    while lo <= hi:
+      let mid = (lo + hi) div 2
+      let c = cmp(entries[mid].rel, rel)
+      if c == 0:
+        return mid
+      elif c < 0:
+        lo = mid + 1
+      else:
+        hi = mid - 1
+    -1
+
+  proc makeResolver(ancestors: HashSet[string]; action: BuildAction;
+                    diskIdentities: ref Table[string, Option[string]]):
+      IdentityResolver =
+    ## Inputs another graph action produces are identified from that
+    ## action's resolved RECORD: a produced file by its digest, a path
+    ## inside a produced directory by the directory's manifest, a directory
+    ## above declared paths by the graph view (`graphDirView`: what no
+    ## graph action declares, as it is here, plus what this action's
+    ## ancestors produce). An output of an action that already completed in
+    ## this run (`completedOnDisk`) is identified from disk, where that run
+    ## left it; one of an action that has neither completed nor resolved is
+    ## unresolved, so the lookup cannot be served (a stale file from an
+    ## earlier build must not key a hit). Everything else is on disk.
+    ##
+    ## ``diskIdentities`` memoizes the identities of paths no graph action
+    ## produces; nil for a lookup made while actions are running, when the
+    ## disk is no longer what it was a moment ago.
+    let launchEnv = action.actionEnvResolver(unsafeAddr config)
+    result = proc (entry: PathSetEntry): Option[string] =
+      if entry.kind == pikEnvironment:
+        # What the action WOULD launch with here, the value the local
+        # fingerprint re-reads too — not the engine process's own env.
+        let name = entry.path["env:".len .. ^1]
+        let (present, value) = launchEnv(name)
+        return some(envIdentity(portableRecordRoots(), present, value))
+      # A PATTERN-SCOPED name (`patternScopedEnumerationPath`) is answered
+      # for its directory, listing only the names that may match its
+      # pattern, which is what the recorder's `membershipHex` and
+      # `graphDirView` computed for the same name. Looked up as written, it
+      # named no produced path or manifest entry, so a scoped listing of a
+      # produced directory could never resolve.
+      let (path, scope) = splitPatternScopedEnumeration(entry.path)
+      block producedHere:
+        if path notin portableProducer:
+          break producedHere
+        if completedOnDisk(portableProducer[path]):
+          break producedHere
+        if path notin portableProducedOutputs:
+          return some(Unresolved)
+        let o = portableProducedOutputs[path]
+        case entry.kind
+        of pikRead:
+          # `readIdentity`'s answers, so a lookup agrees with the recorder:
+          # a file by its executable bit and digest, as the record states.
+          return some(readIdentityOf(o))
+        of pikProbe:
+          return some(probeIdentityOf(
+            if o.directory: iekDirectory else: iekFile))
+        of pikEnumeration:
+          if o.directory:
+            return some(membershipHexOfNames(
+              childNames(o.entries, "").namesMatchingScope(scope)))
+          return some(Unresolved)
+        of pikEnvironment:
+          return some(Unresolved)   # answered above
+      var up = portableParentKey(path)
+      block insideProduced:
+        while up.len > 0:
+          if up in portableProducer:
+            if completedOnDisk(portableProducer[up]):
+              break insideProduced
+            if up notin portableProducedOutputs or
+                not portableProducedOutputs[up].directory:
+              return some(Unresolved)
+            let o = portableProducedOutputs[up]
+            let rel = path[up.len + 1 .. ^1]
+            let at = findEntry(o.entries, rel)
+            case entry.kind
+            of pikRead:
+              # A produced directory's manifest names every entry in it, so
+              # an entry it lacks is absent (a failed open, as node's module
+              # resolution makes at every level it walks).
+              if at < 0:
+                return some(ReadOfAbsent)
+              case o.entries[at].kind
+              of tekFile, tekDirectory:
+                return some(readIdentityOf(o.entries[at]))
+              else: return some(Unresolved)
+            of pikProbe:
+              if at < 0:
+                return some(ProbeAbsent)
+              return some(probeIdentityOf(
+                if o.entries[at].kind in {tekDirectory, tekLinkToDir}:
+                  iekDirectory
+                else: iekFile))
+            of pikEnumeration:
+              if at >= 0 and o.entries[at].kind == tekDirectory:
+                return some(membershipHexOfNames(
+                  childNames(o.entries, rel).namesMatchingScope(scope)))
+              return some(Unresolved)
+            of pikEnvironment:
+              return some(Unresolved)   # answered above
+          up = portableParentKey(up)
+      # Above produced paths: the rule the recorder and the determinism
+      # probe apply -- this host's undeclared entries plus what this
+      # action's ancestors produce, from their records, or from disk for an
+      # ancestor that completed in this run.
+      # The scoped name itself: `graphDirView` applies its scope.
+      let physical = toPhysicalPath(portableRoots, entry.path)
+      if physical.isSome:
+        let view = graphDirView(physical.get(), action.id, ancestors,
+          proc (output: GraphPathEntry): AncestorOutputState =
+            let key = portableLogicalKey(output.physical)
+            if key.len > 0 and key in portableProducer and
+                completedOnDisk(portableProducer[key]):
+              let p = extendedPath(output.physical)
+              if dirExists(p): aosDirectory
+              elif fileExists(p) or symlinkExists(p): aosFile
+              else: aosUnresolved
+            elif key.len == 0 or key notin portableProducedOutputs:
+              aosUnresolved
+            elif portableProducedOutputs[key].directory: aosDirectory
+            else: aosFile)
+        if view.applies:
+          if view.unresolved:
+            return some(Unresolved)
+          return some(graphViewIdentity(view, entry.kind))
+      # On disk: what `currentIdentity` would compute without a resolver,
+      # memoized when the caller gave a memo (`diskIdentities`).
+      if diskIdentities == nil:
+        return currentIdentity(portableRoots, entry, nil)
+      let memoKey = $entry.kind & "\x00" & entry.path
+      if memoKey notin diskIdentities[]:
+        diskIdentities[][memoKey] = currentIdentity(portableRoots, entry, nil)
+      diskIdentities[][memoKey]
+
+  proc portableLookupRefusal(id: string; action: BuildAction): string =
+    ## Why ``action`` takes no portable record at all, "" when it may (the
+    ## refusal is traced by the caller when it is not ""). "-" for an action
+    ## that is simply not a candidate, which is not traced.
+    if not (action.cacheable or action.fixedOutput) or
+        action.dynamicDepsFile.len > 0:
+      return "-"
+    if not portableEligible(action):
+      # Caching-Architecture D1: under the default scope only an edge that
+      # declared a content-checked policy has a portable identity, so a
+      # `timestamp` edge is never served from the portable plane; it, and
+      # every descendant (its dependency stays unresolved), go through the
+      # ordinary scheduler.
+      return "-"
+    if id in preservingIds:
+      # UNSAFE preserve-outputs: never served from another host (nor
+      # restored over a modified output); the ordinary scheduler decides.
+      return UnsafePreserveOutputsCrossHostRefusal
+    # The Nix-store DETECTION rule, which the scheduler's decision chain
+    # applies too late for this path: an action resolved here completes as
+    # a hit without ever reaching that chain, and with its outputs in place
+    # (`portable-outputs-present`) nothing else asks whether the store
+    # paths they name still exist. A restore cannot help either — it would
+    # write the same bytes naming the same collected paths. So an action
+    # that has lost one is left unresolved; it, and every descendant (whose
+    # dependency is now unresolved), go through the ordinary scheduler,
+    # which re-executes it and traces the paths.
+    let nixLostPaths = nixOutputsLostPaths(action)
+    if nixLostPaths.len > 0:
+      return nixReferencesLostReason(nixLostPaths)
+    # A host-bound or volatile edge takes no portable record at all.
+    #
+    # Not from another host (§5): that includes an edge whose class is
+    # host-bound because it reads a content-keyed tool-owned cache
+    # (Tool-Owned-Caches.md "Trust Boundary"), and that refusal is traced,
+    # naming the cache.
+    #
+    # Not from this cache root either (§3.2 rule 4): such a use is served
+    # only an entry that records THIS host, and a portable memo record
+    # records no host (nor the write time a retention clause needs). The
+    # memo lives under the action-cache root, so a copied or image-baked
+    # root carries it, and an edge resolved here completes as a hit without
+    # reaching `lookupActionResult`. So the edge is left unresolved: it, and
+    # every descendant, go through the ordinary scheduler, whose per-edge
+    # lookup checks the host and the retention clause.
+    let crossHostRefused = action.crossHostRefusal()
+    if crossHostRefused.len > 0:
+      if config.portableMemoLookup != nil and
+          action.readsContentKeyedToolCache:
+        runResult.trace(id, "portable-lookup-remote-refused",
+          crossHostRefused)
+      return "a " & $action.determinismClass & " use is served only this " &
+        "host's realization, and a portable record names no host: " &
+        crossHostRefused
+    ""
+
+  proc portableLookupOne(id: string; action: BuildAction;
+                         ancestors: HashSet[string];
+                         diskIdentities: ref Table[string, Option[string]]):
+      Option[PortableMemoRecord] =
+    ## The lookup of one action by its portable weak fingerprint: candidate
+    ## path sets, then a strong fingerprint computed from THIS host's
+    ## sources (`makeResolver`), the local memo first, then the configured
+    ## remote one. A hit is returned only when the record names exactly what
+    ## the action produces here and its directory listings are the trees its
+    ## digests name. Each outcome is traced.
+    portableLookedUp.incl(id)
+    let weak = portableWeakOf(action)
+    let resolver = makeResolver(ancestors, action, diskIdentities)
+    var hit = none(PortableMemoRecord)
+    var source = "local"
+    try:
+      hit = lookupMemo(portableMemoRoot, portableRoots, weak, resolver)
+    except CatchableError as err:
+      runResult.trace(id, "portable-lookup-failed", err.msg)
+    if hit.isNone and config.portableMemoLookup != nil:
+      source = "remote"
+      try:
+        hit = config.portableMemoLookup(portableRoots, weak, resolver)
+      except CatchableError as err:
+        runResult.trace(id, "portable-lookup-failed", err.msg)
+      if hit.isSome:
+        try: recordMemo(portableMemoRoot, hit.get())
+        except CatchableError: discard
+    if hit.isNone:
+      # Which input of a stored record differs here, declared or observed
+      # (Edge-Derived-Identities.md §3.1): "" when nothing is stored.
+      let why =
+        try: explainMemoMiss(portableMemoRoot, portableRoots, weak, resolver)
+        except CatchableError: ""
+      runResult.trace(id, "portable-miss", "weak=" & weak &
+        (if why.len > 0: "; " & why else: ""))
+      return none(PortableMemoRecord)
+    # The record must name exactly what this action produces here, and
+    # its directory listings must be the trees its digests name.
+    var expected: seq[string] = @[]
+    for physical in portablePhysicalOutputsOf(action):
+      expected.add(portableLogicalKey(physical))
+    var named: seq[string] = @[]
+    for output in hit.get().outputs:
+      named.add(output.path)
+    var optionalKeys: seq[string] = @[]
+    for output in action.optionalOutputs:
+      optionalKeys.add(portableLogicalKey(materialPath(action.cwd, output)))
+    expected = expected.filterIt(it notin optionalKeys or it in named)
+    expected.sort()
+    named.sort()
+    if expected != named or not manifestsConsistent(hit.get()):
+      runResult.trace(id, "portable-record-refused",
+        "the record names other outputs than this action declares, " &
+        "or lists a directory that is not the tree its digest names")
+      return none(PortableMemoRecord)
+    runResult.trace(id, "portable-resolved",
+      source & " strong=" & hit.get().strongHex)
+    hit
+
+  proc restoreResolved(action: BuildAction;
+                       record: PortableMemoRecord): string =
+    ## Caching-Architecture D6: the bytes a record's producer stored on
+    ## this host first, then a remote restorer when one is configured.
+    ## "" when the outputs are in place; otherwise every reason, the
+    ## local one first. A record the publication rule refuses, or one
+    ## whose edge is host-bound, stored no bytes and restores none here.
+    var reasons: seq[string] = @[]
+    let ruleRefusal = portableRecordRefusal(record)
+    if not action.determinismClass.allowsCrossMachineSubstitution():
+      reasons.add("determinism class " & $action.determinismClass &
+        " forbids substitution from another checkout, so its outputs " &
+        "are not stored")
+    elif ruleRefusal.len > 0:
+      reasons.add("its outputs are not stored on this host: " &
+        ruleRefusal)
+    else:
+      let local =
+        try:
+          restorePortableOutputs(sharedRoot / PortableOutputsDirName,
+            portableRoots, record)
+        except CatchableError as err:
+          err.msg
+      if local.len == 0:
+        return ""
+      reasons.add(local)
+    if config.portableMemoRestorer != nil:
+      let remote =
+        try: config.portableMemoRestorer(portableRoots, record)
+        except CatchableError as err: err.msg
+      if remote.len == 0:
+        return ""
+      reasons.add("remote: " & remote)
+    reasons.join("; ")
+
+  proc anyOutputPresent(record: PortableMemoRecord): bool =
+    ## Whether something already stands at one of the record's output
+    ## paths in this checkout (a file, a directory or a link).
+    for output in record.outputs:
+      let physical = toPhysicalPath(portableRoots, output.path)
+      if physical.isSome:
+        let p = extendedPath(physical.get())
+        if symlinkExists(p) or fileExists(p) or dirExists(p):
+          return true
+    false
+
+  proc materializeResolved(id: string): string =
+    ## Put the outputs of the portably resolved action ``id`` in place:
+    ## "portable-outputs-present" or "portable-restored" when they are,
+    ## "" when they cannot be (the reason is traced). Outputs a restore
+    ## writes over are reported (owner decision 2026-11-03,
+    ## `ActionResult.outputOverwrites`).
+    let record = portableResolved[id]
+    var physicalRecorded: seq[string] = @[]
+    for candidate in actionsById[id].optionalOutputs:
+      let physical = materialPath(actionsById[id].cwd, candidate)
+      for output in record.outputs:
+        if portableLogicalKey(physical) == output.path:
+          physicalRecorded.add(physical)
+          break
+    actionsById[id].removeAbsentOptionalOutputs(physicalRecorded)
+    if outputsOnDiskReason(portableRoots, record).len == 0:
+      return "portable-outputs-present"
+    # Taken before the restorer runs, in the record's own (published-domain)
+    # terms.
+    var overwrites: seq[OutputOverwrite] = @[]
+    for output in record.outputs:
+      let physical = toPhysicalPath(portableRoots, output.path)
+      if physical.isNone:
+        continue
+      let p = physical.get()
+      let onDisk =
+        if output.directory:
+          (if dirExists(extendedPath(p)): treeContentHex(p) else: "")
+        else:
+          (if fileExists(extendedPath(p)): fileContentHex(p) else: "")
+      if onDisk.len > 0 and onDisk != output.digest:
+        overwrites.add(OutputOverwrite(path: p,
+          onDisk: "content:" & onDisk, restored: "content:" & output.digest))
+    let why = restoreResolved(actionsById[id], record)
+    fileMetadataCache.clear()
+    if why.len > 0:
+      runResult.trace(id, "portable-restore-failed", why)
+      return ""
+    let idx = idToIndex.resultIndex(id)
+    for overwrite in overwrites:
+      runResult.results[idx].outputOverwrites.add(overwrite)
+      runResult.trace(id, "cache-restore-overwrote",
+        overwriteDetail(overwrite))
+    "portable-restored"
+
+  proc markPortable(id: string) =
+    let record = portableResolved[id]
+    let idx = idToIndex.resultIndex(id)
+    runResult.results[idx].portable = true
+    runResult.results[idx].portableWeakHex = record.weakHex
+    runResult.results[idx].portableStrongHex = record.strongHex
+    runResult.results[idx].portableOutputs = record.outputs
+
+  proc ancestorClosure(id: string): HashSet[string] =
+    ## Every action ``id`` depends on, transitively (engine deps are
+    ## ordering edges, not per-file edges, so an executing action may read
+    ## any ancestor's output).
+    var stack = actionsById[id].deps
+    while stack.len > 0:
+      let dep = stack.pop()
+      if not result.containsOrIncl(dep):
+        for above in actionsById[dep].deps:
+          stack.add(above)
+
+  proc runPortablePrepass() =
+    # Cache-Scope P3.4: lookup without materialization.
+    #
+    # BuildXL's cache-lookup phase, over the portable memo plane. Before
+    # anything is scheduled, walk the graph in topological order and resolve
+    # each action by its portable weak fingerprint: candidate path sets, then
+    # a strong fingerprint computed from THIS host's sources — and, for
+    # inputs another graph action produces, from that action's RESOLVED
+    # RECORD, never from whatever happens to be on disk (a previous run's
+    # stale file must not be able to key a hit). Nothing executes and
+    # nothing is fetched but metadata.
+    #
+    # Then materialize only what something still needs: the graph's sinks,
+    # every resolved ancestor of an action that must execute, and every
+    # resolved action that carries a target name or a typed output, i.e.
+    # produces a result of the build (Caching-Architecture D7). The bytes
+    # come from what the record's producer stored on this host (D6), then
+    # from a remote restorer if one is configured. An output that cannot be
+    # put in place un-resolves its action AND its descendants, whose records
+    # were keyed on bytes a re-execution need not reproduce; the walk then
+    # repeats until it is stable. What stays resolved completes as a cache
+    # hit without launching; what does not goes through the ordinary lookup
+    # (and `latePortableLookup` when its dependencies have completed) and
+    # execution below, unchanged.
+    if not portableLookupConfigured():
+      return
+    var order: seq[string] = @[]
+    block topo:
+      var indegree = initTable[string, int]()
+      var queue: seq[string] = @[]
+      for action in buildGraph.actions:
+        indegree[action.id] = action.deps.len
+        if action.deps.len == 0:
+          queue.add(action.id)
+      while queue.len > 0:
+        let id = queue.pop()
+        order.add(id)
+        for dependent in dependents.getOrDefault(id):
+          indegree[dependent] = indegree[dependent] - 1
+          if indegree[dependent] == 0:
+            queue.add(dependent)
+    var ancestorsOf = initTable[string, HashSet[string]]()
+    let diskIdentities = new(Table[string, Option[string]])
+      ## The identity a path-set entry has on disk, computed once per
+      ## pre-pass. Every compile of a project reads the same toolchain files
+      ## and probes the same search directories, so without this each
+      ## lookup re-derived the identities of the same few hundred paths
+      ## (measured: the warm no-op of a 300-source project spent most of
+      ## its extra time there). It holds only entries no graph action
+      ## produces and no graph view answers (those are resolved above, per
+      ## action), and the lookup loop writes nothing, so an entry's identity
+      ## cannot change between two lookups in it; the materialization below
+      ## does not consult it.
+
+    for id in order:
+      let action = actionsById[id]
+      var ancestors = initHashSet[string]()
+      for dep in action.deps:
+        ancestors.incl(dep)
+        for above in ancestorsOf.getOrDefault(dep):
+          ancestors.incl(above)
+      ancestorsOf[id] = ancestors
+      if not (action.cacheable or action.fixedOutput) or
+          action.dynamicDepsFile.len > 0 or not portableEligible(action):
+        continue
+      if id in preservingIds:
+        portableLookedUp.incl(id)
+        runResult.trace(id, "portable-record-refused",
+          UnsafePreserveOutputsCrossHostRefusal)
+        continue
+      var depsResolved = true
+      for dep in action.deps:
+        if dep notin portableResolved:
+          depsResolved = false
+          break
+      if not depsResolved:
+        # Looked up at dispatch instead, once its dependencies have
+        # completed (`latePortableLookup`). Checked before the Nix-store and
+        # cross-host refusals, as before the late lookup existed, so those
+        # are evaluated and traced once, by whichever lookup is made.
+        continue
+      let refusal = portableLookupRefusal(id, action)
+      if refusal == "-":
+        continue
+      if refusal.len > 0:
+        portableLookedUp.incl(id)
+        runResult.trace(id, "portable-record-refused", refusal)
+        continue
+      let hit = portableLookupOne(id, action, ancestors, diskIdentities)
+      if hit.isNone:
+        continue
+      portableResolved[id] = hit.get()
+      for output in hit.get().outputs:
+        portableProducedOutputs[output.path] = output
+
+    if portableResolved.len == 0:
+      return
+    var materialized = initTable[string, string]()
+    while true:
+      # Needed (Caching-Architecture D7): resolved sinks, resolved
+      # ancestors of anything that must execute, and the declared outputs
+      # of a resolved action that produces a target the build names as
+      # its result: one that carries a target name (a typed tool call's
+      # implicit target) or a typed output (a convention member's library
+      # or executable).
+      # An intermediate none of these covers is left out, unless
+      # something already stands at one of its output paths: then it must
+      # be the record's bytes, so it is checked like a demanded output and
+      # replaced, or its producer executes.
+      var demanded = initHashSet[string]()
+      for i in countdown(order.high, 0):
+        let id = order[i]
+        if id notin portableResolved or id in demanded:
+          for dep in actionsById[id].deps:
+            demanded.incl(dep)
+      var failed = ""
+      for id in order:
+        if id notin portableResolved or id in materialized:
+          continue
+        let sink = dependents.getOrDefault(id).len == 0
+        let namedTarget = actionsById[id].targetNames.len > 0 or
+          actionsById[id].typedOutputs.len > 0
+        if not sink and id notin demanded and not namedTarget and
+            not anyOutputPresent(portableResolved[id]):
+          continue
+        let how = materializeResolved(id)
+        if how.len > 0:
+          materialized[id] = how
+          continue
+        failed = id
+        break
+      if failed.len == 0:
+        break
+      var drop = @[failed]
+      while drop.len > 0:
+        let id = drop.pop()
+        if id in portableResolved:
+          portableResolved.del(id)
+          materialized.del(id)
+          runResult.trace(id, "portable-unresolved",
+            if id == failed: "its outputs cannot be put in place"
+            else: "an upstream action will execute instead")
+          # An action dropped because an ancestor will execute is looked up
+          # again at dispatch, against what that ancestor then produces; the
+          # one whose outputs cannot be put in place is not.
+          if id != failed:
+            portableLookedUp.excl(id)
+          for dependent in dependents.getOrDefault(id):
+            drop.add(dependent)
+    # The produced-output table is rebuilt from what stayed resolved, so a
+    # later lookup never identifies an input from a dropped record.
+    portableProducedOutputs.clear()
+    for id, record in portableResolved:
+      for output in record.outputs:
+        portableProducedOutputs[output.path] = output
+      portableSatisfied[id] = materialized.getOrDefault(id,
+        "portable-resolved")
+      if id notin materialized:
+        inc unmaterializedResolved
+      markPortable(id)
+
+  proc materializeResolvedAncestors(id: string): string =
+    ## Before ``id`` runs or is looked up locally: put in place the outputs
+    ## of every ancestor the pre-pass resolved without materializing them
+    ## (nothing it knew of needed them; an action created later, or one
+    ## reached only now, may). "" when that is done; otherwise why an
+    ## ancestor's outputs cannot be put in place, and ``id`` must not run on
+    ## their absence.
+    if unmaterializedResolved == 0:
+      return ""
+    for dep in ancestorClosure(id):
+      if portableSatisfied.getOrDefault(dep) != "portable-resolved":
+        continue
+      let how = materializeResolved(dep)
+      if how.len == 0:
+        return "the outputs of " & dep & ", served from a portable record, " &
+          "cannot be put in place"
+      portableSatisfied[dep] = how
+      dec unmaterializedResolved
+    ""
+
+  proc latePortableLookup(id: string): bool =
+    ## The portable lookup of an action the pre-pass did not resolve because
+    ## it did not exist yet (created by a dynamic fragment) or because an
+    ## ancestor was not resolved (it executed, or it is a dynamic producer,
+    ## whose created actions are known only when it is ingested). Made at
+    ## dispatch, when every dependency has completed, so an output of an
+    ## ancestor that completed in this run is identified from disk
+    ## (`completedOnDisk`) and one served from a portable record from that
+    ## record. A hit's outputs are always put in place: the action is about
+    ## to be consumed by actions that may already be ready. True when the
+    ## action is served, with `portableSatisfied` set.
+    if not portableLookupConfigured() or id in portableLookedUp or
+        id in portableSatisfied:
+      return false
+    let action = actionsById[id]
+    let refusal = portableLookupRefusal(id, action)
+    if refusal == "-":
+      return false
+    portableLookedUp.incl(id)
+    if refusal.len > 0:
+      runResult.trace(id, "portable-record-refused", refusal)
+      return false
+    let hit = portableLookupOne(id, action, ancestorClosure(id), nil)
+    if hit.isNone:
+      return false
+    portableResolved[id] = hit.get()
+    let how = materializeResolved(id)
+    if how.len == 0:
+      portableResolved.del(id)
+      runResult.trace(id, "portable-unresolved",
+        "its outputs cannot be put in place")
+      return false
+    for output in hit.get().outputs:
+      portableProducedOutputs[output.path] = output
+    portableSatisfied[id] = how
+    markPortable(id)
+    true
+
+
   proc registerDynamicAction(producerId: string; incomingAction: BuildAction) =
     ## M25: materialise a ``create-action`` record into the running graph.
     ## Validates uniqueness, dep-target existence, and self-cycle freedom
@@ -24510,7 +25381,14 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       else:
         inc waitingDeps
     remaining[newAction.id] = waitingDeps
+    notePortableProducer(newAction)
     runResult.trace(newAction.id, "action-create", "producer=" & producerId)
+    if newAction.targetNames.len > 0:
+      # The targets the record placed it in, all of them its producer's
+      # (`createdActionTargetRefusal`), so a report says which of the
+      # build's targets each created action belongs to.
+      runResult.trace(newAction.id, "action-create-targets",
+        newAction.targetNames.join(","))
     # The command the record created, as a JSON array, so a build report
     # says what each created action ran (a per-test run names its test
     # here). The record's argv, not the expanded one: an `@FILE:` token is
@@ -24544,7 +25422,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     # Named-Lock-Files §4.1: a dynamically created edge inherits the
     # governing lock identity of the action that pulled it in.
     let fragment = readDynamicGraphFragment(
-      fragmentPath, action.governingLockIdentity)
+      fragmentPath, action.governingLockIdentity, action.targetNames)
     finishStat("repro dynamic deps load", dyndepStart)
     # M25: materialise any ``create-action`` records FIRST so subsequent
     # ``dep`` edges can name them. The order in the fragment is preserved;
@@ -24662,442 +25540,9 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
   # then repeats until it is stable. What stays resolved completes as a cache
   # hit without launching; what does not goes through the ordinary lookup and
   # execution below, unchanged.
-  var portableSatisfied = initTable[string, string]()
-
-  proc runPortablePrepass() =
-    # A portable record carries no captured output, so a caller that needs
-    # each hit's output is served by the local records alone.
-    if not config.portableLookup or config.portableRoots.len == 0 or
-        config.forceRebuild or config.replayCachedActionOutput:
-      return
-    let roots = config.portableRoots
-    let memoRoot = sharedRoot / "portable-memo"
-    proc logicalKey(physical: string): string =
-      let lp = toLogicalPath(roots, physical)
-      if lp.kind == lpkTracked: lp.label & ":" & lp.rel else: ""
-    proc parentKey(key: string): string =
-      let colon = key.find(':')
-      let slash = key.rfind('/')
-      if slash > colon: key[0 ..< slash]
-      elif colon >= 0 and colon < key.high: key[0 .. colon]
-      else: ""
-    # Which graph action produces each logical path: a read below a
-    # produced directory depends on bytes no record states file by file.
-    # A directory ABOVE produced paths is the graph view's (`graphDirView`).
-    var producer = initTable[string, string]()
-    for action in buildGraph.actions:
-      for physical in portablePhysicalOutputsOf(action):
-        let key = logicalKey(physical)
-        if key.len == 0:
-          continue
-        producer[key] = action.id
-    var order: seq[string] = @[]
-    block topo:
-      var indegree = initTable[string, int]()
-      var queue: seq[string] = @[]
-      for action in buildGraph.actions:
-        indegree[action.id] = action.deps.len
-        if action.deps.len == 0:
-          queue.add(action.id)
-      while queue.len > 0:
-        let id = queue.pop()
-        order.add(id)
-        for dependent in dependents.getOrDefault(id):
-          indegree[dependent] = indegree[dependent] - 1
-          if indegree[dependent] == 0:
-            queue.add(dependent)
-    var resolved = initTable[string, PortableMemoRecord]()
-    var producedOutputs = initTable[string, PortableOutput]()
-    var ancestorsOf = initTable[string, HashSet[string]]()
-    var diskIdentities = initTable[string, Option[string]]()
-      ## The identity a path-set entry has on disk, computed once per
-      ## pre-pass. Every compile of a project reads the same toolchain files
-      ## and probes the same search directories, so without this each
-      ## lookup re-derived the identities of the same few hundred paths
-      ## (measured: the warm no-op of a 300-source project spent most of
-      ## its extra time there). It holds only entries no graph action
-      ## produces and no graph view answers (those are resolved above, per
-      ## action), and the lookup loop writes nothing, so an entry's identity
-      ## cannot change between two lookups in it; the materialization below
-      ## does not consult it.
-    const Unresolved = "unresolved-upstream-output"
-      ## An identity no real input has, so a path set that names an output
-      ## of an unresolved action computes a strong fingerprint no record has.
-    proc findEntry(entries: seq[TreeEntry]; rel: string): int =
-      var lo = 0
-      var hi = entries.high
-      while lo <= hi:
-        let mid = (lo + hi) div 2
-        let c = cmp(entries[mid].rel, rel)
-        if c == 0:
-          return mid
-        elif c < 0:
-          lo = mid + 1
-        else:
-          hi = mid - 1
-      -1
-    proc makeResolver(ancestors: HashSet[string];
-                      action: BuildAction): IdentityResolver =
-      ## Inputs another graph action produces are identified from that
-      ## action's resolved RECORD: a produced file by its digest, a path
-      ## inside a produced directory by the directory's manifest, a directory
-      ## above declared paths by the graph view (`graphDirView`: what no
-      ## graph action declares, as it is here, plus what this action's
-      ## ancestors produce). Everything else is on disk.
-      let launchEnv = action.actionEnvResolver(unsafeAddr config)
-      result = proc (entry: PathSetEntry): Option[string] =
-        if entry.kind == pikEnvironment:
-          # What the action WOULD launch with here, the value the local
-          # fingerprint re-reads too — not the engine process's own env.
-          let name = entry.path["env:".len .. ^1]
-          let (present, value) = launchEnv(name)
-          return some(envIdentity(portableRecordRoots(), present, value))
-        # A PATTERN-SCOPED name (`patternScopedEnumerationPath`) is answered
-        # for its directory, listing only the names that may match its
-        # pattern, which is what the recorder's `membershipHex` and
-        # `graphDirView` computed for the same name. Looked up as written, it
-        # named no produced path or manifest entry, so a scoped listing of a
-        # produced directory could never resolve.
-        let (path, scope) = splitPatternScopedEnumeration(entry.path)
-        if path in producer:
-          if path notin producedOutputs:
-            return some(Unresolved)
-          let o = producedOutputs[path]
-          case entry.kind
-          of pikRead:
-            # `readIdentity`'s answers, so a lookup agrees with the recorder:
-            # a file by its executable bit and digest, as the record states.
-            return some(readIdentityOf(o))
-          of pikProbe:
-            return some(probeIdentityOf(
-              if o.directory: iekDirectory else: iekFile))
-          of pikEnumeration:
-            if o.directory:
-              return some(membershipHexOfNames(
-                childNames(o.entries, "").namesMatchingScope(scope)))
-            return some(Unresolved)
-          of pikEnvironment:
-            return some(Unresolved)   # answered above
-        var up = parentKey(path)
-        while up.len > 0:
-          if up in producer:
-            if up notin producedOutputs or not producedOutputs[up].directory:
-              return some(Unresolved)
-            let o = producedOutputs[up]
-            let rel = path[up.len + 1 .. ^1]
-            let at = findEntry(o.entries, rel)
-            case entry.kind
-            of pikRead:
-              # A produced directory's manifest names every entry in it, so
-              # an entry it lacks is absent (a failed open, as node's module
-              # resolution makes at every level it walks).
-              if at < 0:
-                return some(ReadOfAbsent)
-              case o.entries[at].kind
-              of tekFile, tekDirectory:
-                return some(readIdentityOf(o.entries[at]))
-              else: return some(Unresolved)
-            of pikProbe:
-              if at < 0:
-                return some(ProbeAbsent)
-              return some(probeIdentityOf(
-                if o.entries[at].kind in {tekDirectory, tekLinkToDir}:
-                  iekDirectory
-                else: iekFile))
-            of pikEnumeration:
-              if at >= 0 and o.entries[at].kind == tekDirectory:
-                return some(membershipHexOfNames(
-                  childNames(o.entries, rel).namesMatchingScope(scope)))
-              return some(Unresolved)
-            of pikEnvironment:
-              return some(Unresolved)   # answered above
-          up = parentKey(up)
-        # Above produced paths: the rule the recorder and the determinism
-        # probe apply -- this host's undeclared entries plus what this
-        # action's ancestors produce, from their records.
-        # The scoped name itself: `graphDirView` applies its scope.
-        let physical = toPhysicalPath(roots, entry.path)
-        if physical.isSome:
-          let view = graphDirView(physical.get(), action.id, ancestors,
-            proc (output: GraphPathEntry): AncestorOutputState =
-              let key = logicalKey(output.physical)
-              if key.len == 0 or key notin producedOutputs: aosUnresolved
-              elif producedOutputs[key].directory: aosDirectory
-              else: aosFile)
-          if view.applies:
-            if view.unresolved:
-              return some(Unresolved)
-            return some(graphViewIdentity(view, entry.kind))
-        # On disk: what `currentIdentity` would compute without a resolver,
-        # memoized for the pre-pass (`diskIdentities`).
-        let memoKey = $entry.kind & "\x00" & entry.path
-        if memoKey notin diskIdentities:
-          diskIdentities[memoKey] = currentIdentity(roots, entry, nil)
-        diskIdentities[memoKey]
-
-    for id in order:
-      let action = actionsById[id]
-      var ancestors = initHashSet[string]()
-      for dep in action.deps:
-        ancestors.incl(dep)
-        for above in ancestorsOf.getOrDefault(dep):
-          ancestors.incl(above)
-      ancestorsOf[id] = ancestors
-      if not (action.cacheable or action.fixedOutput) or
-          action.dynamicDepsFile.len > 0:
-        continue
-      if not portableEligible(action):
-        # Caching-Architecture D1: under the default scope only an edge that
-        # declared a content-checked policy has a portable identity, so a
-        # `timestamp` edge is never served from the portable plane; it, and
-        # every descendant (its dependency stays unresolved), go through the
-        # ordinary scheduler.
-        continue
-      if id in preservingIds:
-        # UNSAFE preserve-outputs: never served from another host (nor
-        # restored over a modified output); the ordinary scheduler decides.
-        runResult.trace(id, "portable-record-refused",
-          UnsafePreserveOutputsCrossHostRefusal)
-        continue
-      var depsResolved = true
-      for dep in action.deps:
-        if dep notin resolved:
-          depsResolved = false
-          break
-      if not depsResolved:
-        continue
-      # The Nix-store DETECTION rule, which the scheduler's decision chain
-      # applies too late for this path: an action resolved here completes as
-      # a hit without ever reaching that chain, and with its outputs in place
-      # (`portable-outputs-present`) nothing else asks whether the store
-      # paths they name still exist. A restore cannot help either — it would
-      # write the same bytes naming the same collected paths. So an action
-      # that has lost one is left unresolved; it, and every descendant (whose
-      # dependency is now unresolved), go through the ordinary scheduler,
-      # which re-executes it and traces the paths.
-      let nixLostPaths = nixOutputsLostPaths(action)
-      if nixLostPaths.len > 0:
-        runResult.trace(id, "portable-record-refused",
-          nixReferencesLostReason(nixLostPaths))
-        continue
-      # A host-bound or volatile edge takes no portable record at all.
-      #
-      # Not from another host (§5): that includes an edge whose class is
-      # host-bound because it reads a content-keyed tool-owned cache
-      # (Tool-Owned-Caches.md "Trust Boundary"), and that refusal is traced,
-      # naming the cache.
-      #
-      # Not from this cache root either (§3.2 rule 4): such a use is served
-      # only an entry that records THIS host, and a portable memo record
-      # records no host (nor the write time a retention clause needs). The
-      # memo lives under the action-cache root, so a copied or image-baked
-      # root carries it, and an edge resolved here completes as a hit without
-      # reaching `lookupActionResult`. So the edge is left unresolved: it, and
-      # every descendant, go through the ordinary scheduler, whose per-edge
-      # lookup checks the host and the retention clause.
-      let crossHostRefused = action.crossHostRefusal()
-      if crossHostRefused.len > 0:
-        if config.portableMemoLookup != nil and
-            action.readsContentKeyedToolCache:
-          runResult.trace(id, "portable-lookup-remote-refused",
-            crossHostRefused)
-        runResult.trace(id, "portable-record-refused",
-          "a " & $action.determinismClass & " use is served only this " &
-            "host's realization, and a portable record names no host: " &
-            crossHostRefused)
-        continue
-      let weak = portableWeakOf(action)
-      let resolver = makeResolver(ancestors, action)
-      var hit = none(PortableMemoRecord)
-      var source = "local"
-      try:
-        hit = lookupMemo(memoRoot, roots, weak, resolver)
-      except CatchableError as err:
-        runResult.trace(id, "portable-lookup-failed", err.msg)
-      if hit.isNone and config.portableMemoLookup != nil:
-        source = "remote"
-        try:
-          hit = config.portableMemoLookup(roots, weak, resolver)
-        except CatchableError as err:
-          runResult.trace(id, "portable-lookup-failed", err.msg)
-        if hit.isSome:
-          try: recordMemo(memoRoot, hit.get())
-          except CatchableError: discard
-      if hit.isNone:
-        # Which input of a stored record differs here, declared or observed
-        # (Edge-Derived-Identities.md §3.1): "" when nothing is stored.
-        let why =
-          try: explainMemoMiss(memoRoot, roots, weak, resolver)
-          except CatchableError: ""
-        runResult.trace(id, "portable-miss", "weak=" & weak &
-          (if why.len > 0: "; " & why else: ""))
-        continue
-      # The record must name exactly what this action produces here, and
-      # its directory listings must be the trees its digests name.
-      var expected: seq[string] = @[]
-      for physical in portablePhysicalOutputsOf(action):
-        expected.add(logicalKey(physical))
-      var named: seq[string] = @[]
-      for output in hit.get().outputs:
-        named.add(output.path)
-      var optionalKeys: seq[string] = @[]
-      for output in action.optionalOutputs:
-        optionalKeys.add(logicalKey(materialPath(action.cwd, output)))
-      expected = expected.filterIt(it notin optionalKeys or it in named)
-      expected.sort()
-      named.sort()
-      if expected != named or not manifestsConsistent(hit.get()):
-        runResult.trace(id, "portable-record-refused",
-          "the record names other outputs than this action declares, " &
-          "or lists a directory that is not the tree its digest names")
-        continue
-      resolved[id] = hit.get()
-      for output in hit.get().outputs:
-        producedOutputs[output.path] = output
-      runResult.trace(id, "portable-resolved",
-        source & " strong=" & hit.get().strongHex)
-
-    if resolved.len == 0:
-      return
-    proc anyOutputPresent(record: PortableMemoRecord): bool =
-      ## Whether something already stands at one of the record's output
-      ## paths in this checkout (a file, a directory or a link).
-      for output in record.outputs:
-        let physical = toPhysicalPath(roots, output.path)
-        if physical.isSome:
-          let p = extendedPath(physical.get())
-          if symlinkExists(p) or fileExists(p) or dirExists(p):
-            return true
-      false
-    proc restoreResolved(action: BuildAction;
-                         record: PortableMemoRecord): string =
-      ## Caching-Architecture D6: the bytes a record's producer stored on
-      ## this host first, then a remote restorer when one is configured.
-      ## "" when the outputs are in place; otherwise every reason, the
-      ## local one first. A record the publication rule refuses, or one
-      ## whose edge is host-bound, stored no bytes and restores none here.
-      var reasons: seq[string] = @[]
-      let ruleRefusal = portableRecordRefusal(record)
-      if not action.determinismClass.allowsCrossMachineSubstitution():
-        reasons.add("determinism class " & $action.determinismClass &
-          " forbids substitution from another checkout, so its outputs " &
-          "are not stored")
-      elif ruleRefusal.len > 0:
-        reasons.add("its outputs are not stored on this host: " &
-          ruleRefusal)
-      else:
-        let local =
-          try:
-            restorePortableOutputs(sharedRoot / PortableOutputsDirName,
-              roots, record)
-          except CatchableError as err:
-            err.msg
-        if local.len == 0:
-          return ""
-        reasons.add(local)
-      if config.portableMemoRestorer != nil:
-        let remote =
-          try: config.portableMemoRestorer(roots, record)
-          except CatchableError as err: err.msg
-        if remote.len == 0:
-          return ""
-        reasons.add("remote: " & remote)
-      reasons.join("; ")
-    var materialized = initTable[string, string]()
-    while true:
-      # Needed (Caching-Architecture D7): resolved sinks, resolved
-      # ancestors of anything that must execute, and the declared outputs
-      # of a resolved action that produces a target the build names as
-      # its result: one that carries a target name (a typed tool call's
-      # implicit target) or a typed output (a convention member's library
-      # or executable).
-      # An intermediate none of these covers is left out, unless
-      # something already stands at one of its output paths: then it must
-      # be the record's bytes, so it is checked like a demanded output and
-      # replaced, or its producer executes.
-      var demanded = initHashSet[string]()
-      for i in countdown(order.high, 0):
-        let id = order[i]
-        if id notin resolved or id in demanded:
-          for dep in actionsById[id].deps:
-            demanded.incl(dep)
-      var failed = ""
-      for id in order:
-        if id notin resolved or id in materialized:
-          continue
-        let sink = dependents.getOrDefault(id).len == 0
-        let namedTarget = actionsById[id].targetNames.len > 0 or
-          actionsById[id].typedOutputs.len > 0
-        if not sink and id notin demanded and not namedTarget and
-            not anyOutputPresent(resolved[id]):
-          continue
-        let record = resolved[id]
-        var physicalRecorded: seq[string] = @[]
-        for candidate in actionsById[id].optionalOutputs:
-          let physical = materialPath(actionsById[id].cwd, candidate)
-          for output in record.outputs:
-            if logicalKey(physical) == output.path:
-              physicalRecorded.add(physical)
-              break
-        actionsById[id].removeAbsentOptionalOutputs(physicalRecorded)
-        if outputsOnDiskReason(roots, record).len == 0:
-          materialized[id] = "portable-outputs-present"
-          continue
-        # Owner decision 2026-11-03: every output a restore writes OVER is
-        # reported (`ActionResult.outputOverwrites`). Taken before the
-        # restorer runs, in the record's own (published-domain) terms.
-        var overwrites: seq[OutputOverwrite] = @[]
-        for output in record.outputs:
-          let physical = toPhysicalPath(roots, output.path)
-          if physical.isNone:
-            continue
-          let p = physical.get()
-          let onDisk =
-            if output.directory:
-              (if dirExists(extendedPath(p)): treeContentHex(p) else: "")
-            else:
-              (if fileExists(extendedPath(p)): fileContentHex(p) else: "")
-          if onDisk.len > 0 and onDisk != output.digest:
-            overwrites.add(OutputOverwrite(path: p,
-              onDisk: "content:" & onDisk, restored: "content:" & output.digest))
-        let why = restoreResolved(actionsById[id], record)
-        fileMetadataCache.clear()
-        if why.len == 0:
-          materialized[id] = "portable-restored"
-          let idx = idToIndex.resultIndex(id)
-          for overwrite in overwrites:
-            runResult.results[idx].outputOverwrites.add(overwrite)
-            runResult.trace(id, "cache-restore-overwrote",
-              overwriteDetail(overwrite))
-          continue
-        runResult.trace(id, "portable-restore-failed", why)
-        failed = id
-        break
-      if failed.len == 0:
-        break
-      var drop = @[failed]
-      while drop.len > 0:
-        let id = drop.pop()
-        if id in resolved:
-          resolved.del(id)
-          materialized.del(id)
-          runResult.trace(id, "portable-unresolved",
-            if id == failed: "its outputs cannot be put in place"
-            else: "an upstream action will execute instead")
-          for dependent in dependents.getOrDefault(id):
-            drop.add(dependent)
-
-    for id, record in resolved:
-      portableSatisfied[id] = materialized.getOrDefault(id,
-        "portable-resolved")
-      let idx = idToIndex.resultIndex(id)
-      runResult.results[idx].portable = true
-      runResult.results[idx].portableWeakHex = record.weakHex
-      runResult.results[idx].portableStrongHex = record.strongHex
-      runResult.results[idx].portableOutputs = record.outputs
-
   for declared in buildGraph.actions:
     declaredActions[declared.id] = declared
+    notePortableProducer(declared)
   runPortablePrepass()
 
   var completed = 0
@@ -25433,11 +25878,28 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
 
         # Cache-Scope P3.4: served by the portable pre-pass — its outputs are
         # in place, or nothing needs them. Nothing launches.
-        if portableSatisfied.hasKey(id):
+        if portableSatisfied.hasKey(id) or latePortableLookup(id):
           completeSuccess(id, asCacheHit, cdHit, false, portableSatisfied[id])
           inc completed
           launchedAny = true
           continue
+        # An ancestor the pre-pass resolved without putting its outputs in
+        # place (nothing it knew of needed them) is materialized before this
+        # action is looked up locally or runs: it may read them.
+        block ancestorsInPlace:
+          let missing = materializeResolvedAncestors(id)
+          if missing.len > 0:
+            let idx = idToIndex.resultIndex(id)
+            runResult.results[idx].status = asFailed
+            runResult.results[idx].reason = missing
+            runResult.results[idx].stderr = "action '" & id & "': " & missing
+            statuses[id] = asFailed
+            runResult.trace(id, "failed", missing)
+            emitProgress(bpkActionCompleted, id)
+            blockClosure(id, id)
+            completed = terminalCount()
+            launchedAny = true
+            continue
 
         var cacheMissInputChanged = false
         # Set when the cache rejected the record because a DECLARED OUTPUT on

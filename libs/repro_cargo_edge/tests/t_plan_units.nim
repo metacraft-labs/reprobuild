@@ -25,6 +25,7 @@ import std/[os, sequtils, strutils, tempfiles, unittest]
 import repro_build_engine
 import repro_cargo_edge/[cargo_plan, plan_units]
 import repro_cargo_fetch/crate_rows
+import repro_lock/identity
 
 proc libUnit(name, hash: string; types = "lib"; extra: seq[string] = @[];
              consumes: seq[string] = @[]; cwd = "${project}"): PlanUnit =
@@ -50,7 +51,8 @@ proc libUnit(name, hash: string; types = "lib"; extra: seq[string] = @[];
       "${out}/" & id & "/lib" & stem & ".rmeta"]
 
 proc config(work: string): PlanUnitsConfig =
-  PlanUnitsConfig(projectRoot: work / "ws", storeRoot: work / "store",
+  PlanUnitsConfig(governingLockIdentity: lockIdentityOutsideSolvedGraph(),
+      projectRoot: work / "ws", storeRoot: work / "store",
     outRoot: work / "out", toolchainEnv: @["PATH=/toolchain/bin"])
 
 proc refusedIds(plan: CargoPlan; cfg: PlanUnitsConfig): seq[string] =
@@ -58,7 +60,8 @@ proc refusedIds(plan: CargoPlan; cfg: PlanUnitsConfig): seq[string] =
     discard planUnitEdges(plan, cfg)
   except PlanUnitsRefusal as err:
     checkpoint err.msg
-    return err.refused.mapIt(it[0])
+    for (id, _) in err.refused: result.add id
+    return
   checkpoint "the plan was not refused"
   check false
 

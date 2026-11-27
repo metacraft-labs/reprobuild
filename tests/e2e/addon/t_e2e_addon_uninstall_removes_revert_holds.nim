@@ -39,10 +39,11 @@
 ## and 4 hold as in the first test. Uninstall's own claim of holds no
 ## ledger names (``unledgeredRevertHolds``) is not reachable through
 ## uninstall while step 0 refuses the host that would have them, and is
-## covered by ``t_addon_revert_hold_ledger``. The recovery leaves the
-## boot-hold and boot-confirm units alone: they run only at boot (§13
-## decision 196; falsifier ``recovery-starts-boot-only-units``, red on the
-## third test), and it does not run again the profile's run-once unit
+## covered by ``t_addon_revert_hold_ledger``. The guest is rebooted with
+## nothing pending before the refused switch, so the boot-hold unit has not
+## run this boot, and the recovery leaves it alone because it runs only at
+## boot, which it reports in those words (§13 decision 196; falsifier
+## ``recovery-starts-boot-only-units``, red on the third test), and it does not run again the profile's run-once unit
 ## (``a9r-once.service``, ``Type=oneshot`` without ``RemainAfterExit=``),
 ## which ran this boot (§13 decision 197; falsifier
 ## ``recovery-reruns-run-once-units``, red on the third test).
@@ -154,10 +155,11 @@ proc runBase(b: BaseImage; record: JsonNode; resetAt = "";
     # The unit's account, made before the base fingerprint: the gate's, not
     # the add-on's.
     discard g.run("useradd -r -M -s /usr/sbin/nologin a9e")
-    if resetAt.len > 0:
+    if resetAt.len > 0 or killAt.len > 0:
       # The base after a clean reboot, as the guest will be after the
-      # reset: a first boot runs units (``ldconfig.service`` and the like,
-      # ``ConditionNeedsUpdate=``) that a later boot does not.
+      # reset (or the killed revert's case's own reboot): a first boot runs
+      # units (``ldconfig.service`` and the like, ``ConditionNeedsUpdate=``)
+      # that a later boot does not.
       g.rebootGuest()
     let f0 = g.takeFingerprint(repro)
     if not g.bootstrapAddon(repro, step): return fails
@@ -177,6 +179,18 @@ proc runBase(b: BaseImage; record: JsonNode; resetAt = "";
     var r = g.applyProfile(repro, "u1", st("u1"))
     step("a floored unit with a StateDirectory applies", r.exitCode == 0,
          tail(r.stdout & r.stderr))
+    if killAt.len > 0:
+      # A boot with nothing pending: the boot-hold unit's condition skips
+      # it, so it has not run this boot when the recovery below looks at
+      # it. Only the boot-only rule (§13 decision 196) then keeps the
+      # recovery from starting it; the run-once rule (decision 197) would
+      # not, since the unit has not run.
+      g.rebootGuest()
+      let bh = g.exec("systemctl show -p ExecMainExitTimestampMonotonic " &
+                      "-p ConditionResult repro-addon-boot-hold.service").stdout
+      record["bootHoldAfterReboot"] = %bh
+      step("after a boot with nothing pending the boot-hold unit has not run",
+           "ExecMainExitTimestampMonotonic=0" in bh, bh)
     # A root tree in its place, made after its last run ended: the next
     # apply's check refuses it, and so does its revert's, which holds it.
     discard g.run("systemctl stop a9r-st.service; rm -rf /var/lib/a9r-st; " &
@@ -231,7 +245,8 @@ proc runBase(b: BaseImage; record: JsonNode; resetAt = "";
       step("recover starts neither the boot-hold nor the boot-confirm unit",
            "started repro-addon-boot-hold.service" notin recOut and
            "started repro-addon-boot-confirm.service" notin recOut and
-           "left repro-addon-boot-hold.service alone" in recOut, tail(recOut))
+           "left repro-addon-boot-hold.service alone: it runs only at boot" in recOut,
+           tail(recOut))
       step("recover does not run again a run-once unit that ran this boot",
            "left a9r-once.service alone: it already ran this boot" in recOut and
            "started a9r-once.service" notin recOut, tail(recOut))

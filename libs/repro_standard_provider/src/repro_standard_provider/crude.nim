@@ -215,7 +215,7 @@ proc collectCrudeInputs*(projectRoot: string;
     result.add(entry)
   result.sort(system.cmp[string])
 
-proc crudeActionIdFor(packageName: string): string =
+proc crudeActionIdFor*(packageName: string): string =
   ## Stable action id for the crude fallback. Sanitises ``packageName``
   ## so the id remains a valid Reprobuild action id even when the
   ## convention passes a name with hyphens / dots / non-ASCII chars.

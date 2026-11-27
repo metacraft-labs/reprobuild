@@ -179,10 +179,11 @@ import repro_standard_provider/conventions/emit_cache
 import repro_standard_provider/crude
 import repro_cargo_edge/edge_cli
 import repro_standard_provider/conventions/cargo_workspace_toml
-import repro_standard_provider/conventions/observed_reads
 import repro_standard_provider/conventions/rust_plan_mode
 import repro_core/cargo_lock
-import repro_cargo_edge/plan_units
+import repro_cargo_edge/[mode_b, plan_edge, plan_units_edge, wrapper_env]
+import repro_cargo_fetch
+import repro_build_engine
 
 export rust_plan_mode.ModeARegistrySwitch
 
@@ -2881,6 +2882,15 @@ proc rustModeBTestArgv(cargoExe: string): seq[string] =
 proc rustModeBTestStamp(projectRoot, packageName: string): string =
   projectRoot / ".repro" / "build" / "cargo" / (packageName & ".test.stamp")
 
+proc rustModeBSpec(projectRoot, packageName, cargoExe: string;
+                   inputs: openArray[string]): CreatedActionSpec =
+  ## The workspace's Mode B build edge (``mode_b.modeBBuildSpec``), run by
+  ## this provider image as the thin cargo edge: the one constructor of
+  ## Mode B's build, for the static fragment and for the record a workspace
+  ## built from cargo's plan falls back to.
+  modeBBuildSpec(crudeActionIdFor(packageName), getAppFilename(), cargoExe,
+    projectRoot, packageName, inputs)
+
 proc rustCrudeFallback(projectRoot: string;
                        request: ProviderGraphRequest):
                          GraphFragment {.gcsafe.} =
@@ -2920,26 +2930,23 @@ proc rustCrudeFallback(projectRoot: string;
     # would go unbuilt while Mode A builds every member (issue
     # 2026-11-19-rust-mode-b-runs-cargo-build-without-workspace). For a
     # single package the flag selects that package, as before.
-    let cargoArgv = @[
-      cargoExe,
-      "build",
-      "--release",
-      "--locked",
-      "--offline",
-      "--workspace",
-    ]
+    #
     # The thin cargo edge (``libs/repro_cargo_edge``, Build-Engine-And-
     # Scheduler.md "Integration tiers" -> Cargo). cargo stays the build system;
     # the edge asks it, through ``--message-format=json``, which final
-    # products it made, and writes that answer to ``productsFile``, the
+    # products it made, and writes that answer to the products file, the
     # action's one declared output. ``target`` is cargo's own incremental
     # state: a tool-owned cache that is neither declared nor cleared, so an
     # edit to one crate recompiles that crate. Declaring it an output (as this
     # used to) made the engine record the whole tree, and declaring it opaque
     # would clear it before every run and recompile every unit.
-    let productsFile = projectRoot / ".repro" / "build" / "cargo" /
-      (packageName & ".products")
-    let argv = edgeCommand(getAppFilename(), productsFile, cargoArgv)
+    #
+    # The command and output are ``rustModeBSpec``'s, the constructor a
+    # workspace built from cargo's plan falls back to as well; its inputs are
+    # the crude fallback's, which ``emitCrudeFragment`` collects.
+    let modeB = rustModeBSpec(projectRoot, packageName, cargoExe, [])
+    let argv = modeB.argv
+    let productsFile = modeB.outputs[0]
     # The ``test`` target (Rust.md, "Test commands", Mode B): cargo builds
     # and runs every test target of every workspace member, as it declares
     # them (``harness = false`` included), and with ``--no-fail-fast`` runs
@@ -2965,10 +2972,6 @@ proc rustCrudeFallback(projectRoot: string;
       widthFlag = "-j",
       testArgv = testArgv,
       testStampPath = testStampFile)
-
-const RustPlanUnobservedIdentity = "rust.cargo-plan"
-  ## Names the record run in an evaluation input that stands for reads
-  ## that were not observed.
 
 type
   RustModeKind* = enum
@@ -3077,65 +3080,102 @@ proc withEvaluationInputs(fragment: GraphFragment;
 proc rustPlanFragment(projectRoot: string; request: ProviderGraphRequest;
                       project: RustProject; graph: PlanGraph;
                       tools: PlanToolchain): GraphFragment =
-  ## The fragment of a workspace built from cargo's plan: one rustc edge per
-  ## unit (``plan_units.planUnitEdges``), registry crates and members alike,
-  ## each declared as the engine action the emitter built: its argv, working
-  ## directory, ordering, outputs and scratch directories, content-checked
-  ## (``hybrid``), gathered by the automatic monitor, and launched from its
-  ## declared environment alone (the variables cargo set for the unit and
-  ## the toolchain's ``PATH``). The default target holds every edge. The
-  ## record run's
-  ## reads and the registry lift's switch are the fragment's evaluation
-  ## inputs.
+  ## The fragment of a workspace built from cargo's plan: its
+  ## graph-production edges (``rust_plan_mode``, module docstring), which
+  ## produce the plan and the unit edges while the build runs. The default
+  ## target holds them all; the units are created in it by the collector's
+  ## fragment.
   ##
   ## The ``test`` target is Mode B's (``registerCrudeTestTarget``): test
   ## targets and doctests are not taken from the plan yet, so cargo builds
   ## and runs them, as it does with the lift off.
   let pkgDef = syntheticPackage(projectRoot, project)
+  let root = absolutePath(projectRoot)
+  let packageName = project.packages[0].packageName
   let registerAll = proc() =
     discard buildPool("compile", 8'u32)
-    registerObservedReads(graph.observed, RustPlanUnobservedIdentity,
-      graph.reusable, graph.stamps)
     providerEnvironmentInput(ModeARegistrySwitch)
     providerEnvironmentInput("PATH")
-    for exe in [tools.cargo, tools.rustc, tools.cc]:
+    providerEnvironmentInput(WrapperPathEnv)
+    for name in StoreRootEvaluationVariables:
+      providerEnvironmentInput(name)
+    providerFileInput(root / "Cargo.lock")
+    for exe in [tools.cargo, tools.rustc, tools.cc, graph.wrapper]:
       if exe.len > 0: providerFileInput(exe)
     var all: seq[BuildActionDef] = @[]
-    for e in graph.edges:
-      let a = e.action
-      var env: seq[(string, string)] = @[]
-      for entry in a.env:
-        let eq = entry.find('=')
-        if eq <= 0:
-          raise newException(ValueError, "rust convention: the plan edge " &
-            a.id & " declares a malformed variable " & entry.escape())
-        env.add((entry[0 ..< eq], entry[eq + 1 .. ^1]))
-      let def = buildAction(
-        id = a.id,
-        call = inlineExecCall(a.argv, a.cwd),
-        deps = a.deps,
-        inputs = a.inputs,
-        outputs = a.outputs,
-        pool = a.pool,
-        cacheable = true,
-        commandStatsId = a.commandStatsId,
-        dependencyPolicy = automaticMonitorPolicy(),
-        actionCachePolicy = acfpHybrid,
-        env = env,
-        scratchDirs = a.scratchDirs,
-        isolateHostEnvironment = true)
-      # No target of its own per binary: a one-action target renames its
-      # edge when the graph is lowered, and these edges keep the ids the
-      # plan gives them (``cargo.rustc/<package>@<version>-<hash>``).
-      all.add(def)
+    # 1. The fetch edges, one per locked crates.io crate, executed by
+    #    `repro build` itself (`builtinCargoFetchCall`).
+    var fetchIds: seq[string]
+    for f in graph.fetches:
+      let id = crateFetchEdgeId(f.row)
+      fetchIds.add id
+      all.add buildAction(id = id,
+        call = builtinCargoFetchCall(f.row.name, f.row.version, f.row.cksum,
+          f.receipt, graph.storeRoot, CratesIoOrigin),
+        outputs = [f.receipt], cacheable = false,
+        commandStatsId = "cargo.fetch")
+    # 2. The plan edge: its one output is the plan. Ordered after the fetch
+    #    edges, which put the prefixes it serves cargo in the store; its key
+    #    comes from what the monitor records it reading.
+    let planId = cargoPlanEdgeId(graph.name)
+    var planEnv: seq[(string, string)]
+    for entry in graph.planEdge.devEnv:
+      let eq = entry.find('=')
+      planEnv.add((entry[0 ..< eq], entry[eq + 1 .. ^1]))
+    all.add buildAction(id = planId,
+      call = inlineExecCall(cargoPlanArgv(graph.planEdge), root),
+      deps = fetchIds,
+      inputs = [root / "Cargo.toml", root / "Cargo.lock"],
+      outputs = [root / PlanFileRel],
+      cacheable = true, commandStatsId = "cargo.plan",
+      dependencyPolicy = automaticMonitorPolicy(),
+      actionCachePolicy = acfpHybrid,
+      env = planEnv,
+      scratchDirs = [root / PlanScratchRel],
+      relocatable = true,
+      isolateHostEnvironment = true)
+    # 3. The record of the workspace's Mode B build edge, for the units edge
+    #    to fall back to: exactly the edge the static Mode B fragment
+    #    declares, with its inputs.
+    let modeBRecordId = "cargo.mode-b-record/" & graph.name
+    var modeB = rustModeBSpec(root, packageName, tools.cargo,
+      collectCrudeInputs(root, ["target"], ["**/*"]))
+    # A created action is not lowered, so it gets none of the `PATH` the
+    # lowering gives the static Mode B edge. It is given the `PATH` this
+    # evaluation found cargo, rustc and the C driver on (a fragment input),
+    # so cargo finds the tools, and a build script the programs, the static
+    # edge would.
+    modeB.env = @["PATH=" & getEnv("PATH")]
+    all.add writeText(ReproFs(), root / ModeBRecordRel,
+      createActionRecord(modeB) & "\n", actionId = modeBRecordId)
+    # 4. The units edge: the plan to the fragment of its edges.
+    let unitsId = planUnitsEdgeId(graph.name)
+    all.add buildAction(id = unitsId,
+      call = inlineExecCall(planUnitsArgv(graph.helper, graph.units), root),
+      deps = [planId, modeBRecordId],
+      inputs = [root / PlanFileRel, root / ModeBRecordRel],
+      outputs = [root / UnitsFragmentRel],
+      cacheable = true, commandStatsId = "cargo.plan-units",
+      dependencyPolicy = automaticMonitorPolicy(),
+      actionCachePolicy = acfpHybrid,
+      isolateHostEnvironment = true)
+    # 5. The collector: the engine creates the fragment's actions when it is
+    #    about to run, and it waits for them.
+    all.add buildAction(id = planCollectorId(graph.name),
+      call = inlineExecCall([graph.helper, PlanCollectFlag,
+        root / UnitsFragmentRel], root),
+      deps = [unitsId],
+      inputs = [root / UnitsFragmentRel],
+      dynamicDepsFile = root / UnitsFragmentRel,
+      cacheable = false, commandStatsId = "cargo.workspace")
     defaultTarget(target("default", all))
     # The ``test`` target stays Mode B's: cargo builds and runs the tests,
     # as it does with the lift off. Test targets and doctests are not taken
     # from the plan yet; cargo's test build links only rlibs it built itself,
     # never these edges' outputs, and it is not part of the default target.
-    registerCrudeTestTarget(project.packages[0].packageName, projectRoot,
+    registerCrudeTestTarget(packageName, projectRoot,
       rustModeBTestArgv(tools.cargo),
-      rustModeBTestStamp(projectRoot, project.packages[0].packageName),
+      rustModeBTestStamp(projectRoot, packageName),
       collectCrudeInputs(projectRoot, ["target"], ["**/*"]), "-j")
   buildPackageFragment(pkgDef, request, registerAll, includeDefault = false)
 
@@ -3215,23 +3255,22 @@ proc rustEmitFragment(projectRoot: string;
       return
     of rmkPlan:
       let tools = planToolchain(cargoExe, rustcExe)
-      let graph = planWorkspace(projectRoot, tools)
+      let graph = planWorkspace(projectRoot, tools, getAppFilename())
       if graph.ok:
         return rustPlanFragment(projectRoot, request, project, graph, tools)
-      # A workspace the plan's edges cannot build as a whole is built by
-      # cargo as a whole: never partly by each. What
-      # graph production read keys this decision as it would key the
-      # plan's fragment; when the record run did not run at all (no
-      # wrapper, no monitor, a crate that could not be fetched), nothing
-      # recorded stands for the decision and it is taken again next time.
+      # What evaluation alone can tell (a package from another source, no
+      # record wrapper): the workspace is built by cargo as a whole. The
+      # lock and the wrapper's location decided it, so they key it.
       var inputs = @[modeARegistrySwitchInput()]
       inputs.add toolchainEvaluationInputs(tools)
-      inputs.add observedEvaluationInputs(graph.observed, graph.stamps,
-        graph.reusable or graph.observed.files.len == 0,
-        RustPlanUnobservedIdentity)
-      if graph.observed.files.len == 0:
-        inputs.add unobservedEvaluationInput(RustPlanUnobservedIdentity &
-          ": " & graph.reason)
+      inputs.add fileReadInput(absolutePath(projectRoot) / "Cargo.lock")
+      inputs.add environmentInput(WrapperPathEnv)
+      if graph.wrapper.len == 0:
+        # A wrapper installed later beside this image is no input of the
+        # fragment, so the decision is taken again on every evaluation until
+        # it is there.
+        inputs.add unobservedEvaluationInput("rust.cargo-plan: " &
+          graph.reason)
       return withEvaluationInputs(rustCrudeFallback(projectRoot, request),
         inputs)
     of rmkModeA:
