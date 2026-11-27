@@ -2733,7 +2733,7 @@ tests/integration/t_rp5a_consumer_imports_resource_contract_no_driver.nim	nim	1
 tests/integration/t_rp5a_producer_exports_resource_contract_across_workspace.nim	nim	1
 tests/integration/t_rp5b_resource_driver_via_protocol.nim	nim	1
 tests/integration/t_rp8_lsp_typecheck_and_goto_def.nim	nim	3
-tests/integration/t_rqe_cg2_shim_is_transparent.nim	nim	8
+tests/integration/t_rqe_cg2_shim_is_transparent.nim	nim	9
 tests/integration/t_rqe_cg2_shim_records_live_set.nim	nim	4
 tests/integration/t_rqe_cg3_delegated_edge_bounded.nim	nim	1
 tests/integration/t_rqe_cg3_incremental_preserved.nim	nim	1

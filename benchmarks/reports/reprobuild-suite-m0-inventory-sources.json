@@ -59323,7 +59323,7 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_rqe_cg2_shim_is_transparent.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 8,
+      "staticCaseCount": 9,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
