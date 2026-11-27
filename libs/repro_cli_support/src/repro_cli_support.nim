@@ -45415,6 +45415,19 @@ type
     skipReason*: string         ## non-empty when the pass was skipped
     entries*: seq[TrustEntry]
 
+  UninitializedSubmodulesEntry* = object
+    ## One repository a sync driver CLONED in this run that was left with
+    ## git submodules declared in its own ``.gitmodules`` but not initialised
+    ## (CLI/sync.md § "A cloned repository's own submodules are not
+    ## initialised"). The workspace layer never initialises a member repo's
+    ## own submodules — no fragment declares them — so this entry is the
+    ## notice that keeps that from being silent: a clone that looks complete
+    ## and fails in the first build is the failure it exists to prevent.
+    path*: string
+      ## The repository's workspace-relative path, as on every other entry.
+    uninitialized*: int
+      ## How many of its submodules ``git submodule status`` marks ``-``.
+
   WorkspaceInitReport* = object
     ## Structured outcome of one ``repro workspace init`` invocation.
     ## ``project`` carries the ``ResolvedProject.projectName`` (the
@@ -45442,6 +45455,8 @@ type
     autoTrust*: TrustReport
       ## RA-12 — outcome of the post-clone shell-hook (.envrc) auto-trust
       ## pass over the workspace/host roots and each checked-out repo.
+    submodulesUninitialized*: seq[UninitializedSubmodulesEntry]
+      ## The repos this init cloned that carry uninitialised submodules.
 
   WorkspaceInitOutcome* = object
     ## Internal aggregate the dispatcher consumes to compute the exit
@@ -45449,6 +45464,33 @@ type
     ## ``divergences`` (with no clone failure) raises it to 2.
     report*: WorkspaceInitReport
     cloneFailures*: int
+
+const UninitializedSubmodulesJsonKey* = "submodulesUninitialized"
+  ## The document key CLI/sync.md § "A cloned repository's own submodules are
+  ## not initialised" names. One constant, because three documents (the
+  ## ordinary sync, the role sync and init) carry it and must agree.
+
+proc toJsonNode*(entries: openArray[UninitializedSubmodulesEntry]): JsonNode =
+  ## The ``submodulesUninitialized`` array: one ``{path, uninitialized}``
+  ## object per repository. Always an array — empty when nothing was cloned or
+  ## no clone has uninitialised submodules — so a consumer reads the field
+  ## without first asking whether this run had any.
+  result = newJArray()
+  for entry in entries:
+    result.add(%*{"path": entry.path, "uninitialized": entry.uninitialized})
+
+proc renderUninitializedSubmodulesLines*(prefix, workspaceRoot: string;
+    entries: openArray[UninitializedSubmodulesEntry]): seq[string] =
+  ## One notice line per repository, printed after the per-repo lines. It
+  ## names the repository, how many submodules are uninitialised, and the
+  ## remedy as a command that runs from any directory (an absolute ``-C``
+  ## path, shell-quoted), because the reader's next step is to paste it.
+  for entry in entries:
+    result.add(prefix & ": " & entry.path & " was cloned with " &
+      $entry.uninitialized & " uninitialised git submodule(s); repro does " &
+      "not initialise a repository's own submodules — run `git -C " &
+      quoteShell(workspaceRoot / entry.path) &
+      " submodule update --init --recursive`")
 
 proc toJsonNode*(report: WorkspaceInitReport): JsonNode =
   result = newJObject()
@@ -45527,6 +45569,8 @@ proc toJsonNode*(report: WorkspaceInitReport): JsonNode =
     trusted.add(obj)
   autoTrust["entries"] = trusted
   result["autoTrust"] = autoTrust
+  result[UninitializedSubmodulesJsonKey] =
+    report.submodulesUninitialized.toJsonNode()
 
 proc renderTrustReportLines*(prefix: string; report: TrustReport): seq[string] =
   ## RA-12 — human-readable lines for the shell-hook auto-trust pass,
@@ -45557,6 +45601,9 @@ proc renderInitTextLines*(report: WorkspaceInitReport): seq[string] =
       " expected=" & entry.expected &
       " observed=" & entry.observed)
   for line in renderTrustReportLines("workspace init", report.autoTrust):
+    result.add(line)
+  for line in renderUninitializedSubmodulesLines("workspace init",
+      report.workspaceRoot, report.submodulesUninitialized):
     result.add(line)
 
 type
@@ -45968,6 +46015,52 @@ proc gitRunPlain(identity: GitToolIdentity;
 proc gitRunPlainQuery(identity: GitToolIdentity;
                       args: openArray[string]):
     tuple[code: int; output: string; diagnostic: string]
+
+proc collectUninitializedSubmodules(identity: GitToolIdentity;
+    workspaceRoot, prefix: string; clonedPaths: openArray[string]):
+    seq[UninitializedSubmodulesEntry] =
+  ## The repos among ``clonedPaths`` (workspace-relative, each cloned by THIS
+  ## run) whose own ``.gitmodules`` declares submodules that are not
+  ## initialised. The one detector every sync driver calls after its clone
+  ## phase — the ordinary sync (and so ``enable``), the role sync and
+  ## ``init`` — so they cannot disagree about what is reported (CLI/sync.md
+  ## § "A cloned repository's own submodules are not initialised").
+  ##
+  ## Only fresh clones are passed in, on purpose: a repository that was
+  ## already on disk is not inspected, because its submodules are its owner's
+  ## state and an ordinary sync must not nag about them on every run.
+  ##
+  ## Cheap and local. Most repos have no ``.gitmodules`` and cost one stat.
+  ## For the rest, ``git submodule status`` (non-recursive) reads the
+  ## ``.gitmodules`` file, the index's gitlinks and ``.git/modules`` — no
+  ## network, no fetch, no change to the checkout. It prefixes an
+  ## uninitialised submodule's line with ``-``
+  ## (``status`` in https://git-scm.com/docs/git-submodule), which is the
+  ## count reported.
+  ##
+  ## Best-effort, like every other post-clone pass: the clone succeeded, and
+  ## a notice that cannot be computed must not fail it. A failed inspection is
+  ## said on stderr, so the gap the notice exists to close is not reopened
+  ## silently by an error.
+  for path in clonedPaths:
+    let repoAbs = workspaceRoot / path
+    if not fileExists(repoAbs / ".gitmodules"):
+      continue
+    let status = gitRunPlainQuery(identity,
+      ["-C", repoAbs, "submodule", "status"])
+    if status.code != 0:
+      stderr.writeLine(prefix & ": WARNING: could not inspect the git " &
+        "submodules of cloned '" & path & "' (" & status.diagnostic &
+        "); repro does not initialise them — check with `git -C " &
+        quoteShell(repoAbs) & " submodule status`")
+      continue
+    var uninitialized = 0
+    for line in status.output.splitLines():
+      if line.startsWith("-"):
+        inc uninitialized
+    if uninitialized > 0:
+      result.add(UninitializedSubmodulesEntry(path: path,
+        uninitialized: uninitialized))
 
 proc revParse(identity: GitToolIdentity;
               repoPath, refSpec: string): string =
@@ -47487,6 +47580,15 @@ proc executeWorkspaceInit(argsIn: WorkspaceInitArgs): WorkspaceInitOutcome =
           (if outcome.stderr.len > 0: " stderr=" & outcome.stderr else: ""))
       else:
         report.cloned.add(cloneEntries[i])
+    # CLI/sync.md § "A cloned repository's own submodules are not
+    # initialised": init's materialization clones through its own graph, not
+    # the sync executor, so it calls the shared detector itself. Only the
+    # repos this init cloned; an existing checkout is the owner's state.
+    var clonedPaths: seq[string]
+    for entry in report.cloned:
+      clonedPaths.add(entry.path)
+    report.submodulesUninitialized = collectUninitializedSubmodules(identity,
+      args.workspaceRoot, "workspace init", clonedPaths)
 
   # RA-18: materialize copyfile/linkfile directives post-checkout. Applied
   # for every repo whose working tree now exists (freshly cloned OR already
@@ -47959,6 +48061,10 @@ type
     materialized*: seq[MaterializedFileEntry]
       ## RA-18 — copyfile/linkfile dests materialized after the checkout
       ## phase (idempotent; re-applied on every sync).
+    submodulesUninitialized*: seq[UninitializedSubmodulesEntry]
+      ## The repos this run CLONED that carry uninitialised git submodules
+      ## (CLI/sync.md § "A cloned repository's own submodules are not
+      ## initialised"). A notice: it never changes ``exitCode``.
     exitCode*: int
 
   WorkspaceSyncOutcome* = object
@@ -48159,6 +48265,8 @@ proc toJsonNode*(report: WorkspaceSyncReport): JsonNode =
     obj["diagnostic"] = %entry.diagnostic
     materialized.add(obj)
   result["materialized"] = materialized
+  result[UninitializedSubmodulesJsonKey] =
+    report.submodulesUninitialized.toJsonNode()
   result["summary"] = report.summarize().toJsonNode()
   result["exitCode"] = %report.exitCode
 
@@ -48274,6 +48382,10 @@ proc renderSyncTextLines*(report: WorkspaceSyncReport;
       # RA-27 ``--verbose``: surface the raw tool diagnostic behind the flag
       # so the default output stays a legible digest.
       result.add("    | " & entry.executionDiagnostic)
+  # After the per-repo lines and before the digest, so the notice sits next
+  # to the summary an operator reads last rather than among a hundred rows.
+  result.add(renderUninitializedSubmodulesLines("workspace sync",
+    report.workspaceRoot, report.submodulesUninitialized))
   result.add(renderSyncSummaryLines(report))
 
 type
@@ -56182,6 +56294,22 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs;
         "run. The clone itself succeeded. Remedy: `repro hooks ensure --vcs " &
         remedyPathWord(args.workspaceRoot) & "`")
 
+  # CLI/sync.md § "A cloned repository's own submodules are not initialised":
+  # a clone checks out the repository and nothing nested in it, and that must
+  # not be silent. Scoped to the repos this run CLONED (and whose clone stuck:
+  # a clone that later failed its locked-revision reset is reported as the
+  # failure it is), in manifest order so the notice lines are deterministic.
+  # Placed after the reset and branch attach above, so the gitlinks inspected
+  # are the ones of the revision the checkout ends on.
+  if cloneRepoIdx.len > 0:
+    var clonedPaths: seq[string]
+    for repoIdx, repo in resolved.repos:
+      if repoIdx in cloneRepoIdx and checkoutStatus.hasKey(repoIdx) and
+          checkoutStatus[repoIdx][0] == "cloned":
+        clonedPaths.add(repo.path)
+    report.submodulesUninitialized = collectUninitializedSubmodules(identity,
+      args.workspaceRoot, "workspace sync", clonedPaths)
+
   for repoIdx, decision in planned.report.decisions:
     var status = ""
     var diagnostic = ""
@@ -56368,6 +56496,10 @@ type
       ## step a real run would take, but nothing ran, so ``headAfter`` equals
       ## ``headBefore`` and ``exitCode`` is 0.
     repos*: seq[MainlineSyncEntry]
+    submodulesUninitialized*: seq[UninitializedSubmodulesEntry]
+      ## The repos this run cloned that carry uninitialised git submodules
+      ## (CLI/sync.md § "A cloned repository's own submodules are not
+      ## initialised"). Always empty under ``--dry-run``: nothing is cloned.
     exitCode*: int
 
 proc toJsonNode*(report: MainlineSyncReport): JsonNode =
@@ -56394,6 +56526,8 @@ proc toJsonNode*(report: MainlineSyncReport): JsonNode =
     obj["diagnostic"] = %e.diagnostic
     repos.add(obj)
   result["repos"] = repos
+  result[UninitializedSubmodulesJsonKey] =
+    report.submodulesUninitialized.toJsonNode()
   result["exitCode"] = %report.exitCode
 
 proc renderMainlineSyncTextLines*(report: MainlineSyncReport;
@@ -56434,6 +56568,8 @@ proc renderMainlineSyncTextLines*(report: MainlineSyncReport;
   # §4.4: the tally names the role, always in its `--to=` spelling so a
   # shorthand and its `--to=` form print the same line. Same "(dry-run)"
   # marker the ordinary sync's summary carries.
+  result.add(renderUninitializedSubmodulesLines("workspace sync",
+    report.workspaceRoot, report.submodulesUninitialized))
   let summaryPrefix = "workspace sync --to=" & report.role &
     (if report.dryRun: " (dry-run): " else: ": ")
   result.add(summaryPrefix & parts.join(", ") &
@@ -56800,6 +56936,17 @@ proc executeMainlineSync(args: WorkspaceSyncArgs): MainlineSyncReport =
           if emitProgress:
             stderr.writeLine("workspace sync: [" & (if isRebase: "rebased" else: "merged") & "] " & repo.path)
     result.repos.add(entry)
+
+  # CLI/sync.md § "A cloned repository's own submodules are not initialised",
+  # through the same detector as the ordinary sync. Only rows that were
+  # actually cloned qualify, so a dry run (whose clone rows read
+  # `missing_checkout`) reports nothing.
+  var clonedPaths: seq[string]
+  for e in result.repos:
+    if e.outcome == "cloned":
+      clonedPaths.add(e.path)
+  result.submodulesUninitialized = collectUninitializedSubmodules(identity,
+    args.workspaceRoot, "workspace sync", clonedPaths)
 
   # CLI/sync.md §`--dry-run` with `--mainline`: "The exit code is `0` whatever
   # the verdicts: a dry run is informational, and the refusal and failure
@@ -57271,6 +57418,11 @@ type
     repos*: seq[WorkspacePullRepoEntry]
     autoTrust*: TrustReport
       ## RA-12 — outcome of the post-pull shell-hook (.envrc) auto-trust pass.
+    submodulesUninitialized*: seq[UninitializedSubmodulesEntry]
+      ## The repos this pull CLONED that carry uninitialised git submodules
+      ## (CLI/sync.md § "A cloned repository's own submodules are not
+      ## initialised"). A notice: it never changes ``exitCode``. A repo pull
+      ## converged in place is not inspected.
     exitCode*: int
 
   WorkspacePullOutcome* = object
@@ -57328,6 +57480,8 @@ proc toJsonNode*(report: WorkspacePullReport): JsonNode =
     trusted.add(obj)
   autoTrust["entries"] = trusted
   result["autoTrust"] = autoTrust
+  result[UninitializedSubmodulesJsonKey] =
+    report.submodulesUninitialized.toJsonNode()
   result["exitCode"] = %report.exitCode
 
 proc renderPullTextLines*(report: WorkspacePullReport): seq[string] =
@@ -57349,6 +57503,8 @@ proc renderPullTextLines*(report: WorkspacePullReport): seq[string] =
       "resume from the partial state")
   for line in renderTrustReportLines("workspace pull", report.autoTrust):
     result.add(line)
+  result.add(renderUninitializedSubmodulesLines("workspace pull",
+    report.workspaceRoot, report.submodulesUninitialized))
   # The digest goes LAST — after the auto-trust pass, not before it. A repo
   # failure that prints in the middle of a hundred-repo sweep and is then
   # buried under trailing "trusted shell hook" lines is a failure the operator
@@ -57859,6 +58015,20 @@ proc executeWorkspacePull(args: WorkspacePullArgs): WorkspacePullOutcome =
     entry.trackingBranch = converged.branch
     entry.headSha = converged.headSha
     report.repos.add(entry)
+
+  # CLI/sync.md § "A cloned repository's own submodules are not initialised":
+  # pull clones a missing repo through its own clone arm, so it calls the
+  # shared detector itself. Only rows that end ``cloned`` qualify — a clone
+  # whose convergence then failed is reported as the failure it is — and they
+  # are inspected after convergence, so the gitlinks counted are those of the
+  # manifest revision the checkout now sits on. A repo pull converged in place
+  # is its owner's state and is not inspected.
+  var pullClonedPaths: seq[string]
+  for entry in report.repos:
+    if entry.outcome == pullOutcomeTag(ppoCloned):
+      pullClonedPaths.add(entry.path)
+  report.submodulesUninitialized = collectUninitializedSubmodules(identity,
+    args.workspaceRoot, "workspace pull", pullClonedPaths)
 
   if anyFailure:
     report.exitCode = 1
@@ -88001,6 +88171,13 @@ type
     destinationRemedy*: string
       ## Fork form only: the command that removes what is left at the
       ## destination after a failed run. Empty when nothing is left there.
+    submodulesUninitialized*: seq[UninitializedSubmodulesEntry]
+      ## Fork form only: the member repos the fork's materialization CLONED
+      ## that carry uninitialised git submodules (CLI/sync.md § "A cloned
+      ## repository's own submodules are not initialised"). A fork whose
+      ## source had its submodules initialised gets checkouts that do not, so
+      ## this is the notice that keeps that from being silent. Never changes
+      ## ``exitCode``.
 
 proc branchOutcomeTag(outcome: BranchRepoOutcome): string =
   case outcome
@@ -88069,6 +88246,8 @@ proc toJsonNode*(report: BranchReport): JsonNode =
     result["destinationState"] = %report.destinationState
     if report.destinationRemedy.len > 0:
       result["destinationRemedy"] = %report.destinationRemedy
+    result[UninitializedSubmodulesJsonKey] =
+      report.submodulesUninitialized.toJsonNode()
 
 proc renderBranchTextLines*(report: BranchReport): seq[string] =
   if report.form == "show":
@@ -88102,6 +88281,9 @@ proc renderBranchTextLines*(report: BranchReport): seq[string] =
     elif entry.diagnostic.len > 0:
       line.add(" (" & entry.diagnostic & ")")
     result.add(line)
+  # After the per-repo lines and before the summary, as in sync's digest.
+  result.add(renderUninitializedSubmodulesLines("workspace branch",
+    report.workspaceRoot, report.submodulesUninitialized))
   if report.exitCode == 0:
     # An `--except`ed repo has no branch (CLI/branch.md §"--except"), so it is
     # counted apart rather than among the repos the branch spans.
@@ -92719,6 +92901,14 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
         "`workspace init: clone failed for …`); no branch had been created " &
         "yet"))
     return
+
+  # Init computed the submodule notice for the repos it cloned, but init's own
+  # text renderer is not what a fork prints, so carry it into the branch
+  # report (CLI/sync.md § "A cloned repository's own submodules are not
+  # initialised"). Only past the clone-failure return above: a fork that
+  # failed there may remove what it materialized, and a notice naming a
+  # checkout that no longer exists would send the reader looking for it.
+  result.submodulesUninitialized = initOutcome.report.submodulesUninitialized
 
   # For a repo absent from the SOURCE, target init is the authority for its
   # baseline. Observe the exact materialized SHA now and branch there. This is
