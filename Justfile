@@ -897,6 +897,13 @@ lint:
     # `drainStream`. Self-test first. Source scan, no compiler.
     python3 ./scripts/check_process_stream_readall.py --self-test 2>&1 | tee -a test-logs/lint.log
     python3 ./scripts/check_process_stream_readall.py 2>&1 | tee -a test-logs/lint.log
+    # Refuse importing C's `environ` from <unistd.h> outside a branch that
+    # macOS does not take: macOS's <unistd.h> does not declare it, and one
+    # such declaration in the cargo plan edge broke every macOS build of the
+    # engine. Read it through `_NSGetEnviron()` there. Self-test first.
+    # Source scan, no compiler.
+    python3 ./scripts/check_environ_import.py --self-test 2>&1 | tee -a test-logs/lint.log
+    python3 ./scripts/check_environ_import.py 2>&1 | tee -a test-logs/lint.log
     # Refuse a case-sensitive copy of the inherited environment in a file
     # that names `PATH`: Windows names are case-insensitive and the inherited
     # one is spelled `Path`, so the child gets both and the `PATH` the caller

@@ -106,6 +106,7 @@ mkdir -p "$tree/scripts/lib" "$tree/apps" "$tree/libs" "$work/bin" "$work/src"
 cp "$repo/scripts/check_nim_sources.sh" "$tree/scripts/"
 cp "$repo/scripts/source_paths.sh" "$tree/scripts/"
 cp "$repo/scripts/lib/runquota_lease_endpoint.sh" "$tree/scripts/lib/"
+cp "$repo/scripts/lib/sibling_verdicts.sh" "$tree/scripts/lib/"
 cp "$repo/scripts/test_parallelism.sh" "$tree/scripts/"
 for i in $(seq 1 12); do echo "lib$i" >>"$tree/libs/libraries.txt"; done
 for i in $(seq 1 4); do echo "app$i apps/app$i/app$i.nim --define:x" >>"$tree/apps/entrypoints.txt"; done
@@ -133,6 +134,9 @@ EOF
 # fails on a source named in $NIM_STUB_FAIL.
 cat >"$work/bin/nim" <<'EOF'
 #!/usr/bin/env bash
+# `nim dump` is the sweep's sibling judgement (scripts/lib/sibling_verdicts.sh),
+# not a check: it is answered with no verdicts and not counted.
+[ "${1:-}" = dump ] && exit 0
 state="$NIM_STUB_STATE"
 src="${*: -1}"
 {

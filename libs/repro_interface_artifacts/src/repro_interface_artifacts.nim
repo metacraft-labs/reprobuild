@@ -6031,6 +6031,11 @@ proc observeSiblingCheckout*(checkout, pin: string;
     result.dirty = status.output.strip().len > 0
   result.atOrAhead = siblingGitQuery(checkout,
     ["merge-base", "--is-ancestor", pin, "HEAD"]).code == 0
+  if not result.atOrAhead:
+    # A pin the sibling never fetched is not an ancestor either; the report
+    # then says to fetch it (`SiblingObservation.pinMissing`).
+    result.pinMissing = siblingGitQuery(checkout,
+      ["cat-file", "-e", pin]).code != 0
 
 proc staleSiblingRefusal(sdkRoot, envName, marker, checkout, pin,
     why: string): string =

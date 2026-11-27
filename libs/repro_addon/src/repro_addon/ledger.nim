@@ -585,9 +585,18 @@ proc expectedRecords*(l: Ledger): seq[ExpectedRecord] =
     of lcSysctl:
       # The fingerprint spells a key by its /proc/sys path components
       # joined with dots, whichever separator form the profile used.
-      result.add(ExpectedRecord(component: fcSysctl,
-        key: sysctlFingerprintKey(e.path),
-        value: e.value, baseValue: e.replaced))
+      # The fields the kernel sizes from memory are not in the fingerprint
+      # (``MemoryDerivedSysctlFields``), so they are not expected either.
+      let fk = sysctlFingerprintKey(e.path)
+      if not isMemoryDerivedSysctl(fk):
+        result.add(ExpectedRecord(component: fcSysctl, key: fk,
+          value: e.value, baseValue: e.replaced))
+      else:
+        let v = withoutMemoryDerived(fk, e.value.splitWhitespace().join(" "))
+        let bv = withoutMemoryDerived(fk, e.replaced.splitWhitespace().join(" "))
+        if v.keep:
+          result.add(ExpectedRecord(component: fcSysctl, key: fk, value: v.value,
+            baseValue: (if e.replaced.len == 0: "" else: bv.value)))
       for k in coupledSysctlKeys(sysctlFingerprintKey(e.path)):
         if k != sysctlFingerprintKey(e.path):
           result.add(ExpectedRecord(component: fcSysctl, key: k, value: "*",

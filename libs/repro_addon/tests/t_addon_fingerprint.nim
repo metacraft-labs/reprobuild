@@ -6,7 +6,9 @@
 ## emit), and ``collectFingerprint`` runs against a real fixture directory
 ## tree in a temporary directory with ``live = false``, which reads only
 ## files. The live components (units, sysctl, mounts, listeners) are
-## exercised end to end by the VM gates under ``tests/e2e/addon``.
+## exercised end to end by the VM gates under ``tests/e2e/addon``; the
+## memory-derived sysctl fields (``withoutMemoryDerived``) are a pure
+## function tested here.
 
 import std/[os, strutils, unittest]
 
@@ -121,6 +123,39 @@ session-4.scope loaded active running Session 4 of User root
     check isVolatileSysctl("fs.binfmt_misc.status")
     check not isVolatileSysctl("kernel.random.poolsize")
     check not isVolatileSysctl("net.ipv4.ip_forward")
+  test "memory-derived sysctl fields are dropped, the others kept":
+    # The maximum of tcp_rmem/tcp_wmem and the whole of tcp_mem/udp_mem
+    # follow the boot's free memory (MemoryDerivedSysctlFields).
+    check withoutMemoryDerived("net.ipv4.tcp_rmem", "4096 131072 14894464") ==
+      (true, "4096 131072 -")
+    check withoutMemoryDerived("net.ipv4.tcp_rmem", "4096 131072 14894496") ==
+      withoutMemoryDerived("net.ipv4.tcp_rmem", "4096 131072 14894464")
+    # A change to a field that is not memory-derived still shows.
+    check withoutMemoryDerived("net.ipv4.tcp_rmem", "8192 131072 1") !=
+      withoutMemoryDerived("net.ipv4.tcp_rmem", "4096 131072 1")
+    check withoutMemoryDerived("net.ipv4.tcp_wmem", "4096 16384 4194304") ==
+      (true, "4096 16384 -")
+    check not withoutMemoryDerived("net.ipv4.tcp_mem", "21816 29090 43632").keep
+    check not withoutMemoryDerived("net.ipv4.udp_mem", "1 2 3").keep
+    check withoutMemoryDerived("net.ipv4.ip_forward", "1") == (true, "1")
+    check not withoutMemoryDerived("kernel.threads-max", "15437").keep
+  test "devtmpfs's default size and inode count follow the boot's RAM pages":
+    # 493985 and 493983 pages of 4 KiB (MemTotal 1975940 kB and 1975932 kB):
+    # half is 246992 and 246991, the two renderings A11 measured.
+    let a = withoutDevtmpfsDefaults(
+      "rw,size=987968k,nr_inodes=246992,mode=755,inode64", 1975940, 4096)
+    let b = withoutDevtmpfsDefaults(
+      "rw,size=987964k,nr_inodes=246991,mode=755,inode64", 1975932, 4096)
+    check a == "rw,mode=755,inode64"
+    check a == b
+    # An explicit limit is kept.
+    check withoutDevtmpfsDefaults("rw,size=4096k,nr_inodes=1048576,mode=755",
+                                  1975940, 4096) ==
+      "rw,size=4096k,nr_inodes=1048576,mode=755"
+    let line = "22 30 0:5 / /dev rw,nosuid,relatime shared:2 - devtmpfs udev " &
+               "rw,size=987968k,nr_inodes=246992,mode=755,inode64"
+    check parseMountinfo(line, 1975940, 4096) ==
+      @[(key: "/dev", value: "devtmpfs udev rw,nosuid,relatime rw,mode=755,inode64")]
 
 suite "canonical text, diff and expectations":
   proc sample(): Fingerprint =

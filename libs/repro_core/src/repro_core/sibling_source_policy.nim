@@ -64,6 +64,12 @@ type
       ## the sibling carries uncommitted changes to tracked files
     atOrAhead*: bool
       ## the pin is an ancestor of (or is) HEAD
+    pinMissing*: bool
+      ## the pin is observed NOT to be a commit in the sibling's object
+      ## store: it was never fetched there. Such a sibling cannot be at or
+      ## ahead of the pin, so it is judged as any other that is not; the
+      ## field only changes what the report says, because the remedy starts
+      ## with a fetch. False when not observed.
 
   SiblingSourceKind* = enum
     sskSibling        ## compile against the sibling checkout
@@ -111,6 +117,55 @@ proc siblingPolicyFor*(envName, policyValue, pinnedValue: string):
     if item.strip() == envName:
       return spPin
   parseSiblingPolicy(policyValue)
+
+# ---------------------------------------------------------------------------
+# Judging ahead of an evaluation that cannot run git.
+#
+# `nim check` and nimsuggest evaluate `config.nims` with `gorgeEx` (and
+# `staticExec`) answering ("", 0) for every command, so the file cannot ask
+# git where a sibling stands, and every sibling reads as "cannot tell" --
+# which keeps it. A stale `../nim-cli-spec` was compiled that way by the
+# `nim check` sweep of `just lint` while `nim c` in the same shell would have
+# taken the pinned `$CLI_SPEC_SRC`, and the sweep failed on `undeclared
+# identifier` with no line naming the sibling (measured 2026-11-26).
+#
+# So a driver of such evaluations judges first, in an evaluation that CAN
+# run git (`nim dump`), and hands the verdicts on:
+#
+#   * `REPRO_SIBLING_VERDICTS_OUT=<file>` asks that evaluation to write one
+#     line per sibling it did not compile as it is (`formatSiblingVerdict`);
+#   * the driver prints each line's message once, lists every `pin` verdict
+#     in `$REPRO_SIBLING_PINNED` (so the blind evaluations take the pinned
+#     tree too), and sets `REPRO_SIBLING_JUDGED=1`, which tells every
+#     evaluation the siblings were judged and reported for it, so none
+#     repeats the report.
+#
+# A blind evaluation with neither says so itself for a sibling whose HEAD is
+# not the pin, rather than compiling it in silence.
+# ---------------------------------------------------------------------------
+
+const
+  SiblingVerdictsOutEnvVar* = "REPRO_SIBLING_VERDICTS_OUT"
+    ## A file the evaluation of `config.nims` appends its verdicts to.
+  SiblingJudgedEnvVar* = "REPRO_SIBLING_JUDGED"
+    ## `1`: the siblings of this evaluation were judged, and reported, by
+    ## the caller, which evaluated `config.nims` where git runs.
+
+type SiblingVerdictKind* = enum
+  svkPin = "pin"
+    ## the pinned tree `$<PKG>_SRC` names replaces the sibling
+  svkStale = "stale"
+    ## the stale sibling is compiled, because no pinned tree is named
+
+proc formatSiblingVerdict*(kind: SiblingVerdictKind;
+    envName, message: string): string =
+  ## One verdict line: `<kind>\t<envName>\t<message>\n`, the message on
+  ## one line (tabs and line breaks become spaces) so a shell reader can
+  ## split it with `IFS=$'\t' read -r`.
+  var flat = newStringOfCap(message.len)
+  for c in message:
+    flat.add(if c in {'\t', '\n', '\r'}: ' ' else: c)
+  $kind & "\t" & envName & "\t" & flat & "\n"
 
 # ---------------------------------------------------------------------------
 # flake.lock: the pins the development shell exports.
@@ -448,7 +503,8 @@ proc pinnedSiblingRevisionIn*(lockText: string;
         return line[at + sep.len .. ^1].strip()
   ""
 
-proc shortRevision(rev: string): string =
+proc shortRevision*(rev: string): string =
+  ## The first twelve characters of a revision, as every report prints it.
   if rev.len > 12: rev[0 ..< 12] else: rev
 
 proc siblingIsStale(obs: SiblingObservation): bool =
@@ -460,6 +516,11 @@ proc siblingIsStale(obs: SiblingObservation): bool =
     not obs.dirty and not obs.atOrAhead
 
 proc staleReason(obs: SiblingObservation): string =
+  if obs.pinMissing:
+    return "the sibling is at " & shortRevision(obs.headRev) &
+      " and lacks the revision " & shortRevision(obs.pin) &
+      " this repository pins, which was never fetched into it: fetch it " &
+      "first; it carries no local changes"
   "the sibling is at " & shortRevision(obs.headRev) & ", which is not at " &
     "or ahead of the revision " & shortRevision(obs.pin) &
     " this repository pins, and carries no local changes"

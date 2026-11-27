@@ -118,6 +118,36 @@ proc writePlanWorkspace*(root: string; mode: ScriptMode; registry = false) =
     "use proc_macro::TokenStream;\n#[proc_macro]\n" &
     "pub fn answer(_: TokenStream) -> TokenStream { \"42\".parse().unwrap() }\n")
 
+proc writeRegistryWorkspace*(root: string) =
+  ## A two-package workspace whose members declare no feature, have no
+  ## build script and no proc-macro, and depend on crates.io crates
+  ## (`setupRegistry` with `withRegmid`): the shape Rust.md § Recognition
+  ## item 6's registry lift brings into Mode A.
+  ##
+  ##   - `util`: a library and a binary of the same package, depending on
+  ##     the crates.io crate `regleaf`;
+  ##   - `app`: a binary depending on `util` (a path member) and on the
+  ##     crates.io crate `regmid` (default features: `fast`), which itself
+  ##     depends on `regleaf`.
+  ##
+  ## `app` prints `util:5 51` and `util` prints `util:5`. The project file
+  ## names `rust` in `uses:`, as the Rust convention recognises it.
+  writeFileIn(root, "reprobuild.nim", "import repro_project_dsl\n" &
+    "package app:\n  uses:\n    \"rust >=1.80\"\n")
+  writeFileIn(root, "Cargo.toml",
+    "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n" &
+    "[dependencies]\nutil = { path = \"util\" }\nregmid = \"0.1.0\"\n\n" &
+    "[workspace]\nmembers = [\"util\"]\n")
+  writeFileIn(root, "src/main.rs",
+    "fn main() { println!(\"{} {}\", util::tag(), regmid::mid()); }\n")
+  writeFileIn(root, "util/Cargo.toml",
+    "[package]\nname = \"util\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n" &
+    "[dependencies]\nregleaf = \"0.1.0\"\n")
+  writeFileIn(root, "util/src/lib.rs",
+    "pub fn tag() -> String { format!(\"util:{}\", regleaf::leaf()) }\n")
+  writeFileIn(root, "util/src/main.rs",
+    "fn main() { println!(\"{}\", util::tag()); }\n")
+
 proc writeFeatureWorkspace*(root: string) =
   ## A three-package workspace with no build script and no proc-macro, whose
   ## members declare features, so that every unit cargo plans is a library
@@ -331,20 +361,34 @@ proc packRegistryCrates(work: string;
     result[name] = readFile(work / "packager-target" / "package" /
       (name & "-0.1.0.crate"))
 
-proc setupRegistry*(work: string; mode: ScriptMode): RegistrySetup =
+proc setupRegistry*(work: string; mode: ScriptMode;
+                    withRegmid = false): RegistrySetup =
   ## Two crates.io crates in a fresh store root under `work`: `regleaf`, a
   ## plain library, and `regbs`, which has a build script and depends on
   ## `regleaf`, so the plan has a registry unit, a registry build script and
-  ## a registry run.
-  let packed = packRegistryCrates(work / "pack", @[
+  ## a registry run. With `withRegmid`, a third: `regmid`, a library with
+  ## features (`default = ["fast"]`, `fast`, `slow`) that depends on
+  ## `regleaf`, so a registry crate has a registry dependency and features
+  ## that only cargo's resolution settles.
+  var packages = @[
     ("regleaf", "", @[("src/lib.rs", "pub fn leaf() -> u32 { 5 }\n")]),
     ("regbs", "\n[dependencies]\nregleaf = { path = \"../regleaf\", " &
         "version = \"0.1.0\" }\n",
       @[("src/lib.rs", "pub fn bs() -> u32 { regleaf::leaf() }\n"),
-        ("build.rs", buildScript("regbs", mode))])])
+        ("build.rs", buildScript("regbs", mode))])]
+  if withRegmid:
+    packages.add ("regmid", "\n[features]\ndefault = [\"fast\"]\n" &
+        "fast = []\nslow = []\n\n[dependencies]\nregleaf = { path = " &
+        "\"../regleaf\", version = \"0.1.0\" }\n",
+      @[("src/lib.rs", "pub fn mid() -> u32 {\n" &
+        "    regleaf::leaf() * 10 + if cfg!(feature = \"fast\") { 1 } " &
+        "else { 0 }\n}\n")])
+  let packed = packRegistryCrates(work / "pack", packages)
   let mirror = work / "mirror"
   var rows: seq[CrateRow]
-  for name in ["regleaf", "regbs"]:
+  var names = @["regleaf", "regbs"]
+  if withRegmid: names.add "regmid"
+  for name in names:
     let bytes = packed[name]
     let row = CrateRow(name: name, version: "0.1.0",
       cksum: toLowerAscii($sha256.digest(bytes)))

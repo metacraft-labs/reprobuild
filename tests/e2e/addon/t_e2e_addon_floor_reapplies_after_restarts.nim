@@ -231,6 +231,16 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     proc notPending(after: string) =
       let p = g.exec("test -e " & Pending & " && cat " & Pending & "; true").stdout
       step("after " & after & ", no switch is pending", p.strip().len == 0, p)
+    proc firstUnitShows(show: string; props: openArray[string]): bool =
+      ## Whether the first unit of a ``systemctl show`` of several units,
+      ## its lines joined by spaces (units apart by an empty line, so two
+      ## spaces), carries every one of ``props``. The order of the
+      ## properties is systemd's: 255 prints ``Result`` before
+      ## ``ActiveState``, 259 (Ubuntu 26.04) the other way round.
+      let first = show.split("  ")[0].splitWhitespace()
+      for p in props:
+        if p notin first: return false
+      true
     proc evidence(path, unit: string): string =
       g.exec("stat -c '%n %i %.9W' " & path & "; systemctl show " &
              "--timestamp=us+utc -p InvocationID -p InactiveExitTimestamp " &
@@ -333,7 +343,7 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
            "could not be rolled back" notin out4 and
            "Job failed" notin out4 and
            after4.count("ActiveState=active") == 2 and
-           after4.startsWith("Result=success ActiveState=active"),
+           firstUnitShows(after4, ["Result=success", "ActiveState=active"]),
            out4 & "\nbefore: " & before4 & "\nafter: " & after4)
       notPending("the refused switch with the socket's service running" & tag)
       r = g.applyProfile(repro, "c-" & $n, control)
@@ -929,11 +939,15 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     # The directory's identity as the add-on records it: st_dev as
     # major << 32 | minor (statx), the inode, the birth time in ns.
     proc toIdentity(): seq[string] =
-      let f = g.exec("stat -c '%Hd %Ld %i %.9W' " & ToDir).stdout.strip().splitWhitespace()
+      # The birth time in whole seconds (``%W``): Ubuntu 26.04's ``stat``
+      # is uutils coreutils, which ignores a precision (``%.9W`` prints the
+      # seconds alone), and GNU find there reports no birth time at all
+      # (``%B@`` is -1). The record keeps nanoseconds; the step compares
+      # its seconds.
+      let f = g.exec("stat -c '%Hd %Ld %i %W' " & ToDir).stdout.strip().splitWhitespace()
       if f.len != 4: return @[]
       try:
-        @[$((parseBiggestUInt(f[0]) shl 32) or parseBiggestUInt(f[1])), f[2],
-          f[3].replace(".", "").strip(chars = {'0'}, trailing = false)]
+        @[$((parseBiggestUInt(f[0]) shl 32) or parseBiggestUInt(f[1])), f[2], f[3]]
       except ValueError: @[]
     # The ``recreated-accepted`` audit records for the directory, over every
     # generation's apply log: its resourceAddress and outcome are adjacent,
@@ -978,7 +992,8 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     if r.exitCode == 0:
       step("the record names the instance, with the directory's new identity",
            e3.len == 6 and e3[1] == "a9r-to@1.service" and id5.len == 3 and
-           e3[2 .. 4] == id5,
+           e3[2 .. 3] == id5[0 .. 1] and e3[4].len > 9 and
+           e3[4][0 ..< e3[4].len - 9] == id5[2],
            e3.join(" | ") & " / " & id5.join(" ") & "\n" & after5)
     else:
       step("the refused apply left the record as it was", after5 == before5,
@@ -999,9 +1014,11 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
       step("a floored unit with a CacheDirectory on it applies", r.exitCode == 0,
            r.stdout & r.stderr)
       # Remade until the kernel hands the same number back, with a new birth.
-      let swap = g.exec("systemctl stop a9r-c.service; b=$(stat -c '%i %.9W' /var/cache/a9r-c); " &
-        "echo before $b; for i in $(seq 1 20); do rm -rf /var/cache/a9r-c; " &
-        "mkdir /var/cache/a9r-c; n=$(stat -c '%i %.9W' /var/cache/a9r-c); " &
+      # Birth times in whole seconds (``%W``; see ``toIdentity``), so the
+      # remade directory is born at least a second later.
+      let swap = g.exec("systemctl stop a9r-c.service; b=$(stat -c '%i %W' /var/cache/a9r-c); " &
+        "echo before $b; sleep 1.1; for i in $(seq 1 20); do rm -rf /var/cache/a9r-c; " &
+        "mkdir /var/cache/a9r-c; n=$(stat -c '%i %W' /var/cache/a9r-c); " &
         "[ \"${n%% *}\" = \"${b%% *}\" ] && break; done; echo after $n")
       record["inodeReuse"] = %swap.stdout
       let lines = swap.stdout.strip().splitLines()

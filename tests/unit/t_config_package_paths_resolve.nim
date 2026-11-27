@@ -354,6 +354,13 @@ suite "config.nims resolves every package it declares":
     let bare = createTempDir("repro-pkg-path-", "-bare")
     try:
       copyFile(root / "config.nims", bare / "config.nims")
+      # The one module `config.nims` imports, at the path it imports it from
+      # (relative to the file, before any `--path` exists). Without it the
+      # evaluation stops at that import, and nothing below is tested.
+      let policy = "libs" / "repro_core" / "src" / "repro_core" /
+        "sibling_source_policy.nim"
+      createDir(parentDir(bare / policy))
+      copyFile(root / policy, bare / policy)
       var cleared: seq[(string, string)] = @[]
       for decl in declaredPackages:
         cleared.add (decl.envName, "")

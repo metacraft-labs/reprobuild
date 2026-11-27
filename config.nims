@@ -759,11 +759,19 @@ proc siblingGit(sibling: string; args: string): tuple[output: string; exitCode: 
     putEnv(name, value)
 
 proc observeSibling(sibling: string; envPinPresent: bool;
-    policy: SiblingPolicy): SiblingObservation =
+    policy: SiblingPolicy; blind: var bool): SiblingObservation =
   ## What `chooseSiblingSource` needs to know about `sibling`, by the three
   ## git questions the engine's `observeSiblingCheckout` asks. Asked only
   ## when the answer can matter: never under `sibling`, and only when there
   ## is a pin to compare with.
+  ##
+  ## ``blind`` is set when this evaluation cannot run git at all: `nim
+  ## check` and nimsuggest answer every `gorgeEx` with ("", 0), and a `git
+  ## rev-parse HEAD` that succeeds with no output is that answer, never
+  ## git's. The observation is then "cannot tell", which keeps the sibling;
+  ## the caller says so (`noteUnjudgedSibling`) unless the siblings were
+  ## judged for it (`SiblingJudgedEnvVar`).
+  blind = false
   result = SiblingObservation(siblingPresent: true,
     envPinPresent: envPinPresent)
   if policy == spSibling:
@@ -772,9 +780,10 @@ proc observeSibling(sibling: string; envPinPresent: bool;
   if result.pin.len == 0:
     return
   let head = siblingGit(sibling, "rev-parse HEAD")
+  if head.exitCode == 0 and head.output.strip().len == 0:
+    blind = true
+    return
   let dirty = siblingGit(sibling, "status --porcelain --untracked-files=no")
-  # `nim check` (and nimsuggest) do not run `gorgeEx`: it answers
-  # ("", 0) there, which reads as "cannot tell" and keeps the sibling.
   if head.exitCode == 0:
     result.headRev = head.output.strip()
   if dirty.exitCode == 0:
@@ -783,6 +792,111 @@ proc observeSibling(sibling: string; envPinPresent: bool;
   if result.headRev.len >= 12:
     result.atOrAhead = siblingGit(sibling,
       "merge-base --is-ancestor " & result.pin & " HEAD").exitCode == 0
+    if not result.atOrAhead:
+      # Not `<pin>^{commit}`: `^` is cmd.exe's escape character.
+      result.pinMissing = siblingGit(sibling,
+        "cat-file -e " & result.pin).exitCode != 0
+
+proc siblingHeadFromFiles(sibling: string): string =
+  ## The sibling's HEAD read from its files, for an evaluation that cannot
+  ## run git. Covers a `.git` directory, a `.git` file naming the real one
+  ## (`gitdir:`, a linked worktree or a submodule), a detached HEAD, a loose
+  ## ref, a ref in the common directory of a linked worktree, and
+  ## `packed-refs` -- the layout gitrepository-layout(5) documents
+  ## (https://git-scm.com/docs/gitrepository-layout). "" for anything else
+  ## (a reftable repository among them).
+  let checkout = repoPath(siblingCheckout(sibling))
+  var gitDir = checkout / ".git"
+  if fileExists(gitDir):
+    let text = readFile(gitDir).strip()
+    if not text.startsWith("gitdir:"):
+      return ""
+    gitDir = text["gitdir:".len .. ^1].strip()
+    if not gitDir.isAbsolute:
+      gitDir = checkout / gitDir
+  if not fileExists(gitDir / "HEAD"):
+    return ""
+  let head = readFile(gitDir / "HEAD").strip()
+  if not head.startsWith("ref:"):
+    return head
+  let refName = head["ref:".len .. ^1].strip()
+  var commonDir = gitDir
+  if fileExists(gitDir / "commondir"):
+    let common = readFile(gitDir / "commondir").strip()
+    commonDir = if common.isAbsolute: common else: gitDir / common
+  for dir in [gitDir, commonDir]:
+    if fileExists(dir / refName):
+      return readFile(dir / refName).strip()
+  if fileExists(commonDir / "packed-refs"):
+    for line in readFile(commonDir / "packed-refs").splitLines():
+      let fields = line.strip().split(' ')
+      if fields.len == 2 and fields[1] == refName:
+        return fields[0]
+  ""
+
+proc siblingsJudgedByCaller(): bool =
+  ## The caller evaluated this file where git runs, printed its verdicts and
+  ## handed the `pin` ones on in `$REPRO_SIBLING_PINNED`
+  ## (`scripts/check_nim_sources.sh`): this evaluation repeats none of it.
+  getEnv(SiblingJudgedEnvVar) == "1"
+
+proc recordSiblingVerdict(kind: SiblingVerdictKind; envName, message: string) =
+  ## Appends a verdict for the caller that asked for them
+  ## (`$REPRO_SIBLING_VERDICTS_OUT`, `formatSiblingVerdict`).
+  let path = getEnv(SiblingVerdictsOutEnvVar)
+  if path.len == 0:
+    return
+  let previous = if fileExists(path): readFile(path) else: ""
+  writeFile(path, previous & formatSiblingVerdict(kind, envName, message))
+
+proc reportSiblingVerdict(kind: SiblingVerdictKind; envName, message: string) =
+  ## Says a sibling was not compiled as it is, here, and hands the verdict
+  ## to a caller that asked for it.
+  if not siblingsJudgedByCaller():
+    echo message
+  recordSiblingVerdict(kind, envName, message)
+
+proc noteUnjudgedSibling(sibling, envName: string; obs: SiblingObservation) =
+  ## An evaluation that cannot run git compiles against `sibling` without
+  ## judging it (`observeSibling`), and says so, unless the caller judged
+  ## it or the sibling's HEAD, read from its files, is the pin itself.
+  ## Without this, `nim check` compiled a stale sibling the `nim c` of the
+  ## same shell would have replaced with the pin, and failed on `undeclared
+  ## identifier` with nothing naming the sibling.
+  if siblingsJudgedByCaller() or obs.pin.len == 0:
+    return
+  let head = siblingHeadFromFiles(sibling)
+  if head.len >= 12 and (head.startsWith(obs.pin) or obs.pin.startsWith(head)):
+    return
+  echo "config.nims: compiling against the sibling " & sibling &
+    (if head.len > 0: " (at " & shortRevision(head) & ")" else: "") &
+    " without judging it against the revision " & shortRevision(obs.pin) &
+    " this repository pins: this evaluation (`nim check`, nimsuggest) " &
+    "cannot run git, so it cannot tell a stale sibling from one ahead of " &
+    "the pin, and `nim c` may compile a different tree. " &
+    "scripts/check_nim_sources.sh (`just lint`) judges the siblings before " &
+    "its sweep; `nim dump` here prints the verdict; " & SiblingPolicyEnvVar &
+    "=pin (with " & envName & " naming a tree of the pin) or =sibling " &
+    "decides it"
+
+proc judgeFallbackSibling(sibling, envName: string) =
+  ## A `$<PKG>_SRC`-first package that falls back to its workspace sibling
+  ## (io-mon, nim-stackable-hooks) keeps that order, but the sibling it
+  ## lands on is judged against the pin as a sibling-first package's is
+  ## (`chooseSiblingSource`; Unified-Locking-And-Hooks.md §13.5), and a
+  ## stale one is said.
+  let policy = parseSiblingPolicy(getEnv(SiblingPolicyEnvVar))
+  var blind = false
+  let obs = observeSibling(sibling, envPinPresent = false, policy, blind)
+  let choice = chooseSiblingSource(policy, obs)
+  if choice.kind == sskStaleSibling:
+    reportSiblingVerdict(svkStale, envName,
+      "config.nims: compiling against the sibling " & sibling & " (" &
+        choice.why & "), because $" & envName & " names no pinned tree; " &
+        "check the sibling out at the pin, or set " & envName & " to a " &
+        "tree of it (the development shell exports it)")
+  elif blind:
+    noteUnjudgedSibling(sibling, envName, obs)
 
 # Incremental-Test-Runner M7: reprobuild's build engine consumes the shared
 # ``io-mon`` filesystem-monitoring library instead of its own former
@@ -820,14 +934,7 @@ let ioMonSrc = block:
     ".." / "io-mon" / "src"
 if repoFileExists(ioMonSrc / "io_mon.nim"):
   if ioMonSrc == ".." / "io-mon" / "src":
-    let policy = parseSiblingPolicy(getEnv(SiblingPolicyEnvVar))
-    let choice = chooseSiblingSource(policy,
-      observeSibling(ioMonSrc, envPinPresent = false, policy))
-    if choice.kind == sskStaleSibling:
-      echo "config.nims: compiling against the sibling " & ioMonSrc & " (" &
-        choice.why & "), because $IO_MON_SRC names no pinned tree; " &
-        "check the sibling out at the pin, or set IO_MON_SRC to a tree " &
-        "of it (the development shell exports it)"
+    judgeFallbackSibling(ioMonSrc, "IO_MON_SRC")
   switch("path", repoPath(ioMonSrc))
 
 proc nixDevShellSourcePath(envName, marker: string): string =
@@ -1020,7 +1127,15 @@ addPackagePath("STINT_SRC", [
 # sibling (``io_mon/shim`` + ``io_mon/hooks``), but reprobuild's monitor
 # TESTS still compile io-mon's hooks runtime, which imports ``stackable_hooks``
 # — so the framework path is still resolved here. Prefer an explicit
-# STACKABLE_HOOKS_SRC, then the sibling-repo checkout.
+# STACKABLE_HOOKS_SRC, then the sibling-repo checkout, which is judged
+# against the pin when it is what this file falls to, as io-mon's is.
+block:
+  let stackableHooksSibling = ".." / "nim-stackable-hooks" / "src"
+  let fromEnv = getEnv("STACKABLE_HOOKS_SRC")
+  if not (fromEnv.len > 0 and
+      repoFileExists(fromEnv / "stackable_hooks.nim")) and
+      repoFileExists(stackableHooksSibling / "stackable_hooks.nim"):
+    judgeFallbackSibling(stackableHooksSibling, "STACKABLE_HOOKS_SRC")
 addPackagePath("STACKABLE_HOOKS_SRC", [
   ".." / "nim-stackable-hooks" / "src",
 ], "stackable_hooks.nim")
@@ -1056,7 +1171,11 @@ proc addSiblingFirstPackagePath(sibling, envName, marker: string) =
   ##
   ## So: sibling at/ahead-of/dirty-against the pin -> sibling (the developer's
   ## intent); sibling behind the pin while an env pin is set -> the env pin,
-  ## announced; no pin known or no git -> sibling, as before.
+  ## announced; no pin known or no git -> sibling, as before. An evaluation
+  ## that cannot run git at all (`nim check`, nimsuggest) follows the
+  ## verdicts its caller judged for it (`$REPRO_SIBLING_PINNED`,
+  ## `$REPRO_SIBLING_JUDGED`), and otherwise says it could not judge
+  ## (`noteUnjudgedSibling`).
   ## `REPRO_SIBLING_POLICY=sibling|pin` forces either choice.
   ##
   ## The DECISION is `chooseSiblingSource`, shared with the engine's recipe
@@ -1070,25 +1189,30 @@ proc addSiblingFirstPackagePath(sibling, envName, marker: string) =
       normalizedPath(repoPath(envPath)) != normalizedPath(repoPath(sibling))
     let policy = siblingPolicyFor(envName, getEnv(SiblingPolicyEnvVar),
       getEnv(SiblingPinnedPackagesEnvVar))
-    let choice = chooseSiblingSource(policy,
-      observeSibling(sibling, envPinPresent, policy))
+    var blind = false
+    let obs = observeSibling(sibling, envPinPresent, policy, blind)
+    let choice = chooseSiblingSource(policy, obs)
     case choice.kind
     of sskEnvPin:
-      echo "config.nims: using $" & envName & "=" & envPath &
-        " instead of the sibling " & sibling & " (" & choice.why &
-        "); set REPRO_SIBLING_POLICY=sibling to force the sibling"
+      reportSiblingVerdict(svkPin, envName,
+        "config.nims: using $" & envName & "=" & envPath &
+          " instead of the sibling " & sibling & " (" & choice.why &
+          "); set REPRO_SIBLING_POLICY=sibling to force the sibling")
       switch("path", repoPath(envPath))
     of sskStaleSibling:
       # Compiled against all the same: this file never stops a compile (see
       # `reportUnresolvedPackagePath`). The engine's recipe compiles refuse in
       # this state; here it is said, so a compile error that follows has its
       # explanation above it.
-      echo "config.nims: compiling against the sibling " & sibling & " (" &
-        choice.why & "), because $" & envName & " names no pinned tree; " &
-        "check the sibling out at the pin, or set " & envName &
-        " to a tree of it (the development shell exports it)"
+      reportSiblingVerdict(svkStale, envName,
+        "config.nims: compiling against the sibling " & sibling & " (" &
+          choice.why & "), because $" & envName & " names no pinned tree; " &
+          "check the sibling out at the pin, or set " & envName &
+          " to a tree of it (the development shell exports it)")
       switch("path", repoPath(sibling))
     of sskSibling, sskAbsent:
+      if blind:
+        noteUnjudgedSibling(sibling, envName, obs)
       # Anchored as in `addPackagePath`: the probe above tested this path.
       switch("path", repoPath(sibling))
     return
