@@ -244,10 +244,22 @@ clear_set_aside_build() {
 bearssl_src="$(resolve_bearssl_src)"
 export BEARSSL_SRC="${bearssl_src}"
 
-# Nix supplies the per-build worker request; Nim's zero default otherwise
-# expands to the host-online CPU count, independently of a caller's quota.
-# Keep zero/automatic behavior when the request is absent outside Nix.
-nim_mode_flags=(--parallelBuild:"${NIX_BUILD_CORES:-0}")
+# The C-compile width of every `nim c` below. scripts/lib/build_width.sh
+# resolves it (REPRO_BUILD_JOBS, then a RunQuota grant, then NIX_BUILD_CORES
+# in a real Nix build only, then a conservative default) and says why; it is
+# printed here so the log shows the width the build ran at. NIX_BUILD_CORES
+# is not read inside `nix develop`: there it is the shell's, derived from the
+# Nix `cores` setting (the CPU count when that is 0), and it replaced the
+# value the caller exported. Only a real Nix build may still ask for Nim's
+# automatic width (one C compiler per core) by passing 0.
+# shellcheck source=scripts/lib/build_width.sh
+source scripts/lib/build_width.sh
+# No arguments: the default measures this host. (Not the script's "$@".)
+# shellcheck disable=SC2119
+build_width_resolved="$(repro_build_width)"
+build_width="${build_width_resolved%% *}"
+echo "build_apps: C-compile width --parallelBuild:${build_width} (from ${build_width_resolved#* }; set REPRO_BUILD_JOBS to change it)"
+nim_mode_flags=(--parallelBuild:"${build_width}")
 
 # The source revision the images are built from, embedded as
 # `ReprobuildSourceRevision` (libs/repro_core/src/repro_core.nim) so a binary

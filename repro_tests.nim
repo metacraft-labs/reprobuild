@@ -39953,6 +39953,7 @@ const pythonTestPaths*: seq[string] = @[
   "tests/unit/test_addon_a13_classify.py",
   "tests/unit/test_attestation_collateral_monitor_landing.py",
   "tests/unit/test_bootstrap_dry_run_outputs.py",
+  "tests/unit/test_build_apps_width.py",
   "tests/unit/test_build_report_attribution.py",
   "tests/unit/test_bump_version.py",
   "tests/unit/test_check_private_pm_references.py",

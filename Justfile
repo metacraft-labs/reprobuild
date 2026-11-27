@@ -5,9 +5,20 @@ REPOMIX_OUT_DIR := env('REPOMIX_OUT_DIR', 'repomix')
 default:
     just lint
 
+# Each `nim c` runs at most N C compilers (`--parallelBuild:N`). N is
+# REPRO_BUILD_JOBS when set, else a RunQuota grant, else NIX_BUILD_CORES in a
+# real Nix build only (the dev shell overwrites that variable with its own),
+# else min(cores / 2, GiB available, 8). The first line of the log says which:
+# scripts/lib/build_width.sh. `REPRO_BUILD_JOBS=4 just build` lowers it.
 build:
     mkdir -p test-logs
     bash ./scripts/build_apps.sh 2>&1 | tee test-logs/build.log
+
+# scripts/build_apps.sh's own control flow -- artifact accounting, the
+# verdict line, and the C-compile width each `nim c` receives -- driven in
+# throwaway sandboxes against a fake `nim`. About half a minute; no toolchain.
+test-build-apps-script:
+    bash ./tests/unit/t_build_apps_reports_failure.sh
 
 # Bootstrap-And-Self-Build B5: materialise the host's ./build/bin/repro
 # artefact from nim when it is not already on disk, of this platform's
