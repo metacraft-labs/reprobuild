@@ -1974,6 +1974,14 @@ const
                           # recovery starts a unit a revert holds and
                           # reports it started.
                           "recovery-starts-held-units",
+                          # recovery starts the units that run only at
+                          # boot (the boot-hold and boot-confirm units)
+                          # at run time (§13 decision 196).
+                          "recovery-starts-boot-only-units",
+                          # recovery starts again a run-once oneshot unit
+                          # that already succeeded this boot (§13
+                          # decision 197).
+                          "recovery-reruns-run-once-units",
                           # a passing switch that clears a revert hold
                           # removes its directory whenever it is left
                           # empty, an operator's too.

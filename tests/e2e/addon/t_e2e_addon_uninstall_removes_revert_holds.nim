@@ -39,7 +39,13 @@
 ## and 4 hold as in the first test. Uninstall's own claim of holds no
 ## ledger names (``unledgeredRevertHolds``) is not reachable through
 ## uninstall while step 0 refuses the host that would have them, and is
-## covered by ``t_addon_revert_hold_ledger``.
+## covered by ``t_addon_revert_hold_ledger``. The recovery leaves the
+## boot-hold and boot-confirm units alone: they run only at boot (§13
+## decision 196; falsifier ``recovery-starts-boot-only-units``, red on the
+## third test), and it does not run again the profile's run-once unit
+## (``a9r-once.service``, ``Type=oneshot`` without ``RemainAfterExit=``),
+## which ran this boot (§13 decision 197; falsifier
+## ``recovery-reruns-run-once-units``, red on the third test).
 ##
 ## The revert makes the directory under a staging name and renames it into
 ## place, recording each step first, so an operator's directory made at
@@ -157,9 +163,17 @@ proc runBase(b: BaseImage; record: JsonNode; resetAt = "";
     if not g.bootstrapAddon(repro, step): return fails
     let binary = g.run("ls -d /repro/store/prefixes/repro-addon/*/bin/repro " &
                        "| head -1").strip()
+    # The killed-revert case also carries a run-once unit (Type=oneshot
+    # without RemainAfterExit=): it has run this boot, so the recovery must
+    # not run it again (§13 decision 197).
+    let once = if killAt.len == 0: "" else:
+      "systemd.systemUnit {\n  name = \"a9r-once.service\"\n  content = \"[Unit]\n" &
+      "Description=run once\n\n[Service]\nType=oneshot\nExecStart=" & binary &
+      " --version\n\n[Install]\nWantedBy=multi-user.target\n\"\n  enabled = true\n}\n"
     let st = proc (d: string): string =
       Head & unitResource("a9r-control.service", "", binary, d) &
-        unitResource("a9r-st.service", "User=a9e\nStateDirectory=a9r-st\n", binary, d)
+        unitResource("a9r-st.service", "User=a9e\nStateDirectory=a9r-st\n", binary, d) &
+        once
     var r = g.applyProfile(repro, "u1", st("u1"))
     step("a floored unit with a StateDirectory applies", r.exitCode == 0,
          tail(r.stdout & r.stderr))
@@ -212,6 +226,15 @@ proc runBase(b: BaseImage; record: JsonNode; resetAt = "";
       step("recover replays the revert to its commit, nothing pending",
            rec.exitCode == 0 and g.exec("test -e " & Pending).exitCode != 0,
            tail(rec.stdout & rec.stderr))
+      # §13 decision 196: the boot-only units are never started at run time.
+      let recOut = rec.stdout & rec.stderr
+      step("recover starts neither the boot-hold nor the boot-confirm unit",
+           "started repro-addon-boot-hold.service" notin recOut and
+           "started repro-addon-boot-confirm.service" notin recOut and
+           "left repro-addon-boot-hold.service alone" in recOut, tail(recOut))
+      step("recover does not run again a run-once unit that ran this boot",
+           "left a9r-once.service alone: it already ran this boot" in recOut and
+           "started a9r-once.service" notin recOut, tail(recOut))
     elif resetAt.len == 0:
       r = g.applyProfile(repro, "u2", st("u2"))
       let out2 = r.stdout & r.stderr
