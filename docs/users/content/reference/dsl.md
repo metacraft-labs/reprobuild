@@ -684,9 +684,9 @@ write each other's files.
 #### In the packages the packaging layer builds
 
 The packaging producers (`debPackage`, `rpmPackage`, `archPackage`,
-`tarballPackage`, `appImagePackage` and `installedPrefix`) install these
-scripts on their own, for every executable component built by such a
-compile; the recipe declares nothing for them. The scripts are named after,
+`tarballPackage`, `appImagePackage`, `installedPrefix`, `msiPackage` and
+`scoopPackage`) install these scripts on their own, for every executable
+component built by such a compile; the recipe declares nothing for them. The scripts are named after,
 and complete, the name the package installs the executable under. `<p>`
 below is that name:
 
@@ -699,10 +699,32 @@ below is that name:
 
 The native packages use the system directories whatever the distribution's
 prefix, because those are where the distribution's shells look. No Linux
-format carries the PowerShell script. A package built for another machine
-gets the same files, since the program is never run. To ship none, set
-`omitShellCompletion = true` on the `Distribution` (or on the
-`InstalledPrefixSpec`).
+format carries the PowerShell script.
+
+A package for Windows (a `Distribution` whose `targetOs` is `toWindows`)
+carries the PowerShell script alone, at `share\<p>\completions\<p>.ps1`
+under its prefix. PowerShell loads no completion file by itself, so the
+packages that install also make it load the script:
+
+| Format | Script | How PowerShell loads it |
+|---|---|---|
+| MSI | `%ProgramFiles%\<Name>\share\<p>\completions\<p>.ps1` | Custom actions add a block to the all-users profile (`$PSHOME\Profile.ps1`) of Windows PowerShell and of each PowerShell 7 under `%ProgramFiles%\PowerShell`, where that file can be written, and remove it on uninstall. |
+| tarball | `share\<p>\completions\<p>.ps1` in the archive | Nothing: an archive runs no code. |
+| Scoop | the tarball's script, in the app's directory | `post_install` adds a block to the user's profile of both editions (`Documents\PowerShell\Profile.ps1`, `Documents\WindowsPowerShell\Profile.ps1`); `pre_uninstall` removes it. |
+
+The block lies between the lines `# >>> clispec-completion:<p> >>>` and
+`# <<< clispec-completion:<p> <<<`, and runs the script when the file
+exists. The rest of the profile is kept as it is, in its encoding (ASCII,
+or UTF-8 or UTF-16 with a byte-order mark); a profile in another encoding
+is left alone. Removing the block restores the file's text, and deletes the
+file when the block was all it held. A failure to write it does not fail the installation. WiX's `candle`
+and `light` run on Windows only; `msiAuthoring` builds an MSI's payload and
+its `.wxs` on any host.
+
+A package built for another machine gets the same files, since the program
+is never run. To ship none, set `omitShellCompletion = true` on the
+`Distribution` (or on the `InstalledPrefixSpec`); on Windows that also
+leaves out the MSI's custom actions and the Scoop manifest's hooks.
 
 ## Profiles
 

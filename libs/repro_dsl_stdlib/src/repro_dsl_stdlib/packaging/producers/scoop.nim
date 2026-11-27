@@ -48,6 +48,7 @@ import repro_project_dsl
 import ../types
 import ../runtime_contract
 import ../producer
+import ../powershell_completion
 import ../../packages/sh as sh_module
 {.push warning[UnusedImport]: off.}
 import ../../packages/coreutils_install
@@ -110,6 +111,39 @@ proc scoopBinEntries*(dist: Distribution; tree: StagedTree): seq[string] =
   for f in tree.publicEntryPoints():
     result.add(f.rootRelPath.replace("/", "\\"))
 
+proc jsonLines(lines: string; indent: string): string =
+  ## ``lines`` (PowerShell source) as the items of a JSON array of strings,
+  ## one per line, which is how a Scoop manifest spells a hook.
+  var items: seq[string]
+  for line in lines.strip(leading = false, chars = {'\n'}).splitLines():
+    items.add(indent & jsonString(line))
+  items.join(",\n")
+
+proc scoopCompletionHooks*(tree: StagedTree): tuple[postInstall,
+                                                    preUninstall: string] =
+  ## The PowerShell a Scoop manifest runs after installing and before
+  ## uninstalling the archive ``tree`` describes, so that the current
+  ## user's PowerShell loads each completion script in it: a block in both
+  ## editions' ``CurrentUserAllHosts`` profiles naming the script in the
+  ## app's directory (``$dir``, which Scoop sets to the app's ``current``
+  ## directory before ``post_install``, so the block survives an update),
+  ## and its removal. Empty when the archive carries no PowerShell script
+  ## (no ``cli:`` executable, or ``omitShellCompletion``).
+  ##
+  ## Per user because Scoop installs per user, as reprobuild's own Scoop
+  ## manifest registers for that user; a global install registers for the
+  ## user who ran it. A failure is printed and does not fail the install.
+  ## Hooks: https://github.com/ScoopInstaller/Scoop/wiki/App-Manifests
+  for staged in tree.completions:
+    if staged.shell != "powershell":
+      continue
+    var expr = "[IO.Path]::Combine($dir"
+    for part in staged.rootRelPath.split('/'):
+      expr.add(", " & powerShellLiteral(part))
+    expr.add(")")
+    result.postInstall.add(currentUserProfilesScript(staged.program, expr))
+    result.preUninstall.add(currentUserProfilesScript(staged.program, ""))
+
 proc scoopManifestText*(dist: Distribution; tree: StagedTree;
                         downloadUrl = ""): string =
   ## The manifest, with `ScoopHashToken` where the archive digest goes.
@@ -145,7 +179,15 @@ proc scoopManifestText*(dist: Distribution; tree: StagedTree;
   for i, b in bins:
     let comma = if i + 1 < bins.len: "," else: ""
     result.add("    " & jsonString(b) & comma & "\n")
-  result.add("  ]\n")
+  let hooks = scoopCompletionHooks(tree)
+  if hooks.postInstall.len == 0:
+    result.add("  ]\n")
+  else:
+    result.add("  ],\n")
+    result.add("  \"post_install\": [\n" &
+      jsonLines(hooks.postInstall, "    ") & "\n  ],\n")
+    result.add("  \"pre_uninstall\": [\n" &
+      jsonLines(hooks.preUninstall, "    ") & "\n  ]\n")
   result.add("}\n")
 
 proc scoopPackage*(dist: Distribution; archive: PackagedArtifact;

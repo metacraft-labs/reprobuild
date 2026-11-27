@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 36,
-    "nimTestBinaries": 3330,
+    "nimTestBinaries": 3331,
     "pureUnitConsolidationGroups": 97,
     "pureUnitTests": 857,
     "staticallyDetectedRuntimeCompilerFlowTests": 165,
-    "testEntries": 3391
+    "testEntries": 3392
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1874,7 +1874,7 @@
     "classificationCounts": {
       "graph-fixture": 30,
       "integration": 1896,
-      "platform/destructive": 206,
+      "platform/destructive": 207,
       "pure unit": 857,
       "unclassified": 402
     },
@@ -2096,9 +2096,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 3330,
+    "nimTestBinaryCount": 3331,
     "pythonTestFileCount": 61,
-    "testEntryCount": 3391
+    "testEntryCount": 3392
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -20914,6 +20914,26 @@
       "source": "libs/repro_dsl_stdlib/tests/t_packaging_third_party_producer.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 6,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_packaging_windows_completion",
+      "class": "platform/destructive",
+      "classificationReason": "platform path, target OS, VM, privileged, or host mutation signal",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_core",
+        "repro_dsl_stdlib",
+        "repro_project_dsl",
+        "repro_test_support"
+      ],
+      "owner": "libs/repro_dsl_stdlib",
+      "requiresReproBinary": false,
+      "source": "libs/repro_dsl_stdlib/tests/t_packaging_windows_completion.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 8,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -65162,7 +65182,7 @@
       "requiresReproBinary": true,
       "source": "tests/integration/test_cs_m8d_generated_packages_add_completion.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 4,
+      "staticCaseCount": 10,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
