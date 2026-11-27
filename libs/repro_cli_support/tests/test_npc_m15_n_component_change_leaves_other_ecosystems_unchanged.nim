@@ -15,7 +15,18 @@
 ##
 ## The goldens (`fixtures/npc_m15_other_ecosystems/`) were recorded at
 ## reprobuild `36378344d`, the commit before the change, by compiling this
-## file there with `-d:npcM15RecordGolden=<dir>`.
+## file there with `-d:npcM15RecordGolden=<dir>`. They hold what the lock
+## writer produces, so they move only when its output moves on purpose:
+##
+## - `semver-solve.txt` is still the `36378344d` recording.
+## - The three `.lock` goldens were re-recorded the same way at reprobuild
+##   `1458c690f`, after `39e6f6bb0f` started writing `deps` one record per
+##   line with the lock's own entry first and set apart by a comment. Before
+##   they were replaced, the new recordings were checked against the
+##   `36378344d` ones: they hold the same records with the same bytes, and
+##   every line outside `deps` is identical. Only the layout of `deps`
+##   changed, and in the Nimble lock the order, because the self entry now
+##   comes first.
 ##
 ## Falsifying mutation (recorded in the plan): spelling a Nimble row with
 ## the tag's own components (`1.0` for the tag `v1.0`, instead of `1.0.0`)
