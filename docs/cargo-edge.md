@@ -136,3 +136,111 @@ adds the placeholders it wrote, a run the manifest it matched and the lines it
 printed. Use a scratch target directory for a record run, never the project's
 `target/`: the placeholders would enter cargo's freshness state and a later
 real build would trust them.
+
+## The plan: a record run as a graph-production edge
+
+The record run is wrapped in one build-graph edge, `cargo.plan/<workspace>`,
+whose process is `repro-rustc-wrapper --cargo-plan` and whose one output is the
+**plan**: every unit and build-script run cargo would start, with its command
+line, working directory and environment, and the links between them. Nothing is
+compiled and no build script runs.
+
+```sh
+repro-rustc-wrapper --cargo-plan --plan FILE --scratch DIR \
+    --cargo CARGO --rustc RUSTC [--store-root DIR] \
+    [--crate NAME@VERSION=PREFIX]... -- [CARGO ARGS...]
+```
+
+- **The edge.** It runs in the workspace root, monitored, with its inputs
+  checked by content, from a closed environment (the project's development
+  environment and nothing of the engine's own), and with the network denied.
+  It runs after the edges that fetch the workspace's registry crates and
+  declares their store prefixes as inputs. It is relocatable: its argv and
+  its output are relative to the workspace root, its key holds the depth of
+  the workspace root rather than its path, and the tools and stores it
+  reaches by absolute path are its relocation anchors, so two checkouts of
+  one workspace give it the same key.
+- **Scratch.** The edge has one scratch directory, which the engine empties
+  before the run and never counts as evidence. It holds the recordings, the
+  scratch target directory with its placeholders, the saved `cargo metadata`,
+  and an empty `CARGO_HOME` and `HOME` for cargo; the run refuses to start if
+  any of those directories is not empty or the saved metadata already exists.
+- **Cargo's run.** `cargo metadata --offline --locked`, then `cargo build
+  --offline --locked -j 1 --target-dir <scratch>/target` with the given
+  arguments and four `--config` values: the record wrapper as
+  `build.rustc-wrapper`, the compiler as `build.rustc`, an empty
+  `build.rustc-workspace-wrapper` (a project's own workspace wrapper would
+  otherwise run between the record wrapper and rustc), and `build.build-dir`
+  set to the scratch target directory (a project's `build.build-dir` would
+  otherwise move cargo's intermediate files, placeholders included, outside
+  the scratch directory). The command line keeps them out of a compile's
+  environment and outranks configuration files and `CARGO_BUILD_*`
+  variables. `RUSTC`, `RUSTC_WRAPPER` and `RUSTC_WORKSPACE_WRAPPER` outrank
+  it (measured for `RUSTC_WRAPPER` with cargo 1.94), so an environment that
+  sets one is refused. `-j 1` makes the `NUM_JOBS` a build script receives
+  the same on every host.
+- **Registry crates.** Each crates.io crate of `Cargo.lock` is given with the
+  store prefix its fetch edge made (`--crate`). A `directory` source needs a
+  `.cargo-checksum.json` in every crate directory and a prefix is a read-only
+  extraction without one, so the run writes, in its scratch directory, a
+  vendor directory with one entry `<name>-<version>` per crate: a symbolic
+  link to each top-level entry of the prefix and a `.cargo-checksum.json` of
+  `{"files":{},"package":"<checksum from Cargo.lock>"}`. Two `--config`
+  values replace `crates-io` with it, for `cargo metadata` and `cargo build`.
+  The prefixes are only read, and the derivation maps each vendor entry back
+  to the prefix it links to, from the entries the run wrote.
+- **What it refuses.** Cargo arguments other than the build's selection
+  (`--release`, `--profile`, `--target`, `-p`/`--package`, `--workspace`,
+  `--exclude`, `--lib`, `--bin`, `--bins`, `--features`, `--all-features`,
+  `--no-default-features`); a cargo configuration file in a directory above
+  the workspace root, which cargo would read; a workspace package whose
+  manifest lies outside the workspace root; a `Cargo.lock` package from a
+  source other than crates.io (git, another registry); a crates.io package
+  with a malformed name, version or checksum, no `--crate` prefix, or a
+  prefix that is not that crate's store prefix (spelled with `..`, resolving
+  outside the store root, not named for the crate's name, version and
+  checksum, or holding another package's manifest); a `--crate` given twice
+  or for a crate the lock does not hold; a `[patch]` or `[replace]` table in
+  the workspace's `Cargo.toml`; and `paths`, `[source]`, `[patch]` or
+  `include` in its `.cargo/config.toml` or `.cargo/config`.
+- **What it checks after `cargo metadata`.** Cargo's workspace root is the
+  working directory (not an enclosing workspace with its own lock), and every
+  package with a source was read from exactly its vendor entry's
+  `Cargo.toml`: whatever a configuration might do to re-route a source,
+  cargo's own answer must show each crate coming from the store.
+
+**The derivation** turns the recordings into the plan, reading every link
+from paths cargo wrote: a unit's `--extern` paths name the units it consumes;
+its `OUT_DIR` is the one its package's build-script run received; a run's
+executable lies in the output directory of the build-script compile that
+wrote it; each sentinel names the run that feeds it. Paths are recorded
+against the logical roots `project`, `store`, `nix` (the Nix store, where
+there is one) and the run's own `target` and `scratch`. Paths under the
+scratch target directory are rewritten into one output directory per unit
+under the `${out}` root, `<package>-<version>-<hash>` with cargo's own
+`-C extra-filename` hash: the unit's `--out-dir`, outputs and incremental
+directory, a run's `OUT_DIR`, and, because every unit has its own directory,
+cargo's one `-L dependency=` under the target directory (and a `deps` or
+profile directory on a dynamic-library path) becomes one entry per unit of
+the closure. A sentinel becomes a slot, `${slot:<kind>:<run>}`, standing for
+the whole group of arguments cargo emitted for it. A unit with a slot or an
+`OUT_DIR` is *fed* by a build-script run and is completed when that run's
+output is known; a build-script run is fed too when a build-dependency's
+link-search path (inside its `OUT_DIR`) is on its dynamic-library path.
+Environments are stored as the difference from the record run's own; the
+variables cargo documents setting for a crate or a build script are kept
+even when their value is the same, and the run's own variables
+(`RUSTC_WRAPPER` naming the record wrapper, `CARGO_MAKEFLAGS`, jobserver
+descriptors) and those cargo's own process sets for itself (`SSL_CERT_FILE`,
+`SSL_CERT_DIR`) are dropped. A path the derivation cannot place, a scratch
+path, a sentinel left anywhere, an absolute path under no logical root, a
+program between the record wrapper and rustc's arguments, or a plan with no
+unit fails the edge.
+
+**The format.** The plan is a fixed-schema binary record: a length-prefixed
+magic (`reprobuild.cargoPlan.v1`), a 16-bit schema version (2), a 32-bit
+payload length and an SSZ payload (`repro_cargo_edge/cargo_plan`). Every list
+is bounds-checked when it is written, and a plan read back is checked for
+unique ids, resolved references and outputs inside their units' directories.
+It is read back by the edges built from it; the JSON recordings it was
+derived from stay inside the edge.

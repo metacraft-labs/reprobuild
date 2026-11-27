@@ -47,7 +47,7 @@ import runquota_core/measurement
 import runquota_exec
 import runquota_process
 import runquota_protocol
-import ./[record_mode, rustc_args, wrapper_env]
+import ./[plan_run, record_mode, rustc_args, wrapper_env]
 
 const
   WrapperLogEnv* = "REPRO_RUSTC_WRAPPER_LOG"
@@ -317,6 +317,12 @@ proc runWrapper*(args: seq[string]): int =
   ## the reporting path: it never connects to RunQuota, takes no sub-lease
   ## and starts no measurement, whatever `RUNQUOTA_MEASUREMENT` says, because
   ## there is no compile to measure.
+  if args.len > 0 and args[0] == PlanRunFlag and not recordModeOn():
+    # The record-only graph-production edge's process (`plan_run`). Cargo
+    # runs the wrapper with a rustc path first, never with this flag; inside
+    # a record run (the switch set) the flag is not honoured, so a unit can
+    # never start a nested record run.
+    return runPlanCommand(args[1 .. ^1])
   if recordModeOn():
     when defined(windows):
       stderr.writeLine WrapperClientName & ": record mode is not supported " &
