@@ -52,6 +52,46 @@ release_num="${REPRO_PACKAGE_RELEASE:-1}"
 log()  { printf 'repro-build-packages: %s\n' "$*" >&2; }
 die()  { printf 'repro-build-packages: ERROR: %s\n' "$*" >&2; exit 1; }
 
+# Apple's packaging tools are run by absolute path on macOS, never found on
+# PATH. The release leg runs inside a Nix environment whose PATH lacks
+# /usr/sbin, where pkgutil lives, and a PATH lookup would also let a program
+# of the same name from that environment stand in for Apple's. The paths are
+# where macOS installs the tools (the same ones
+# libs/repro_tool_profiles/src/repro_tool_profiles/macos_archives.nim runs).
+#
+# `apple_tool <name>` sets APPLE_TOOL to the tool's path and returns 0. On
+# macOS a tool that is not executable at its path is fatal, and the error
+# names the path. Elsewhere the name is looked up on PATH, as it always was,
+# and the call returns 1 when it is not there.
+#
+# REPRO_APPLE_TOOL_ROOT is for tests only (empty by default): a directory put
+# in front of every path, which also selects the macOS lookup on any host. It
+# swaps the tools that build and read back the package, so it is REFUSED (the
+# run dies) wherever the package could be released: in a publishing run
+# (REPRO_RELEASE_PUBLISHING=1) and whenever production signing credentials
+# are in the environment (REPRO_PKG_SIGNING_P12_BASE64).
+apple_tool_root_check() {
+  [ -n "${REPRO_APPLE_TOOL_ROOT:-}" ] || return 0
+  if [ "${REPRO_RELEASE_PUBLISHING:-0}" = 1 ] || [ -n "${REPRO_PKG_SIGNING_P12_BASE64:-}" ]; then
+    die 'REPRO_APPLE_TOOL_ROOT is a test-only seam and is refused in a publishing run or with production signing credentials; unset it'
+  fi
+}
+apple_tool() {
+  case "$1" in
+    pkgbuild) APPLE_TOOL=/usr/bin/pkgbuild ;;
+    pkgutil)  APPLE_TOOL=/usr/sbin/pkgutil ;;
+    xattr)    APPLE_TOOL=/usr/bin/xattr ;;
+    *) die "internal: no path is recorded for the Apple tool '$1'" ;;
+  esac
+  apple_tool_root_check
+  if [ -n "${REPRO_APPLE_TOOL_ROOT:-}" ] || [ "$(uname -s)" = Darwin ]; then
+    APPLE_TOOL="${REPRO_APPLE_TOOL_ROOT:-}$APPLE_TOOL"
+    [ -x "$APPLE_TOOL" ] || die "$1 not found at $APPLE_TOOL (macOS installs it there; PATH is not searched for it)"
+  else
+    APPLE_TOOL="$(command -v "$1" 2>/dev/null)" || return 1
+  fi
+}
+
 while [ $# -gt 0 ]; do
   case "$1" in
     --version)   version="$2"; shift 2 ;;
@@ -493,8 +533,10 @@ PKGINFO
 # /usr/local/share/fish/vendor_completions.d only when its own prefix is
 # /usr/local (Homebrew on Intel) or XDG_DATA_DIRS names /usr/local/share.
 build_pkg() {
-  [ "${REPRO_PKG_STAGE_ONLY:-0}" = 1 ] || command -v pkgbuild >/dev/null 2>&1 \
-    || die 'pkgbuild not found (the macOS .pkg can be built on macOS only)'
+  if [ "${REPRO_PKG_STAGE_ONLY:-0}" != 1 ]; then
+    apple_tool pkgbuild || die 'pkgbuild not found (the macOS .pkg can be built on macOS only)'
+    _pkgbuild="$APPLE_TOOL"
+  fi
   _root="$stage/pkgroot"
   rm -rf "$_root"
   mkdir -p "$_root"
@@ -510,13 +552,13 @@ build_pkg() {
   # the archive was unpacked) would travel in the payload as `._name`
   # AppleDouble records. Clear what can be cleared; macOS refuses to clear its
   # own provenance mark, and the installer applies the rest as attributes.
-  if command -v xattr >/dev/null 2>&1; then
-    xattr -cr "$_root" 2>/dev/null || true
+  if apple_tool xattr; then
+    "$APPLE_TOOL" -cr "$_root" 2>/dev/null || true
   fi
   _pkg="$out/reprobuild-${version}-${platform}-${asset_arch}.pkg"
   rm -f "$_pkg"
   # --ownership recommended: root:wheel on install, whoever built the tree.
-  pkgbuild --root "$_root" --identifier "${REPRO_PKG_IDENTIFIER:-com.metacraft-labs.reprobuild}" \
+  "$_pkgbuild" --root "$_root" --identifier "${REPRO_PKG_IDENTIFIER:-com.metacraft-labs.reprobuild}" \
     --version "$version" --install-location / --ownership recommended \
     "$_pkg" >"$stage/pkgbuild.log" 2>&1 || {
     log 'pkgbuild failed; last 40 lines:'
@@ -526,8 +568,8 @@ build_pkg() {
   [ -s "$_pkg" ] || die "built an empty $_pkg"
   # READ IT BACK, as the pacman package is: the payload must hold the command
   # and the completion files, or the installer would run and provide nothing.
-  command -v pkgutil >/dev/null 2>&1 || die 'pkgutil not found; cannot read the package back'
-  pkgutil --payload-files "$_pkg" > "$stage/pkg-listing.txt" 2>/dev/null \
+  apple_tool pkgutil || die 'pkgutil not found; cannot read the package back'
+  "$APPLE_TOOL" --payload-files "$_pkg" > "$stage/pkg-listing.txt" 2>/dev/null \
     || die "the package $_pkg cannot be read back (pkgutil --payload-files failed)"
   for _want in ./usr/local/bin/repro \
       ./usr/local/share/bash-completion/completions/repro \

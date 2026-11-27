@@ -31,6 +31,26 @@ What is stubbed, and why (the repository's rule: every mock is justified):
   the XAR table of contents), which these are; the packager's own output is
   tested in test_release_native_packages.py. pkgbuild exists only on macOS, so
   the macOS cases (`MacosProductsignTests`) build a real .pkg there.
+* Apple's tools, in AppleToolLookupTests. On macOS the leg runs them by
+  absolute path (/usr/bin/productsign, /usr/bin/security, /usr/sbin/pkgutil,
+  /usr/bin/xcrun, /usr/sbin/spctl), never from PATH, which in the release
+  leg's Nix environment has no /usr/sbin. They exist only on macOS, so those
+  cases use a FAKE ROOT: REPRO_APPLE_TOOL_ROOT names a directory the scripts
+  put in front of each absolute path (a variable for tests only, empty by
+  default, which also selects the macOS lookup on any host), holding small
+  scripts that record the path they were run as and answer just enough for
+  the stand-in leg to finish (`security import` keeps the identity beside the
+  keychain and productsign signs with it through rcodesign, so the signer's
+  XAR verification runs on a real signature; pkgutil names the stand-in
+  signer; spctl rejects the package, as Gatekeeper rejects a stand-in). That
+  is justified because what is under test is which file runs, not what
+  Apple's tools do; look-alikes of the same names come first on PATH, and a
+  case fails if one runs. The scripts honour the root only in stand-in mode
+  with a test certificate and refuse it in production mode, with a platform
+  certificate and in a publishing run, so it cannot replace the verifiers of
+  a production package; cases check those refusals. That is also why the
+  production default `/usr/bin/xcrun` (notarytool, stapler) has no case
+  here. The real tools are MacosProductsignTests, on macOS.
 
 Nothing here touches a keychain, a certificate store, HOME or the login
 profile: every certificate and key is generated into the test's temporary
@@ -507,8 +527,10 @@ class PkgSigningTests(Fixture):
     def test_cs_m8e_production_mode_without_platform_trust_refuses_the_pkg(self):
         """Off macOS, with no Apple root configured, nothing can establish
         platform trust, so a production signature is refused."""
-        if shutil.which("pkgutil"):
-            self.skipTest("pkgutil is present (macOS): the platform check differs there")
+        # On macOS the signer runs /usr/sbin/pkgutil whatever PATH holds, so
+        # ask the platform, not PATH.
+        if sys.platform == "darwin":
+            self.skipTest("macOS: the signer runs /usr/sbin/pkgutil, so the platform check differs there")
         d = self.certs(unmarked=True)
         r = self.driver("pkg", self.pkg(), self.work / "out", **self.production_env(d, self.service_notary()))
         self.assertNotEqual(0, r.returncode)
@@ -559,10 +581,186 @@ class PublishRefusalTests(Fixture):
         self.assertEqual(0, r.returncode, r.stdout + r.stderr)
 
 
+# ══════════════════════════════════════════════════ Apple's tools by path
+# The fake root's stand-ins (see the module header). Each appends the path it
+# was run as, and its first two arguments, to $STUB_LOG. `security import`
+# keeps the identity it is handed beside the keychain, and productsign signs
+# with it through rcodesign, so the signer's own XAR verification runs on a
+# real signature; pkgutil names the stand-in signer; spctl rejects, as
+# Gatekeeper rejects a stand-in-signed package.
+APPLE_STUBS = {
+    "usr/bin/productsign": r"""#!/bin/sh
+printf '%s %s %s\n' "$0" "$1" "$2" >> "$STUB_LOG"
+kc=''; prev=''; in=''; out=''
+for a in "$@"; do
+  [ "$prev" = --keychain ] && kc="$a"
+  prev="$a"; in="$out"; out="$a"
+done
+[ -n "$kc" ] && [ -f "$kc.stub-identity" ] || exit 2
+id="$(cat "$kc.stub-identity")"; pw="$kc.stub-password"; pem="$kc.stub.pem"
+rc=0
+{ openssl pkcs12 -in "$id" -passin "file:$pw" -nocerts -nodes &&
+  openssl pkcs12 -in "$id" -passin "file:$pw" -clcerts -nokeys &&
+  openssl pkcs12 -in "$id" -passin "file:$pw" -cacerts -nokeys; } > "$pem" 2>/dev/null || rc=1
+[ "$rc" = 0 ] && cp "$in" "$out" && rcodesign sign --pem-file "$pem" --timestamp-url none "$out" >/dev/null 2>&1 || rc=1
+rm -f "$pem"
+exit "$rc"
+""",
+    "usr/bin/security": r"""#!/bin/sh
+printf '%s %s\n' "$0" "$1" >> "$STUB_LOG"
+if [ "$1" = import ]; then
+  id="$2"; kc=''; pw=''; shift 2
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      -k) kc="$2"; shift 2 ;;
+      -P) pw="$2"; shift 2 ;;
+      -T) printf '%s import -T %s\n' "$0" "$2" >> "$STUB_LOG"; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+  printf '%s' "$id" > "$kc.stub-identity"
+  printf '%s' "$pw" > "$kc.stub-password"
+fi
+""",
+    "usr/sbin/pkgutil": r"""#!/bin/sh
+printf '%s %s\n' "$0" "$1" >> "$STUB_LOG"
+printf 'Package "%s":\n   Status: signed by a certificate trusted for current user\n' "$2"
+printf '   1. Developer ID Installer: Reprobuild Stand-in (TESTTEAM01)\n'
+""",
+    "usr/sbin/spctl": r"""#!/bin/sh
+printf '%s %s\n' "$0" "$1" >> "$STUB_LOG"
+printf '%s: rejected\n' "$5"
+exit 3
+""",
+}
+
+LOOKALIKE = """#!/bin/sh
+printf 'LOOKALIKE %s\n' "$0" >> "$STUB_LOG"
+exit 3
+"""
+
+
+def write_executable(path, text):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text)
+    path.chmod(0o755)
+
+
+@unittest.skipUnless(tools("openssl", "rcodesign", "xar"), "needs openssl, rcodesign (apple-codesign) and xar")
+class AppleToolLookupTests(Fixture):
+    """The macOS leg's stand-in path, with Apple's tools in a fake root and
+    look-alikes first on a PATH without /usr/sbin, and the refusal of that
+    root wherever it could weaken a production signature (see the module
+    header)."""
+
+    def setUp(self):
+        super().setUp()
+        self.fake_root = self.work / "apple-root"
+        for rel, text in APPLE_STUBS.items():
+            write_executable(self.fake_root / rel, text)
+        lookalikes = self.work / "lookalikes"
+        for name in ("productsign", "security", "pkgutil", "spctl", "xcrun"):
+            write_executable(lookalikes / name, LOOKALIKE)
+        self.path = os.pathsep.join(
+            [str(lookalikes)] + [d for d in os.environ.get("PATH", "").split(os.pathsep)
+                                 if d and os.path.normpath(d) not in ("/usr/sbin", "/sbin")])
+        self.log = self.work / "stub.log"
+        self.log.touch()
+
+    def seam(self, **extra):
+        return dict(REPRO_APPLE_TOOL_ROOT=self.fake_root, STUB_LOG=self.log, PATH=self.path, **extra)
+
+    def production(self):
+        d = self.certs(unmarked=True)
+        p12 = (d / "pkg-signer.p12").read_bytes()
+        key = self.run_cmd(["openssl", "genpkey", "-algorithm", "EC", "-pkeyopt", "ec_paramgen_curve:P-256"])
+        return self.seam(REPRO_PKG_SIGNING_P12_BASE64=base64.b64encode(p12).decode(),
+                         REPRO_PKG_SIGNING_P12_PASSWORD=(d / "pkg-signer.p12.password").read_text(),
+                         REPRO_NOTARY_API_KEY_P8=key.stdout, REPRO_NOTARY_API_KEY_ID="THROWAWAY1",
+                         REPRO_NOTARY_API_ISSUER_ID="22222222-2222-4222-8222-222222222222")
+
+    def calls(self):
+        return self.log.read_text().splitlines()
+
+    def test_cs_m8e_the_leg_runs_apple_tools_by_absolute_path_not_from_path(self):
+        out = self.work / "out"
+        r = self.driver("pkg", self.pkg(), out, **self.seam())
+        self.assertEqual(0, r.returncode, r.stderr)
+        pkg = out / "reprobuild-9.8.7-darwin-aarch64.pkg"
+        report = Path(str(pkg) + ".signing-report.txt").read_text()
+        self.assertIn("mode: standin", report)
+        self.assertIn("signing: class=test tool=productsign", report)
+        self.assertIn("gatekeeper: rejected, as a stand-in must be (spctl --assess --type install)", report)
+        calls = self.calls()
+        self.assertFalse([c for c in calls if c.startswith("LOOKALIKE")], calls)
+        root = str(self.fake_root)
+        for want in (f"{root}/usr/bin/security create-keychain",
+                     f"{root}/usr/bin/security import -T {root}/usr/bin/productsign",
+                     f"{root}/usr/bin/productsign --sign",
+                     f"{root}/usr/sbin/pkgutil --check-signature",
+                     f"{root}/usr/sbin/spctl --assess",
+                     f"{root}/usr/bin/security delete-keychain"):
+            self.assertTrue(any(c.startswith(want) for c in calls), (want, calls))
+        # The stand-in productsign made a real signature, which the signer
+        # verified and which still verifies against the stand-in root.
+        v = self.run_cmd([sys.executable, "-I", VERIFY_XAR, pkg, "--trust-root",
+                          Path(str(pkg) + ".stand-in-root.pem")])
+        self.assertEqual(0, v.returncode, v.stderr)
+
+    def test_cs_m8e_a_missing_apple_tool_is_refused_naming_its_absolute_path(self):
+        for rel in APPLE_STUBS:
+            with self.subTest(tool=rel):
+                (self.fake_root / rel).unlink()
+                self.log.write_text("")
+                out = self.work / "out"
+                r = self.driver("pkg", self.pkg(), out, **self.seam())
+                self.assertNotEqual(0, r.returncode)
+                name = rel.rsplit("/", 1)[1]
+                self.assertIn(f"{name} not found at {self.fake_root}/{rel} (macOS installs it there; "
+                              "PATH is not searched for it)", r.stderr)
+                self.assertFalse([c for c in self.calls() if c.startswith("LOOKALIKE")], self.calls())
+                self.assertFalse((out / "reprobuild-9.8.7-darwin-aarch64.pkg").exists(),
+                                 "a refused run left a package behind")
+                write_executable(self.fake_root / rel, APPLE_STUBS[rel])
+
+    def test_cs_m8e_the_test_root_is_refused_in_production_mode(self):
+        """A variable must not be able to replace the pkgutil and spctl that
+        check a production package: production mode refuses the root before
+        it runs any tool, and leaves nothing behind."""
+        out = self.work / "out"
+        r = self.driver("pkg", self.pkg(), out, **self.production())
+        self.assertNotEqual(0, r.returncode)
+        self.assertIn("REPRO_APPLE_TOOL_ROOT is a test-only seam and is refused in production mode", r.stderr)
+        self.assertEqual([], self.calls())
+        self.assertFalse((out / "reprobuild-9.8.7-darwin-aarch64.pkg").exists())
+
+    def test_cs_m8e_the_signer_refuses_the_test_root_for_a_platform_certificate(self):
+        """The signer alone, handed a certificate without the stand-in marker
+        (so it would be checked against the platform's trust): the root is
+        refused before anything is signed."""
+        d = self.certs(unmarked=True)
+        out = self.work / "signed.pkg"
+        r = self.run_cmd(["sh", SIGNER, "--kind", "pkg", "--in", self.pkg(), "--out", out,
+                          "--identity", d / "pkg-signer.p12", "--password-file", d / "pkg-signer.p12.password"],
+                         env=self.env(**self.seam()))
+        self.assertNotEqual(0, r.returncode)
+        self.assertIn("REPRO_APPLE_TOOL_ROOT is a test-only seam and is refused unless the signer certificate "
+                      "is a TEST certificate", r.stderr)
+        self.assertEqual([], self.calls())
+        self.assertFalse(out.exists())
+
+
 # ══════════════════════════════════════════════════ macOS: productsign
-@unittest.skipUnless(sys.platform == "darwin" and tools("pkgbuild", "productsign", "pkgutil", "security",
-                                                        "spctl", "openssl"),
-                     "macOS only: pkgbuild, productsign, pkgutil, security and spctl")
+# Apple's tools are checked, and run, at their absolute paths, as the leg runs
+# them: the release leg's Nix PATH has no /usr/sbin, so a PATH check would
+# skip these cases on the very runner they are for.
+APPLE_PATHS = {"pkgbuild": "/usr/bin/pkgbuild", "productsign": "/usr/bin/productsign",
+               "pkgutil": "/usr/sbin/pkgutil", "security": "/usr/bin/security", "spctl": "/usr/sbin/spctl"}
+
+
+@unittest.skipUnless(sys.platform == "darwin" and tools("openssl")
+                     and all(os.access(p, os.X_OK) for p in APPLE_PATHS.values()),
+                     "macOS only: " + ", ".join(APPLE_PATHS.values()))
 class MacosProductsignTests(Fixture):
     """The leg's own path on macOS: pkgbuild, productsign with a keychain
     created in the test's directory (never the login keychain, never added to
@@ -574,13 +772,13 @@ class MacosProductsignTests(Fixture):
         (root / "repro-fixture").write_text("#!/bin/sh\necho fixture\n")
         (root / "repro-fixture").chmod(0o755)
         pkg = self.work / "reprobuild-9.8.7-darwin-aarch64.pkg"
-        r = self.run_cmd(["pkgbuild", "--root", self.work / "root", "--identifier", "com.example.fixture",
+        r = self.run_cmd([APPLE_PATHS["pkgbuild"], "--root", self.work / "root", "--identifier", "com.example.fixture",
                           "--version", "1.0", "--install-location", "/", pkg])
         self.assertEqual(0, r.returncode, r.stderr)
         return pkg
 
     def test_cs_m8e_productsign_signs_with_the_stand_in_and_gatekeeper_rejects_it(self):
-        keychains_before = self.run_cmd(["security", "list-keychains"]).stdout
+        keychains_before = self.run_cmd([APPLE_PATHS["security"], "list-keychains"]).stdout
         out = self.work / "out"
         r = self.driver("pkg", self.real_pkg(), out, REPRO_PKG_SIGN_TOOL="productsign")
         self.assertEqual(0, r.returncode, r.stderr)
@@ -588,12 +786,12 @@ class MacosProductsignTests(Fixture):
         report = Path(str(pkg) + ".signing-report.txt").read_text()
         self.assertIn("signing: class=test tool=productsign", report)
         self.assertIn("gatekeeper: rejected, as a stand-in must be", report)
-        chk = self.run_cmd(["pkgutil", "--check-signature", pkg])
+        chk = self.run_cmd([APPLE_PATHS["pkgutil"], "--check-signature", pkg])
         self.assertIn("Developer ID Installer: Reprobuild Stand-in (TESTTEAM01)", chk.stdout)
         v = self.run_cmd([sys.executable, "-I", VERIFY_XAR, pkg, "--trust-root",
                           Path(str(pkg) + ".stand-in-root.pem")])
         self.assertEqual(0, v.returncode, v.stderr)
-        self.assertEqual(keychains_before, self.run_cmd(["security", "list-keychains"]).stdout,
+        self.assertEqual(keychains_before, self.run_cmd([APPLE_PATHS["security"], "list-keychains"]).stdout,
                          "the keychain search list changed")
 
     def test_cs_m8e_rcodesign_on_macos_matches(self):
@@ -602,7 +800,7 @@ class MacosProductsignTests(Fixture):
         out = self.work / "out"
         r = self.driver("pkg", self.real_pkg(), out, REPRO_PKG_SIGN_TOOL="rcodesign")
         self.assertEqual(0, r.returncode, r.stderr)
-        chk = self.run_cmd(["pkgutil", "--check-signature", out / "reprobuild-9.8.7-darwin-aarch64.pkg"])
+        chk = self.run_cmd([APPLE_PATHS["pkgutil"], "--check-signature", out / "reprobuild-9.8.7-darwin-aarch64.pkg"])
         self.assertIn("Developer ID Installer: Reprobuild Stand-in (TESTTEAM01)", chk.stdout)
 
 

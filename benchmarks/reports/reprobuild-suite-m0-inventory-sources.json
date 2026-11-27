@@ -70680,7 +70680,7 @@
       "requiresReproBinary": false,
       "source": "tests/unit/test_release_native_packages.py",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 25,
+      "staticCaseCount": 29,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -70725,7 +70725,7 @@
       "requiresReproBinary": false,
       "source": "tests/unit/test_release_signed_installers.py",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 31,
+      "staticCaseCount": 35,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

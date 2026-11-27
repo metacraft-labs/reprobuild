@@ -33,8 +33,8 @@
 #
 # ## Signing tools
 #
-# .pkg  REPRO_PKG_SIGN_TOOL=productsign (the default where `productsign`
-#       exists, i.e. macOS) imports the identity into a keychain created for
+# .pkg  REPRO_PKG_SIGN_TOOL=productsign (the default on macOS, where it is
+#       /usr/bin/productsign) imports the identity into a keychain made for
 #       this run under --scratch -- never the login keychain, never added to
 #       the keychain search list -- signs with
 #       `productsign --sign <SHA-1> --keychain <it>`, and deletes it.
@@ -78,6 +78,43 @@ SI_MARKER_SUFFIX='.SIGNED-WITH-A-TEST-CERTIFICATE'
 log() { printf 'repro-sign-installer: %s\n' "$*" >&2; }
 die() { printf 'repro-sign-installer: REFUSED: %s\n' "$*" >&2; exit 1; }
 
+# Apple's tools are run by absolute path on macOS, never found on PATH: the
+# release leg runs inside a Nix environment whose PATH lacks /usr/sbin, where
+# pkgutil lives, and a PATH lookup would also let a program of the same name
+# from that environment stand in for Apple's.
+#
+# `apple_tool <name>` sets APPLE_TOOL to the tool's path and returns 0. On
+# macOS a tool that is not executable at its path is fatal, and the error
+# names the path. Elsewhere the name is looked up on PATH, as it always was,
+# and the call returns 1 when it is not there.
+#
+# REPRO_APPLE_TOOL_ROOT is for tests only (empty by default): a directory put
+# in front of every path, which also selects the macOS lookup on any host. It
+# swaps the signer and the verifier, so it is honoured only for a TEST
+# certificate (which is itself refused in a publishing run and needs
+# REPRO_SIGNING_ALLOW_TEST_KEY=1); with any other certificate the run dies,
+# so no variable can replace the pkgutil that checks a platform signature.
+apple_tool_root_check() {
+  [ -n "${REPRO_APPLE_TOOL_ROOT:-}" ] || return 0
+  [ "${class:-}" = test ] \
+    || die 'REPRO_APPLE_TOOL_ROOT is a test-only seam and is refused unless the signer certificate is a TEST certificate; unset it'
+}
+apple_tool() {
+  case "$1" in
+    productsign) APPLE_TOOL=/usr/bin/productsign ;;
+    security)    APPLE_TOOL=/usr/bin/security ;;
+    pkgutil)     APPLE_TOOL=/usr/sbin/pkgutil ;;
+    *) die "internal: no path is recorded for the Apple tool '$1'" ;;
+  esac
+  apple_tool_root_check
+  if [ -n "${REPRO_APPLE_TOOL_ROOT:-}" ] || [ "$(uname -s)" = Darwin ]; then
+    APPLE_TOOL="${REPRO_APPLE_TOOL_ROOT:-}$APPLE_TOOL"
+    [ -x "$APPLE_TOOL" ] || die "$1 not found at $APPLE_TOOL (macOS installs it there; PATH is not searched for it)"
+  else
+    APPLE_TOOL="$(command -v "$1" 2>/dev/null)" || return 1
+  fi
+}
+
 kind=''; in=''; out=''; identity=''; password_file=''; trust_root=''; scratch=''
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -109,9 +146,9 @@ fi
 umask 077
 work="$scratch/sign-$$"
 mkdir -p "$work"
-keychain=''
+keychain=''; security=''
 cleanup() {
-  if [ -n "$keychain" ]; then security delete-keychain "$keychain" >/dev/null 2>&1 || true; fi
+  if [ -n "$keychain" ]; then "$security" delete-keychain "$keychain" >/dev/null 2>&1 || true; fi
   rm -rf "$work"
   if [ "$own_scratch" -eq 1 ]; then rm -rf "$scratch"; fi
 }
@@ -150,6 +187,7 @@ if [ "$class" = test ]; then
 else
   log "signing with $subject (sha256 $sha256); it must verify against the platform's trust"
 fi
+apple_tool_root_check
 
 out_dir="$(dirname -- "$out")"
 mkdir -p "$out_dir"
@@ -157,28 +195,36 @@ rm -f "$out" "$out$SI_MARKER_SUFFIX"
 on_windows() { [ -n "${SYSTEMROOT:-}" ] && command -v cygpath >/dev/null 2>&1; }
 winpath() { if command -v cygpath >/dev/null 2>&1; then cygpath -w "$1"; else printf '%s\n' "$1"; fi; }
 
+# pkgutil is resolved before anything is signed, so that on macOS a missing
+# one refuses the run before it leaves an unverified package behind.
+pkgutil=''
+if [ "$kind" = pkg ] && apple_tool pkgutil; then pkgutil="$APPLE_TOOL"; fi
+
 # ── Sign ─────────────────────────────────────────────────────────────
 if [ "$kind" = pkg ]; then
   tool="${REPRO_PKG_SIGN_TOOL:-}"
   if [ -z "$tool" ]; then
-    if command -v productsign >/dev/null 2>&1; then tool=productsign; else tool=rcodesign; fi
+    if apple_tool productsign; then tool=productsign; else tool=rcodesign; fi
   fi
   case "$tool" in
     productsign)
-      command -v security >/dev/null 2>&1 || die 'productsign needs the `security` tool (macOS)'
+      apple_tool productsign || die 'productsign not found (macOS)'
+      productsign="$APPLE_TOOL"
+      apple_tool security || die 'productsign needs the `security` tool (macOS)'
+      security="$APPLE_TOOL"
       keychain="$work/signing.keychain-db"
       kc_pass="$(openssl rand -hex 24)"
-      security create-keychain -p "$kc_pass" "$keychain" >/dev/null \
+      "$security" create-keychain -p "$kc_pass" "$keychain" >/dev/null \
         || die "cannot create the run's keychain at $keychain"
-      security set-keychain-settings "$keychain" >/dev/null
-      security unlock-keychain -p "$kc_pass" "$keychain" >/dev/null
-      security import "$identity" -k "$keychain" -f pkcs12 -P "$(cat "$password_file")" \
-        -T /usr/bin/productsign >/dev/null \
+      "$security" set-keychain-settings "$keychain" >/dev/null
+      "$security" unlock-keychain -p "$kc_pass" "$keychain" >/dev/null
+      "$security" import "$identity" -k "$keychain" -f pkcs12 -P "$(cat "$password_file")" \
+        -T "$productsign" >/dev/null \
         || die "cannot import $identity into the run's keychain"
       # Lets productsign use the key without a confirmation dialog.
-      security set-key-partition-list -S apple-tool:,apple: -s -k "$kc_pass" "$keychain" >/dev/null 2>&1 || true
+      "$security" set-key-partition-list -S apple-tool:,apple: -s -k "$kc_pass" "$keychain" >/dev/null 2>&1 || true
       if [ "$class" = test ] || [ "${REPRO_PKG_TIMESTAMP_URL:-}" = none ]; then ts='--timestamp=none'; else ts='--timestamp'; fi
-      productsign --sign "$sha1" --keychain "$keychain" "$ts" "$in" "$out" >"$work/sign.log" 2>&1 \
+      "$productsign" --sign "$sha1" --keychain "$keychain" "$ts" "$in" "$out" >"$work/sign.log" 2>&1 \
         || { cat "$work/sign.log" >&2; die 'productsign failed'; }
       ;;
     rcodesign)
@@ -246,8 +292,8 @@ if [ "$kind" = pkg ]; then
     cat "$work/verify.log" >&2
     verified=$((verified + 1))
   fi
-  if command -v pkgutil >/dev/null 2>&1; then
-    pkgutil --check-signature "$out" >"$work/pkgutil.log" 2>&1 || true
+  if [ -n "$pkgutil" ]; then
+    "$pkgutil" --check-signature "$out" >"$work/pkgutil.log" 2>&1 || true
     cat "$work/pkgutil.log" >&2
     signer_cn="$(openssl x509 -in "$work/signer.pem" -noout -subject -nameopt multiline | sed -n 's/^ *commonName *= *//p' | head -1)"
     grep -qF -- "$signer_cn" "$work/pkgutil.log" \

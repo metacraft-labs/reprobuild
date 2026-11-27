@@ -42,9 +42,9 @@
 # the release workflow on a tag) refuses the stand-in mode before it starts.
 #
 # Overrides (configuration, both modes): REPRO_NOTARYTOOL (default
-# `xcrun notarytool` in production, the stand-in otherwise), REPRO_STAPLER
-# (`xcrun stapler` / the stand-in), and the signing tools'
-# variables documented in repro-sign-installer.sh. REPRO_NOTARYTOOL and
+# `/usr/bin/xcrun notarytool` in production, the stand-in otherwise),
+# REPRO_STAPLER (`/usr/bin/xcrun stapler` / the stand-in), and the signing
+# tools' variables documented in repro-sign-installer.sh. REPRO_NOTARYTOOL and
 # REPRO_STAPLER are split on spaces into a command and its leading arguments.
 #
 # ## Notarization (.pkg)
@@ -57,7 +57,8 @@
 # (`notarytool log`) and fails. Then `<stapler> staple <pkg>`. On macOS,
 # `spctl --assess --type install` must ACCEPT a production package and must
 # REJECT a stand-in one (no Apple chain, no ticket): the rejection is the
-# expected result and is asserted, not hidden.
+# expected result and is asserted, not hidden. On macOS, xcrun and spctl are
+# Apple's, run as /usr/bin/xcrun and /usr/sbin/spctl, never found on PATH.
 
 set -eu
 
@@ -66,6 +67,42 @@ SIGN_DIR="$(CDPATH='' cd -- "$SELF_DIR/../release-signing" && pwd)"
 
 log() { printf 'build-signed-installer: %s\n' "$*" >&2; }
 die() { printf 'build-signed-installer: REFUSED: %s\n' "$*" >&2; exit 1; }
+
+# Apple's tools are run by absolute path on macOS, never found on PATH: the
+# release leg runs inside a Nix environment whose PATH lacks /usr/sbin, where
+# spctl lives, and a PATH lookup would also let a program of the same name
+# from that environment stand in for Apple's.
+#
+# `apple_tool <name>` sets APPLE_TOOL to the tool's path and returns 0. On
+# macOS a tool that is not executable at its path is fatal, and the error
+# names the path. Elsewhere the name is looked up on PATH, as it always was,
+# and the call returns 1 when it is not there.
+#
+# REPRO_APPLE_TOOL_ROOT is for tests only (empty by default): a directory put
+# in front of every path, which also selects the macOS lookup on any host. It
+# swaps the notary client and the Gatekeeper assessment, so it is honoured
+# only in STAND-IN mode outside a publishing run; in production mode the run
+# dies, so no variable can replace the spctl that must accept the package.
+apple_tool_root_check() {
+  [ -n "${REPRO_APPLE_TOOL_ROOT:-}" ] || return 0
+  if [ "${mode:-}" != standin ] || [ "${REPRO_RELEASE_PUBLISHING:-0}" = 1 ]; then
+    die 'REPRO_APPLE_TOOL_ROOT is a test-only seam and is refused in production mode and in a publishing run; unset it'
+  fi
+}
+apple_tool() {
+  case "$1" in
+    xcrun) APPLE_TOOL=/usr/bin/xcrun ;;
+    spctl) APPLE_TOOL=/usr/sbin/spctl ;;
+    *) die "internal: no path is recorded for the Apple tool '$1'" ;;
+  esac
+  apple_tool_root_check
+  if [ -n "${REPRO_APPLE_TOOL_ROOT:-}" ] || [ "$(uname -s)" = Darwin ]; then
+    APPLE_TOOL="${REPRO_APPLE_TOOL_ROOT:-}$APPLE_TOOL"
+    [ -x "$APPLE_TOOL" ] || die "$1 not found at $APPLE_TOOL (macOS installs it there; PATH is not searched for it)"
+  else
+    APPLE_TOOL="$(command -v "$1" 2>/dev/null)" || return 1
+  fi
+}
 
 ecosystem=''; out=''; version=''; archive=''; package=''; platform=''; asset_arch=''
 while [ $# -gt 0 ]; do
@@ -77,7 +114,7 @@ while [ $# -gt 0 ]; do
     --package) package="$2"; shift 2 ;;
     --platform) platform="$2"; shift 2 ;;
     --asset-arch) asset_arch="$2"; shift 2 ;;
-    -h|--help) sed -n '2,60p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,62p' "$0"; exit 0 ;;
     *) die "unknown argument: $1" ;;
   esac
 done
@@ -123,6 +160,7 @@ if [ "$mode" = standin ] && [ "${REPRO_RELEASE_PUBLISHING:-0}" = 1 ]; then
   die "no production credentials for the $ecosystem and this is a publishing run (REPRO_RELEASE_PUBLISHING=1); a stand-in-signed $ecosystem is never published"
 fi
 log "mode: $mode"
+apple_tool_root_check
 
 creds="$scratch/credentials"
 mkdir "$creds"
@@ -135,8 +173,12 @@ if [ "$mode" = production ]; then
     printf '%s' "$REPRO_PKG_SIGNING_P12_PASSWORD" > "$creds/identity.password"
     printf '%s\n' "$REPRO_NOTARY_API_KEY_P8" > "$creds/notary.p8"
     notary_key_id="$REPRO_NOTARY_API_KEY_ID"; notary_issuer="$REPRO_NOTARY_API_ISSUER_ID"
-    notarytool="${REPRO_NOTARYTOOL:-xcrun notarytool}"
-    stapler="${REPRO_STAPLER:-xcrun stapler}"
+    xcrun=xcrun
+    if [ -z "${REPRO_NOTARYTOOL:-}" ] || [ -z "${REPRO_STAPLER:-}" ]; then
+      if apple_tool xcrun; then xcrun="$APPLE_TOOL"; fi
+    fi
+    notarytool="${REPRO_NOTARYTOOL:-$xcrun notarytool}"
+    stapler="${REPRO_STAPLER:-$xcrun stapler}"
   else
     identity="$creds/identity.pfx"
     decode_b64 "$REPRO_AUTHENTICODE_PFX_BASE64" "$identity" REPRO_AUTHENTICODE_PFX_BASE64
@@ -161,6 +203,11 @@ else
     trust_root="$creds/standin/authenticode.pem"
   fi
 fi
+
+# spctl is resolved before anything is built, so that on macOS a missing one
+# refuses the run before it leaves an unassessed package behind.
+spctl=''
+if [ "$ecosystem" = pkg ] && apple_tool spctl; then spctl="$APPLE_TOOL"; fi
 
 # ── Build ────────────────────────────────────────────────────────────
 if [ -n "$package" ]; then
@@ -222,8 +269,8 @@ if [ "$ecosystem" = pkg ]; then
   "$@" staple "$signed" >"$scratch/staple.log" 2>&1 \
     || { cat "$scratch/staple.log" >&2; rm -f "$signed"; die 'stapling the notarization ticket failed'; }
   printf 'stapled: yes (%s)\n' "$notary_kind" >> "$report"
-  if command -v spctl >/dev/null 2>&1; then
-    if spctl --assess --type install -vv "$signed" >"$scratch/spctl.log" 2>&1; then spctl_ok=1; else spctl_ok=0; fi
+  if [ -n "$spctl" ]; then
+    if "$spctl" --assess --type install -vv "$signed" >"$scratch/spctl.log" 2>&1; then spctl_ok=1; else spctl_ok=0; fi
     cat "$scratch/spctl.log" >&2
     if [ "$mode" = production ]; then
       [ "$spctl_ok" = 1 ] || { rm -f "$signed"; die 'spctl --assess --type install rejects the notarized package'; }

@@ -3371,10 +3371,10 @@ tests/unit/test_regenerate_suite_artifacts.py	python	25
 tests/unit/test_release_cache_push.py	python	17
 tests/unit/test_release_catalog_probe_scratch.py	python	7
 tests/unit/test_release_git.py	python	6
-tests/unit/test_release_native_packages.py	python	25
+tests/unit/test_release_native_packages.py	python	29
 tests/unit/test_release_pipeline_identity.py	python	11
 tests/unit/test_release_plan_matrix.py	python	30
-tests/unit/test_release_signed_installers.py	python	31
+tests/unit/test_release_signed_installers.py	python	35
 tests/unit/test_release_smoke_dev_exec.py	python	21
 tests/unit/test_release_staged_data_files.py	python	12
 tests/unit/test_release_tag_names_build.py	python	11
