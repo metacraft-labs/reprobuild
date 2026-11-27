@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 36,
-    "nimTestBinaries": 3318,
+    "nimTestBinaries": 3320,
     "pureUnitConsolidationGroups": 97,
-    "pureUnitTests": 856,
+    "pureUnitTests": 857,
     "staticallyDetectedRuntimeCompilerFlowTests": 165,
-    "testEntries": 3378
+    "testEntries": 3380
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1873,9 +1873,9 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 30,
-      "integration": 1887,
+      "integration": 1888,
       "platform/destructive": 206,
-      "pure unit": 856,
+      "pure unit": 857,
       "unclassified": 399
     },
     "graphOwnedTestArtifacts": [
@@ -2096,9 +2096,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 3318,
+    "nimTestBinaryCount": 3320,
     "pythonTestFileCount": 60,
-    "testEntryCount": 3378
+    "testEntryCount": 3380
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -15031,6 +15031,25 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_plan_units",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_build_engine",
+        "repro_cargo_edge",
+        "repro_cargo_fetch"
+      ],
+      "owner": "libs/repro_cargo_edge",
+      "requiresReproBinary": false,
+      "source": "libs/repro_cargo_edge/tests/t_plan_units.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 7,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_record_mode",
       "class": "pure unit",
       "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
@@ -15061,6 +15080,26 @@
       "source": "libs/repro_cargo_edge/tests/t_rqe_cg3_cargo_edge.nim",
       "sourceSuiteCount": 5,
       "staticCaseCount": 22,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/test_registry_crate_unit_edge",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [
+        "ssl"
+      ],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_core",
+        "repro_test_support"
+      ],
+      "owner": "libs/repro_cargo_fetch",
+      "requiresReproBinary": true,
+      "source": "libs/repro_cargo_fetch/tests/test_registry_crate_unit_edge.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -59479,6 +59518,7 @@
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
+        "repro_build_engine",
         "repro_cargo_edge",
         "repro_test_support"
       ],
@@ -59486,7 +59526,7 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_rqe_cg5_plan_completes_to_cargos_argv.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 1,
+      "staticCaseCount": 2,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

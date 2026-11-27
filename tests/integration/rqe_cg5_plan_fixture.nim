@@ -118,6 +118,53 @@ proc writePlanWorkspace*(root: string; mode: ScriptMode; registry = false) =
     "use proc_macro::TokenStream;\n#[proc_macro]\n" &
     "pub fn answer(_: TokenStream) -> TokenStream { \"42\".parse().unwrap() }\n")
 
+proc writeFeatureWorkspace*(root: string) =
+  ## A three-package workspace with no build script and no proc-macro, whose
+  ## members declare features, so that every unit cargo plans is a library
+  ## or binary unit the plan alone completes:
+  ##
+  ##   - `feat`: features `default = ["fast"]`, `fast`, `extra`, and `leaf`,
+  ##     which enables its optional crates.io dependency `regleaf`
+  ##     (`setupRegistry`); its output names the features it was compiled
+  ##     with;
+  ##   - `util`: a library and a binary of the same package, depending on
+  ##     `feat` with feature `extra`;
+  ##   - `app`: a binary depending on `feat` with feature `leaf` and on
+  ##     `util`.
+  ##
+  ## Cargo unifies `feat`'s features across the build, so its one unit has
+  ## `fast` (a default), `extra` (asked by `util`) and `leaf` (asked by
+  ## `app`), and both binaries print `fast extra leaf5 0.1.0`: no single
+  ## manifest names that set.
+  writeFileIn(root, "Cargo.toml",
+    "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n" &
+    "[dependencies]\nfeat = { path = \"feat\", features = [\"leaf\"] }\n" &
+    "util = { path = \"util\" }\n\n" &
+    "[workspace]\nmembers = [\"feat\", \"util\"]\n")
+  writeFileIn(root, "src/main.rs",
+    "fn main() { println!(\"{} | {}\", feat::describe(), util::tag()); }\n")
+  writeFileIn(root, "feat/Cargo.toml",
+    "[package]\nname = \"feat\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n" &
+    "[features]\ndefault = [\"fast\"]\nfast = []\nextra = []\n" &
+    "leaf = [\"dep:regleaf\"]\n\n" &
+    "[dependencies]\nregleaf = { version = \"0.1.0\", optional = true }\n")
+  writeFileIn(root, "feat/src/lib.rs",
+    "pub fn describe() -> String {\n" &
+    "    let mut s = String::new();\n" &
+    "    if cfg!(feature = \"fast\") { s.push_str(\"fast \"); }\n" &
+    "    if cfg!(feature = \"extra\") { s.push_str(\"extra \"); }\n" &
+    "    #[cfg(feature = \"leaf\")]\n" &
+    "    s.push_str(&format!(\"leaf{} \", regleaf::leaf()));\n" &
+    "    s.push_str(env!(\"CARGO_PKG_VERSION\"));\n" &
+    "    s\n}\n")
+  writeFileIn(root, "util/Cargo.toml",
+    "[package]\nname = \"util\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n" &
+    "[dependencies]\nfeat = { path = \"../feat\", features = [\"extra\"] }\n")
+  writeFileIn(root, "util/src/lib.rs",
+    "pub fn tag() -> String { format!(\"util:{}\", feat::describe()) }\n")
+  writeFileIn(root, "util/src/main.rs",
+    "fn main() { println!(\"{}\", util::tag()); }\n")
+
 type ClosedRun* = object
   code*: int
   output*: string
@@ -236,6 +283,7 @@ proc proxyEnv*(l: ref Listener): seq[(string, string)] =
 type RegistrySetup* = object
   store*: string          ## the store root holding the fetched prefixes
   crates*: seq[CratePrefix]  ## each crate with its prefix
+  rows*: seq[CrateRow]       ## each crate's lock row, in the same order
   testVendor*: string
     ## A vendor directory the TEST made by copying each prefix, for the
     ## lockfile and for a real cargo build: independent of the record run's
@@ -314,6 +362,7 @@ proc setupRegistry*(work: string; mode: ScriptMode): RegistrySetup =
   for c in fetched.crates:
     result.crates.add CratePrefix(name: c.row.name, version: c.row.version,
       prefix: c.prefix)
+    result.rows.add c.row
     let dir = result.testVendor / (c.row.name & "-" & c.row.version)
     copyDir(c.prefix, dir)
     for path in walkDirRec(dir, yieldFilter = {pcFile, pcDir}):

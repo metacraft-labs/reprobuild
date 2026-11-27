@@ -11,6 +11,7 @@ learns from it and asks it what it produced. See [`docs/cargo-edge.md`](../../do
 | `repro_cargo_edge/record_mode.nim` | the wrapper's record mode: records each unit and build-script run cargo starts, writes placeholders instead of compiling, and the build-script stub that prints sentinel directives |
 | `repro_cargo_edge/cargo_plan.nim` | the plan derived from a record run's recordings (units, runs, links, slots), and its binary record |
 | `repro_cargo_edge/plan_run.nim` | the record-only graph-production edge's process (`repro-rustc-wrapper --cargo-plan`): runs cargo in record mode and writes the plan |
+| `repro_cargo_edge/plan_units.nim` | the rustc edges of the plan's library and binary units, members and crates.io crates alike (`planUnitEdges`); a plan with units they do not build yet is refused as a whole |
 | `repro_cargo_edge/plan_edge.nim` | the edge's declaration (`cargoPlanEdge`): inputs, the plan as its output, scratch, closed environment |
 | `repro_cargo_edge/products.nim` | final products from cargo's `--message-format=json`, and the dynamic-graph fragment that declares them |
 | `repro_cargo_edge/edge.nim` | runs one cargo invocation and writes what it produced |
