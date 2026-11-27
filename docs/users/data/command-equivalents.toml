@@ -201,8 +201,8 @@ title = "repo and git submodules"
 
   [[tool.row]]
   theirs = "git submodule update"
-  repro = "repro workspace pull"
-  note = "Moves every repository to the revision the manifests declare."
+  repro = ""
+  note = "No equivalent for a repository's own submodules: repro clones a repository without them and names any it left uninitialised. Run `git submodule update --init --recursive` in that repository."
 
   [[tool.row]]
   theirs = "repo status"

@@ -11,7 +11,8 @@ Reprobuild replaces multi-repo wrappers (like Google's `repo` tool or Git submod
 | VCS Manager Concept | Reprobuild Equivalent | How Repro Solves It |
 |---|---|---|
 | **Manifest File** (`default.xml`) | `repos/*.toml` fragments (+ `repro-workspace.toml` settings) | Fragments declare sibling git repositories, clone locations, and mainline branches; the settings file holds workspace-wide policy. |
-| **`repo sync` / submodules** | `repro workspace sync` | Clones and fast-forwards sibling checkouts to match the manifest configuration. |
+| **`repo sync`** | `repro workspace sync` | Clones and fast-forwards sibling checkouts to match the manifest configuration. |
+| **`git submodule update`** (a member repo's own submodules) | none: `git -C <repo> submodule update --init --recursive` | Repro does not manage submodules a participating repo declares in its own `.gitmodules`; a clone leaves them uninitialised, as `git clone` does. `init`, `enable`, `sync`, `workspace pull` and the `branch ../<dir>` fork name each repo they cloned that has uninitialised submodules, with that remedy (`submodulesUninitialized` in `--json`), without changing the exit code. A submodule that should be versioned with the workspace belongs in its own `repos/*.toml` fragment instead. |
 | **Branch Status** (`repo status`) | `repro workspace status` | Audits uncommitted changes and commit hash alignments across all checkouts. |
 | **Workspace Init** | `repro workspace init` | Bootstraps a clean workspace on a new host. |
 
