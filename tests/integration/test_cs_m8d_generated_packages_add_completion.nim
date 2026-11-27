@@ -14,13 +14,11 @@
 ##      format's locations (`dpkg-deb -c` and the data tar for the .deb,
 ##      `rpm -qlp` and `bsdtar` for the .rpm, `bsdtar` for the Arch package
 ##      and the tarball, `unsquashfs` over the AppImage's embedded squashfs,
-##      the directory for the prefix, assembled but not put through its
-##      builder-path gate: a cross image keeps debug info that names
-##      build-host paths, which that gate refuses, a separate defect; its
-##      binary names the triple's system loader in `PT_INTERP` whichever C
-##      compiler on `PATH` linked it, the dev shell's Nix gcc included),
-##      each byte-equal to what the built
-##      program prints for `--printCompletion=<shell>`, and no PowerShell
+##      the directory for the prefix, which its builder-path gate passed:
+##      no image in it names a build-host path, and its binary names the
+##      triple's system loader in `PT_INTERP` whichever C compiler on `PATH`
+##      linked it, the dev shell's Nix gcc included), each byte-equal to what the
+##      built program prints for `--printCompletion=<shell>`, and no PowerShell
 ##      script (no Linux format has a place PowerShell reads one from).
 ##   2. **Cross-compiled.** With `--target=armv7-unknown-linux-gnueabihf`
 ##      (through the zig cross toolchain), the binary is an ARM executable the
@@ -44,7 +42,8 @@
 ## Tools. The build runs with `--tool-provisioning=path`, so every tool the
 ## producers name comes from `PATH`: `dpkg-deb`, `rpmbuild` (and `rpm` to read
 ## the package back), `bsdtar`, `appimagetool`, `unsquashfs`, `patchelf`,
-## `readelf`, `zig` and the C toolchain. Two have no executable of their name
+## `readelf`, `llvm-objcopy` (the prefix's debug strip), `zig` and the C
+## toolchain. Two have no executable of their name
 ## and are given as path-mode sidecars, the format the resolver reads
 ## (`<selector>.repro-tool-profile` naming `resolvedExecutablePath`):
 ## `install-file` (the host's `install`) and `appimage-runtime` (a
@@ -83,7 +82,7 @@ const
   RequiredTools = ["sh", "gcc", "nim", "zig", "install", "patchelf",
     "readelf", "tar", "gzip", "dpkg-deb", "rpmbuild", "rpm", "find", "diff",
     "sed", "grep", "bsdtar", "appimagetool", "runtime-x86_64", "file",
-    "unsquashfs"]
+    "unsquashfs", "llvm-objcopy"]
 
 proc siblingSrc(sibling, variable, marker: string): string =
   ## A sibling's `src/`, as this repository's `config.nims` finds it.
@@ -324,6 +323,10 @@ proc readPackage(p: Project; format, scratch: string): PackageView =
       if kind == pcDir and path.extractFilename.startsWith("build"):
         if dirExists(path / "prefix"): prefixDir = path / "prefix"
     doAssert prefixDir.len > 0, "no installed prefix under " & p.root
+    # The gate writes its stamp beside the prefix only when no image in it
+    # names a build-host path; a refusal fails the build before this.
+    doAssert fileExists(prefixDir & ".builder-path-gate.ok"),
+      "the installed prefix's builder-path gate did not pass: " & prefixDir
     # The assembly made the binary name the triple's system loader, not the
     # one of the toolchain that linked it (a Nix gcc's store glibc).
     let keyed = prefixDir.parentDir.extractFilename

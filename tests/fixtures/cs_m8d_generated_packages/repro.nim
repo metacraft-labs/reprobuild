@@ -76,6 +76,8 @@ package cs_m8d_generated_packages:
     "basename"
     "mv"
     "touch"
+    # The assembly strips every image's debug info with it.
+    "llvm-objcopy"
 
   executable csm8dTool:
     name: "csm8d-tool"
@@ -114,10 +116,8 @@ package cs_m8d_generated_packages:
       section: "devel",
       priority: "optional")
     let site = packagingSite("cs_m8d_generated_packages")
-    # `.#packages`: every artifact, and the installed prefix's assembly.
-    # Not its builder-path gate: a clispec program's image carries the
-    # absolute path of the `repro.nim` its description came from, which
-    # the gate refuses; that is a separate defect, outside this fixture.
+    # `.#packages`: every artifact, and the installed prefix's assembly and
+    # its builder-path gate.
     var artifacts: seq[BuildActionDef]
     for format in Formats:
       case format
@@ -136,7 +136,9 @@ package cs_m8d_generated_packages:
             producer: exe.id)],
           systemSonames: @GlibcSonames,
           omitShellCompletion: OmitCompletion)
-        artifacts.add(installedPrefix(spec, activeProviderProjectRoot()).assemble)
+        let prefix = installedPrefix(spec, activeProviderProjectRoot())
+        artifacts.add(prefix.assemble)
+        artifacts.add(prefix.gate)
       else:
         raise newException(ValueError, "unknown format " & format)
     discard collect("packages", artifacts)

@@ -407,6 +407,41 @@ suite "a zig target is threaded into the C operations":
           discard nim.c(source = "src/hello.nim", binary = "build/bin/h32",
             cpu = "i386")).len > 0))
 
+  test "nim.c under a zig target produces no debug info; native is unchanged":
+    # An image built for a zig target goes to another machine as an
+    # installed prefix, whose builder-path gate refuses the build-host
+    # directories debug info names: `-g0` for every C compile, `-Wl,--strip-debug` at the
+    # link (zig's own start-up objects carry debug info no compile flag
+    # reaches). Ahead of the caller's flags, which follow unchanged.
+    proc flagValues(a: BuildActionDef; name: string): seq[string] =
+      for arg in a.call.arguments:
+        if arg.name == name:
+          result.add(arg.encodedValue.split('\x1f'))
+    withTarget(ZigTriple, proc() =
+      inBuild(proc() =
+        let act = nim.c(source = "src/nodebug.nim",
+          binary = "build/bin/nodebug", nimcache = "build/nimcache/nodebug",
+          passC = @["-DCALLER"], passL = @["-lcaller"])
+        checkpoint($argStrings(act))
+        check flagValues(act, "passC") == @ZigNoDebugPassC & @["-DCALLER"]
+        check flagValues(act, "passL") == @ZigNoDebugPassL & @["-lcaller"]
+        check "-g0" in flagValues(act, "passC")
+        check "-Wl,--strip-debug" in flagValues(act, "passL")))
+    withTarget("", proc() =
+      inBuild(proc() =
+        # Another name: the zig case's frame registered `nodebug` already.
+        let native = nim.c(source = "src/nodebug.nim",
+          binary = "build/bin/nodebug-native",
+          nimcache = "build/nimcache/nodebug-native",
+          passC = @["-DCALLER"], passL = @["-lcaller"])
+        checkpoint($argStrings(native))
+        check flagValues(native, "passC") == @["-DCALLER"]
+        check flagValues(native, "passL") == @["-lcaller"]
+        let bare = nim.c(source = "src/bare.nim", binary = "build/bin/bare",
+          nimcache = "build/nimcache/bare")
+        check flagValues(bare, "passC").len == 0
+        check flagValues(bare, "passL").len == 0))
+
   test "cmake_package configures with a toolchain file naming the wrappers":
     withTarget(ZigTriple, proc() =
       inBuild(proc() =

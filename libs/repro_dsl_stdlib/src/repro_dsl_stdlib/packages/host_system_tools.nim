@@ -786,6 +786,29 @@ package `tee`:
       os = "windows",
       lockIdentity = "tarball:git@2.54.0:sha256:bea006a6cc69673f27b1647e84ab3a68e912fbc175ab6320c5987e012897f311"
 
+package `true`:
+  provisioning:
+    nixPackage "nixpkgs#coreutils", executablePath = "bin/true",
+      nixpkgsRev = CanonicalNixpkgsRev,
+      nixpkgsNarHash = CanonicalNixpkgsNarHash
+    # Windows: Git for Windows ships this at `usr/bin/true.exe`, the same two
+    # channels as `tee`. Without the package a recipe declaring `uses: "true"`
+    # (runquota launches the do-nothing command in several tests, and NixOS
+    # has no /bin/true to fall back on) was refused by tool resolution in nix
+    # mode, with a message that blames an unreachable catalog.
+    scoopApp(bucket = "main", app = "git",
+      preferredVersion = ">=2", executablePath = "usr/bin/true.exe",
+      requiresExecutionProfileChecksum = false)
+    tarball url = "https://github.com/git-for-windows/git/releases/download/v2.54.0.windows.1/PortableGit-2.54.0-64-bit.7z.exe",
+      sha256 = "bea006a6cc69673f27b1647e84ab3a68e912fbc175ab6320c5987e012897f311",
+      archiveType = "7z.exe",
+      executablePath = "usr/bin/true.exe",
+      version = "8.32",
+      packageId = "git@2.54.0",
+      cpu = "x86_64",
+      os = "windows",
+      lockIdentity = "tarball:git@2.54.0:sha256:bea006a6cc69673f27b1647e84ab3a68e912fbc175ab6320c5987e012897f311"
+
 package `du`:
   provisioning:
     nixPackage "nixpkgs#coreutils", executablePath = "bin/du",

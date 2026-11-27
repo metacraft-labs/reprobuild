@@ -21,7 +21,7 @@
 ## PATH (the host's gcc already names the system loader). The images are
 ## never run; what is under test is what the assembly writes into them.
 
-import std/[os, osproc, sequtils, strutils, tempfiles, unittest]
+import std/[algorithm, os, osproc, sequtils, strutils, tempfiles, unittest]
 
 import repro_test_support/reasoned_skip
 import repro_core/target_object_check
@@ -44,6 +44,17 @@ template requireTools(body: untyped) =
       check false
     else:
       skip(missing)
+  else:
+    body
+
+template requireStrip(body: untyped) =
+  ## The default debug strip's tool, for the cases that run it.
+  if findExe(LlvmObjcopyTool).len == 0:
+    if getEnv("REPROBUILD_GATE_RUN") == "1":
+      checkpoint(LlvmObjcopyTool & " is not on PATH in a gate run")
+      check false
+    else:
+      skip(LlvmObjcopyTool & " is not on PATH")
   else:
     body
 
@@ -129,6 +140,19 @@ proc interpreter(f: string): string =
   if at < 0: return ""
   let rest = r.output[at + marker.len .. ^1]
   rest[0 ..< rest.find(']')]
+
+proc debugSections(f: string): int =
+  ## How many `.debug*` sections the ELF file has.
+  let r = sh("readelf -S -W " & quoteShell(f), "/")
+  doAssert r.code == 0, r.output
+  for line in r.output.splitLines():
+    if "] .debug" in line or " .debug_" in line: inc result
+
+proc snapshot(dir: string): seq[(string, string)] =
+  ## Every regular file under `dir`, by relative path, with its bytes.
+  for path in walkDirRec(dir, relative = true):
+    result.add((path, readFile(dir / path)))
+  result.sort()
 
 const FakeStoreGlibc = "/nix/store/" & repeat('a', 32) & "-glibc-2.42/lib/"
   ## A store-shaped directory: what a Nix gcc's images name their loader in.
@@ -319,6 +343,156 @@ suite "an installed prefix":
       check "libbar.so.1" in r.output
       check "error: Unexpected" in r.output
       check not fileExists(root / "prefix" / "lib" / "libbar.so.1.stripped")
+
+  test "every image with debug info is stripped of it, and the gate passes":
+    # Requirement: the assembly strips the debug info of every ELF image it
+    # places, whatever compiler built it, so the builder-path gate holds for
+    # any toolchain. The images here are built by the
+    # host's C compiler with `-g`: their DWARF names the directory they were
+    # compiled in, which is the gate's working directory. The strip is the
+    # default one (`llvm-objcopy --strip-debug`), run for real.
+    requireTools:
+      requireStrip:
+        let root = createTempDir("prefix-debug-", "")
+        defer: removeDir(root)
+        let f = makeFixture(root, portableInterp = true)
+        # Rebuilt with debug info: the entry `bin/app`, the entry
+        # `lib/libplain.so`, and the bundled `libbar.so.1`.
+        cc(root, "-g -shared -fPIC -Wl,-soname,libbar.so.1 " &
+          "-o libs/libbar.so.1 bar.c")
+        cc(root, "-g -o built/bin/app app.c -Llibs -l:libfoo.so.1 " &
+          "-Wl,-rpath-link,libs -Wl,--dynamic-linker=/lib/ld-linux.so.2")
+        cc(root, "-g -shared -fPIC -o built/lib/libplain.so plain.c")
+        for image in [f.built / "bin" / "app", f.built / "lib" / "libplain.so",
+                      f.libs / "libbar.so.1"]:
+          checkpoint(image)
+          require debugSections(image) > 0
+        # Control: the images as compiled fail the gate, on the build
+        # directory their debug info names.
+        let refused = sh(gateScript(f.built), root)
+        checkpoint(refused.output)
+        check refused.code != 0
+        check ("bin/app: ") in refused.output
+        check (" carry " & root) in refused.output
+        let s = spec(f, @[f.libs])
+        let r = sh(assemblyScript(s), root)
+        checkpoint(r.output)
+        require r.code == 0
+        let o = root / "prefix"
+        for rel in ["bin/app", "lib/libplain.so", "lib/libbar.so.1"]:
+          checkpoint(rel)
+          check debugSections(o / rel) == 0
+          # Only the debug sections go: the symbol table stays.
+          check ".symtab" in sh("readelf -S -W " & quoteShell(o / rel),
+            "/").output
+        # An executable stays executable.
+        check fpUserExec in getFilePermissions(o / "bin" / "app")
+        let gate = sh(gateScript(o), root)
+        checkpoint(gate.output)
+        check gate.code == 0
+        check fileExists(gateStamp(o))
+
+  test "a file that is not ELF, or an ELF without debug info, is untouched":
+    requireTools:
+      requireStrip:
+        let root = createTempDir("prefix-debug-none-", "")
+        defer: removeDir(root)
+        let f = makeFixture(root, portableInterp = true)
+        # A script and a data file, under bin/ and lib/, where the strip
+        # looks; the data file even holds the words the strip tests for.
+        writeFile(f.built / "bin" / "tool.sh", "#!/bin/sh\necho .debug_info\n")
+        setFilePermissions(f.built / "bin" / "tool.sh",
+          {fpUserRead, fpUserWrite, fpUserExec})
+        writeFile(f.built / "lib" / "data.bin", "\x7fELX .debug_line\n")
+        var s = spec(f, @[f.libs])
+        for (rel, dest) in [("bin/tool.sh", "bin/tool.sh"),
+                            ("lib/data.bin", "lib/data.bin")]:
+          s.entries.add(PrefixEntry(source: f.built / rel, dest: dest))
+        let r = sh(assemblyScript(s), root)
+        checkpoint(r.output)
+        require r.code == 0
+        let o = root / "prefix"
+        check readFile(o / "bin" / "tool.sh") == readFile(f.built / "bin" / "tool.sh")
+        check readFile(o / "lib" / "data.bin") == readFile(f.built / "lib" / "data.bin")
+        # `libplain.so` (no `-g`, nothing bundled, so no RUNPATH either)
+        # keeps its bytes: a distribution's signed library stays signed.
+        require debugSections(f.built / "lib" / "libplain.so") == 0
+        check readFile(o / "lib" / "libplain.so") ==
+          readFile(f.built / "lib" / "libplain.so")
+        check readFile(o / "lib" / "libbar.so.1") == readFile(f.libs / "libbar.so.1")
+
+  test "an image whose debug info has no .debug_info section is stripped too":
+    # The strip looks for any `.debug*` section, not one name: debug info
+    # that names the build directory also lives in `.debug_line` and
+    # `.debug_str`, which a toolchain can emit without `.debug_info`
+    # (line tables kept, the rest removed by a later tool). Such an image
+    # must not reach the gate with those sections still in it.
+    requireTools:
+      requireStrip:
+        let root = createTempDir("prefix-debug-line-", "")
+        defer: removeDir(root)
+        let f = makeFixture(root, portableInterp = true)
+        cc(root, "-g -shared -fPIC -o built/lib/libplain.so plain.c")
+        let lib = f.built / "lib" / "libplain.so"
+        let removed = sh(LlvmObjcopyTool & " --remove-section=.debug_info " &
+          quoteShell(lib), root)
+        require removed.code == 0
+        let before = sh("readelf -S -W " & quoteShell(lib), "/").output
+        checkpoint(before)
+        require ".debug_info" notin before
+        require debugSections(lib) > 0
+        let r = sh(assemblyScript(spec(f, @[f.libs])), root)
+        checkpoint(r.output)
+        require r.code == 0
+        check debugSections(root / "prefix" / "lib" / "libplain.so") == 0
+
+  test "a second assembly of images with debug info writes the same bytes":
+    requireTools:
+      requireStrip:
+        let root = createTempDir("prefix-debug-again-", "")
+        defer: removeDir(root)
+        let f = makeFixture(root, portableInterp = true)
+        cc(root, "-g -shared -fPIC -Wl,-soname,libbar.so.1 " &
+          "-o libs/libbar.so.1 bar.c")
+        cc(root, "-g -o built/bin/app app.c -Llibs -l:libfoo.so.1 " &
+          "-Wl,-rpath-link,libs -Wl,--dynamic-linker=/lib/ld-linux.so.2")
+        let s = spec(f, @[f.libs])
+        let o = root / "prefix"
+        require sh(assemblyScript(s), root).code == 0
+        let first = snapshot(o)
+        require first.len > 0
+        require debugSections(o / "bin" / "app") == 0
+        require sh(assemblyScript(s), root).code == 0
+        check snapshot(o) == first
+        # And an image already stripped goes through as it is: the strip is
+        # a no-op on its own output.
+        let again = root / "again"
+        createDir(again / "bin")
+        copyFile(o / "bin" / "app", again / "bin" / "app")
+        var t = s
+        t.output = root / "prefix2"
+        t.entries = @[PrefixEntry(source: again / "bin" / "app",
+          dest: "bin/app")]
+        require sh(assemblyScript(t), root).code == 0
+        check readFile(root / "prefix2" / "bin" / "app") ==
+          readFile(o / "bin" / "app")
+
+  test "the assembly edge declares the default strip's tool":
+    resetBuildActionRegistry()
+    let s = InstalledPrefixSpec(name: "d", triple: "x86_64-unknown-linux-gnu",
+      output: "/p/prefix", systemSonames: @GlibcSonames)
+    check effectiveDebugStrip(s) == LlvmObjcopyDebugStrip
+    check LlvmObjcopyDebugStrip in assemblyScript(s)
+    check LlvmObjcopyTool in installedPrefix(s, "/p").assemble.toolIdentityRefs
+    # A recipe that names its own strip declares its tool itself.
+    resetBuildActionRegistry()
+    var t = s
+    t.name = "e"
+    t.debugStripCommand = "my-strip"
+    t.extraTools = @["my-strip"]
+    let refs = installedPrefix(t, "/p").assemble.toolIdentityRefs
+    check "my-strip" in refs
+    check LlvmObjcopyTool notin refs
 
   test "a gate check that fails refuses the prefix; one that passes does not":
     requireTools:

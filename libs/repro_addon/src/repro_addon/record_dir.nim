@@ -805,6 +805,11 @@ proc writeDelegatedStateFile*(state, name, bytes: string; mode = 0o600) =
 # check's entries, moved into the shipping unit's outbox).
 # ---------------------------------------------------------------------------
 
+type CrashPointKill* = object of CatchableError
+  ## What a test's ``crashPointHook`` raises to stand for the process being
+  ## killed at that point: code that records its own failure (a ``finally``
+  ## writing a mark) lets this one through untouched, as a kill would.
+
 var crashPointHook*: proc (point: string) {.nimcall.} = nil
   ## Tests only: called at each point a run of the drop or legacy-state move
   ## may be killed at, so a test can stop it there (by raising) and run the
@@ -819,6 +824,9 @@ type
     left*: seq[string]       ## regular entries ``take`` failed for; they
                              ## stay for the next run
     asideNames*: seq[string] ## entries moved aside unread, with why
+    stuck*: seq[string]      ## entries handed over but not removed (also in
+                             ## ``left``): the only ones that may now be
+                             ## queued twice until a later run removes them
 
 proc dropAsideDir*(dir: string): string =
   ## Where an entry that cannot be handed over goes: a root directory beside
@@ -872,6 +880,19 @@ proc moveAside(dfd: cint; dir, name: string): string =
   if renameatC(dfd, name.cstring, afd, target.cstring) != 0:
     return "rename aside: " & osErrorMsg(osLastError())
   ""
+
+proc moveAsidePath*(path: string): string =
+  ## ``path`` itself (a link, a FIFO, a file: never what a link names)
+  ## renamed into ``dropAsideDir(path)`` beside it, as ``takeDropEntries``
+  ## moves an entry aside; "" when done, else why not, after which it is
+  ## unlinked if it can be (a directory is never unlinked here).
+  let parent = parentDir(path)
+  let pfd = posix.open(parent.cstring, O_RDONLY or ODirectory or O_CLOEXEC)
+  if pfd < 0: return "open " & parent & ": " & osErrorMsg(osLastError())
+  defer: discard posix.close(pfd)
+  result = moveAside(pfd, path, extractFilename(path))
+  if result.len > 0:
+    discard unlinkatC(pfd, extractFilename(path).cstring, 0)
 
 proc takeDropEntries*(dir: string; maxBytes: int; suffix = ".evr";
                       take: proc (e: DropEntry) {.closure.}): DropHarvest =
@@ -988,8 +1009,11 @@ proc takeDropEntries*(dir: string; maxBytes: int; suffix = ".evr";
         # Handed over and still here: the next run hands it over again, so
         # it counts as left (a shipping run must not send the copy and
         # then receive the entry a second time).
-        h.left.add(name & ": handed over but not removed (" &
-          osErrorMsg(osLastError()) & "); left for the next run")
+        let why = name & ": handed over but not removed (" &
+          osErrorMsg(osLastError()) & "); left for the next run"
+        h.left.add(why)
+        h.stuck.add(why)
         continue
+    if crashPointHook != nil: crashPointHook("removed:" & name)
     inc h.moved
   result = h

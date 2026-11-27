@@ -95,7 +95,7 @@ reprobuild command. A dash means reprobuild has no equivalent. The pages under
 |---|---|---|
 | `repo init` | `repro workspace init <organisation-or-url>` |  |
 | `repo sync` | `repro sync` |  |
-| `git submodule update` | `repro workspace pull` | Moves every repository to the revision the manifests declare. |
+| `git submodule update` | — | No equivalent for a repository's own submodules: repro clones a repository without them and names any it left uninitialised. Run `git submodule update --init --recursive` in that repository. |
 | `repo status` | `repro workspace status` |  |
 | `repo forall -c <command>` | `repro workspace forall -c <command>` |  |
 | `repo start <branch>` | `repro switch -b <branch>` |  |

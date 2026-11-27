@@ -58,6 +58,22 @@ completion files in it, the second Bash file
 /usr/local/etc/bash_completion.d/repro included. That pkgbuild packs exactly
 that root is the macOS case above.
 
+AppleToolLookupTests checks how the packager finds Apple's tools on macOS: by
+absolute path (/usr/bin/pkgbuild, /usr/sbin/pkgutil, /usr/bin/xattr), never on
+PATH, which in the release leg's Nix environment has no /usr/sbin. Apple's
+tools exist only on macOS, so the cases use a FAKE ROOT: REPRO_APPLE_TOOL_ROOT
+names a directory the packager puts in front of each absolute path (a variable
+for tests only, empty by default, which also selects the macOS lookup on any
+host), holding small scripts at usr/bin/pkgbuild, usr/sbin/pkgutil and
+usr/bin/xattr. The stand-ins are justified because what is under test is
+which file the packager runs, not what Apple's tools do: each records the
+path it was run as, and pkgbuild/pkgutil stand in only far enough for the
+packager's read-back to pass. Look-alikes of the same names come first on
+PATH, and PATH has no /usr/sbin; a case fails if a look-alike runs. What the
+real tools produce is the macOS case above. The packager refuses the root in
+a publishing run and with production signing credentials, which a case
+checks, so the seam cannot swap the tools of a package that is released.
+
 test_cs_m8c_windows_packages_carry_completion is the Windows counterpart. From
 a fixture .zip of the Windows archive's shape it generates the MSI authoring
 (.wxs) with repro-build-packages.sh --ecosystem msi, builds the MSI and reads
@@ -612,7 +628,11 @@ load ENV.fetch('STUB_FORMULA')
 Reprobuild.new.install
 """
 
-_MACOS_TOOLS = ("pkgbuild", "pkgutil", "ruby", "sha256sum", "sh")
+_MACOS_TOOLS = ("ruby", "sha256sum", "sh")
+# Apple's, checked and run at their absolute paths as the packager runs them:
+# the release leg's Nix PATH has no /usr/sbin, so a PATH check would skip the
+# macOS cases on the very runner they are for.
+_MACOS_APPLE_TOOLS = {"pkgbuild": "/usr/bin/pkgbuild", "pkgutil": "/usr/sbin/pkgutil"}
 
 
 def completion_files(payload):
@@ -691,8 +711,125 @@ class MacosPkgStagingTests(PackagerFixture):
                          "".join(EXPECTED_COMPLETIONS["deb"]))
 
 
-@unittest.skipUnless(all(shutil.which(t) for t in _MACOS_TOOLS),
-                     "needs " + ", ".join(_MACOS_TOOLS) + " (macOS)")
+# The fake root's stand-ins for Apple's tools (see the module header). Each
+# appends the path it was run as to $STUB_LOG. pkgbuild writes the path of the
+# --root it was given into the package; pkgutil --payload-files lists that
+# root the way pkgutil lists a payload ("." and "./<path>").
+APPLE_STUBS = {
+    "usr/bin/pkgbuild": r"""#!/bin/sh
+printf '%s\n' "$0" >> "$STUB_LOG"
+root=''
+while [ $# -gt 1 ]; do [ "$1" = --root ] && root="$2"; shift; done
+printf '%s\n' "$root" > "$1"
+""",
+    "usr/sbin/pkgutil": r"""#!/bin/sh
+printf '%s\n' "$0" >> "$STUB_LOG"
+[ "$1" = --payload-files ] || exit 2
+cd "$(cat "$2")" && find .
+""",
+    "usr/bin/xattr": r"""#!/bin/sh
+printf '%s\n' "$0" >> "$STUB_LOG"
+""",
+}
+
+LOOKALIKE = """#!/bin/sh
+printf 'LOOKALIKE %s\n' "$0" >> "$STUB_LOG"
+exit 3
+"""
+
+
+def write_executable(path, text):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+    path.chmod(0o755)
+
+
+def path_without_sbin(first):
+    """`first`, then this process's PATH without /usr/sbin or /sbin."""
+    rest = [d for d in os.environ.get("PATH", "").split(os.pathsep)
+            if d and os.path.normpath(d) not in ("/usr/sbin", "/sbin")]
+    return os.pathsep.join([str(first)] + rest)
+
+
+class AppleToolLookupTests(PackagerFixture):
+    """On macOS the packager runs Apple's tools by absolute path, never from
+    PATH (a fake root stands in for macOS; see the module header)."""
+
+    PLATFORM = "darwin"
+    ASSET_ARCH = "aarch64"
+
+    def setUp(self):
+        super().setUp()
+        self.fake_root = self.work / "apple-root"
+        for rel, text in APPLE_STUBS.items():
+            write_executable(self.fake_root / rel, text)
+        self.lookalikes = self.work / "lookalikes"
+        for name in ("pkgbuild", "pkgutil", "xattr"):
+            write_executable(self.lookalikes / name, LOOKALIKE)
+        self.log = self.work / "stub.log"
+        self.log.touch()
+
+    def env(self, **extra):
+        env = dict(os.environ, PATH=path_without_sbin(self.lookalikes), STUB_LOG=str(self.log))
+        env.pop("REPRO_APPLE_TOOL_ROOT", None)
+        env.pop("REPRO_PKG_STAGE_ONLY", None)
+        env.update(extra)
+        self.assertNotIn("/usr/sbin", env["PATH"].split(os.pathsep))
+        return env
+
+    def calls(self):
+        return self.log.read_text(encoding="utf-8").splitlines()
+
+    def test_cs_m8e_apple_tools_are_run_by_absolute_path_not_from_path(self):
+        run = self.build("pkg", env=self.env(REPRO_APPLE_TOOL_ROOT=str(self.fake_root)))
+        self.assertEqual(0, run.returncode, run.stderr)
+        pkg = self.out / f"reprobuild-{VERSION}-{self.PLATFORM}-{self.ASSET_ARCH}.pkg"
+        self.assertTrue(pkg.is_file(), sorted(os.listdir(self.out)))
+        self.assertEqual([f"{self.fake_root}/usr/bin/xattr",
+                          f"{self.fake_root}/usr/bin/pkgbuild",
+                          f"{self.fake_root}/usr/sbin/pkgutil"], self.calls())
+
+    def test_cs_m8e_a_missing_apple_tool_is_refused_naming_its_absolute_path(self):
+        for rel in ("usr/bin/pkgbuild", "usr/sbin/pkgutil", "usr/bin/xattr"):
+            with self.subTest(tool=rel):
+                (self.fake_root / rel).unlink()
+                self.log.write_text("", encoding="utf-8")
+                run = self.build("pkg", env=self.env(REPRO_APPLE_TOOL_ROOT=str(self.fake_root)))
+                self.assertNotEqual(0, run.returncode)
+                name = rel.rsplit("/", 1)[1]
+                self.assertIn(f"{name} not found at {self.fake_root}/{rel} (macOS installs it there; "
+                              "PATH is not searched for it)", run.stderr)
+                self.assertFalse(any(c.startswith("LOOKALIKE") for c in self.calls()), self.calls())
+                write_executable(self.fake_root / rel, APPLE_STUBS[rel])
+
+    def test_cs_m8e_the_test_root_is_refused_where_the_package_could_be_released(self):
+        """The fake root swaps Apple's tools, so a variable must not be able
+        to do that to a package that can be released: a publishing run and a
+        run with production signing credentials refuse it, running nothing."""
+        for extra in ({"REPRO_RELEASE_PUBLISHING": "1"},
+                      {"REPRO_PKG_SIGNING_P12_BASE64": "cHJvZHVjdGlvbg=="}):
+            with self.subTest(**extra):
+                self.log.write_text("", encoding="utf-8")
+                run = self.build("pkg", env=self.env(REPRO_APPLE_TOOL_ROOT=str(self.fake_root), **extra))
+                self.assertNotEqual(0, run.returncode)
+                self.assertIn("REPRO_APPLE_TOOL_ROOT is a test-only seam and is refused", run.stderr)
+                self.assertEqual([], self.calls())
+                self.assertEqual([], list(self.out.glob("*.pkg")))
+
+    @unittest.skipIf(os.uname().sysname == "Darwin", "the off-macOS behaviour is tested off macOS")
+    def test_cs_m8e_stage_only_off_macos_runs_no_apple_tool(self):
+        run = self.build("pkg", env=self.env(REPRO_PKG_STAGE_ONLY="1"))
+        self.assertEqual(0, run.returncode, run.stderr)
+        root = self.out / f"reprobuild-{VERSION}-{self.PLATFORM}-{self.ASSET_ARCH}.pkgroot"
+        self.assertTrue((root / "usr" / "local" / "bin" / "repro").is_file())
+        self.assertEqual([], list(self.out.glob("*.pkg")))
+        self.assertEqual([], self.calls())
+
+
+@unittest.skipUnless(os.uname().sysname == "Darwin"
+                     and all(os.access(p, os.X_OK) for p in _MACOS_APPLE_TOOLS.values())
+                     and all(shutil.which(t) for t in _MACOS_TOOLS),
+                     "needs " + ", ".join([*_MACOS_APPLE_TOOLS.values(), *_MACOS_TOOLS]) + " (macOS)")
 class MacosCompletionFilesTests(PackagerFixture):
     """The macOS .pkg and the Homebrew formula install repro's shell
     completion where macOS's shells look for it."""
@@ -708,7 +845,7 @@ class MacosCompletionFilesTests(PackagerFixture):
         """(listing, {path: (mode, bytes)} of every regular file under
         usr/local/share): the payload as pkgutil lists it, and as pkgutil
         expands it. Paths have no leading './'."""
-        listing = subprocess.run(["pkgutil", "--payload-files", str(pkg)],
+        listing = subprocess.run([_MACOS_APPLE_TOOLS["pkgutil"], "--payload-files", str(pkg)],
                                  capture_output=True, text=True, check=True).stdout
         # `._name` entries are AppleDouble records of a file's extended
         # attributes (pkgbuild writes one for each attribute holder, such as
@@ -719,7 +856,7 @@ class MacosCompletionFilesTests(PackagerFixture):
                        for line in listing.splitlines()
                        if line not in ("", ".") and not os.path.basename(line).startswith("._"))
         expanded = self.work / f"pkg-expanded-{tag}"
-        subprocess.run(["pkgutil", "--expand-full", str(pkg), str(expanded)], check=True)
+        subprocess.run([_MACOS_APPLE_TOOLS["pkgutil"], "--expand-full", str(pkg), str(expanded)], check=True)
         payload = expanded / "Payload"
         return paths, completion_files(payload), expanded
 

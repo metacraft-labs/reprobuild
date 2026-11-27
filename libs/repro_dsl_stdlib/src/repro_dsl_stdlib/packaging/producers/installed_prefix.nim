@@ -9,7 +9,13 @@
 ## Two edges, then a third for the archive:
 ##
 ## 1. **Assembly** (`installedPrefix`). Copies the spec's files and trees to
-##    their prefix paths, then completes the runtime closure: every
+##    their prefix paths and strips the debug sections of every ELF image
+##    under `bin/`, `lib/` and `nim/bin/` that carries any -- an entry as
+##    copied, a library as it is bundled -- with `debugStripCommand`
+##    (`llvm-objcopy --strip-debug` by default): debug info names the
+##    directories the image was built in, whatever compiler built it, and
+##    the gate refuses those. An image with no debug section is copied as
+##    it is. Then it completes the runtime closure: every
 ##    `DT_NEEDED` name of every ELF in the prefix, transitively, and every
 ##    name the images `dlopen`, is copied into `lib/` from the spec's
 ##    library sources -- except the C library, which stays the target's
@@ -108,12 +114,17 @@ type
       ## recipe directory of every entry and library source.
     debugStripCommand*: string
       ## A filter that reads an object on its standard input and writes it,
-      ## without its debug info, to its standard output
-      ## (`LlvmObjcopyDebugStrip` for a zig target: it reads every
-      ## architecture). Applied to a bundled library that carries debug
-      ## sections -- a source build's, whose debug info names build-host
-      ## directories -- and to none that carries none, so a distribution's
-      ## stripped library keeps its signed bytes. "" = keep.
+      ## without its debug info, to its standard output. "" =
+      ## `LlvmObjcopyDebugStrip`, which reads every architecture, and whose
+      ## tool (`llvm-objcopy`) the assembly edge then declares; a recipe
+      ## that names another declares its tool in `extraTools`. Applied to
+      ## every ELF image of the prefix (an entry, a bundled library) that
+      ## carries debug sections -- debug info names the build host's
+      ## directories (the C library's headers, the compiler's cache, the
+      ## project root), whichever compiler wrote it -- and to none that
+      ## carries none, so a distribution's stripped library keeps its signed
+      ## bytes. Only debug sections go (`--strip-debug`); the symbol table
+      ## stays. A strip that fails refuses the prefix, naming the image.
       ##
       ## A filter, not `<command> <in> <out>`: given an output path,
       ## llvm-objcopy writes a temporary with a random name beside it and
@@ -153,13 +164,24 @@ const
     ## prefix never bundles: it is the ABI of the target's kernel and loader
     ## (§5.3 decision C).
   LlvmObjcopyDebugStrip* = "llvm-objcopy --strip-debug - -"
-    ## `debugStripCommand` for a prefix whose libraries may be built for
-    ## another machine: LLVM's objcopy reads every target, and `- -` makes it
-    ## the filter that field requires, so it names no temporary.
+    ## The default `debugStripCommand`: LLVM's objcopy reads every target
+    ## (an armv7 image on an x86_64 build host, which the host's GNU objcopy
+    ## does not recognise), and `- -` makes it the filter that field
+    ## requires, so it names no temporary.
+  LlvmObjcopyTool* = "llvm-objcopy"
+    ## The tool `LlvmObjcopyDebugStrip` runs, declared on the assembly edge
+    ## when the spec leaves `debugStripCommand` empty.
   BuilderPathPatterns* = ["/nix/store/[0-9a-df-np-sv-z]{32}-",
                           "/home/[A-Za-z0-9._-]+/"]
     ## A concrete store path (its 32-character hash) and a concrete home
     ## directory (its user name): the words alone occur in code literals.
+
+proc effectiveDebugStrip*(spec: InstalledPrefixSpec): string =
+  ## The strip filter the assembly runs: the spec's, or
+  ## `LlvmObjcopyDebugStrip`. Never empty: every image is stripped of its
+  ## debug info, whatever compiler built it.
+  if spec.debugStripCommand.len > 0: spec.debugStripCommand
+  else: LlvmObjcopyDebugStrip
 
 proc q(value: string): string =
   "'" & value.replace("'", "'\\''") & "'"
@@ -217,6 +239,7 @@ proc assemblyScript*(spec: InstalledPrefixSpec): string =
       " " & q(o / path) & "; ")
   # A read-only source tree (a store copy) stays read-only when copied.
   s.add("chmod -R u+w " & q(o) & "; ")
+  s.add("O=" & q(o) & "; STRIP=" & q(effectiveDebugStrip(spec)) & "; ")
   # ---- the runtime closure ----------------------------------------------
   s.add("SYSTEM=' " & spec.systemSonames.join(" ") & " '; ")
   s.add("SOURCES=" & q(spec.librarySources.mapIt(it.dir).join("\n")) & "; ")
@@ -226,6 +249,23 @@ is_elf() { [ "$(head -c 4 "$1" 2>/dev/null)" = "$(printf '\177ELF')" ]; }
 # was false would end the script silently.
 elfs() { find "$1/bin" "$1/lib" "$1/nim/bin" -type f 2>/dev/null | while IFS= read -r f; do if is_elf "$f"; then printf '%s\n' "$f"; fi; done; return 0; }
 needed() { readelf -d "$1" 2>/dev/null | sed -n 's/.*(NEEDED).*\[\(.*\)\].*/\1/p'; }
+# strip_debug <file>: drop the debug sections of an ELF image that has any.
+# One with none is left byte for byte as it is (a distribution's signed
+# library), which also makes a second strip a no-op. A strip that fails can
+# leave a truncated output: never ship it, and never ship the unstripped
+# image in its place.
+strip_debug() {
+  readelf -S -W "$1" 2>/dev/null | grep -q '\.debug' || return 0
+  if ! $STRIP < "$1" > "$1.stripped"; then
+    rm -f "$1.stripped"
+    echo "installed prefix: stripping the debug info of ${1#$O/} failed ($STRIP)" >&2
+    exit 1
+  fi
+  # Copied over the image rather than renamed onto it, so the image keeps
+  # its mode (an executable stays executable).
+  cp "$1.stripped" "$1"; rm -f "$1.stripped"
+  return 0
+}
 find_lib() {
   printf '%s\n' "$SOURCES" | while IFS= read -r d; do
     if [ -n "$d" ] && [ -e "$d/$1" ]; then printf '%s\n' "$d/$1"; break; fi
@@ -238,22 +278,19 @@ bundle() {  # bundle <soname> <wanted-by>
   src=$(find_lib "$1")
   [ -n "$src" ] || { echo "installed prefix: $2 needs $1, which no library source holds:" >&2; printf '  %s\n' "$SOURCES" >&2; exit 1; }
   cp -L "$src" "$O/lib/$1"; chmod u+w "$O/lib/$1"
-  if [ -n "$STRIP" ] && readelf -S "$O/lib/$1" | grep -q '\.debug'; then
-    # A strip that fails can leave a truncated output: never ship it, and
-    # never ship the unstripped library in its place.
-    if ! $STRIP < "$O/lib/$1" > "$O/lib/$1.stripped"; then
-      rm -f "$O/lib/$1.stripped"
-      echo "installed prefix: stripping the debug info of lib/$1 failed ($STRIP)" >&2
-      exit 1
-    fi
-    mv "$O/lib/$1.stripped" "$O/lib/$1"
-  fi
+  strip_debug "$O/lib/$1"
   echo "$O/lib/$1" >> "$WORK"
 }
 """)
-  s.add("O=" & q(o) & "; WORK=$(mktemp); STRIP=" & q(spec.debugStripCommand) &
-    "; ")
+  # ---- debug info --------------------------------------------------------
+  # Every image the entries placed, before anything else reads or rewrites
+  # it: the closure and the symbol check then read the bytes that ship, and
+  # the strip never runs over a file patchelf has rewritten (patchelf moves
+  # program headers and adds segments that objcopy-style tools are known to
+  # mishandle). The bundled libraries are stripped as they are bundled.
+  s.add("WORK=$(mktemp); ")
   s.add("elfs \"$O\" > \"$WORK\"; ")
+  s.add("while IFS= read -r f; do strip_debug \"$f\"; done < \"$WORK\"; ")
   s.add("for n in " & spec.dlopenNames.mapIt(q(it)).join(" ") &
     "; do bundle \"$n\" 'the engine (dlopen)'; done; ")
   # The worklist grows as libraries are bundled: walk it to a fixed point.
@@ -454,6 +491,8 @@ proc installedPrefix*(spec: InstalledPrefixSpec; projectRoot: string):
   for dep in spec.extraDeps:
     if dep notin deps: deps.add(dep)
   var tools = assemblyTools
+  if spec.debugStripCommand.len == 0:
+    tools.add(LlvmObjcopyTool)
   for tool in spec.extraTools:
     if tool notin tools: tools.add(tool)
   result.dir = spec.output

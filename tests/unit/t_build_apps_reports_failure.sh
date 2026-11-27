@@ -38,9 +38,19 @@
 #      the build went.
 #   7. ``REPRO_DEFER_SHIM_PUBLISH=1`` stays an intentional SKIP of the shim
 #      publish, not a failure.
-#   8. Both entrypoints and the DSL library receive exactly one requested
-#      --parallelBuild value, with unset/empty/0 retaining automatic mode.
-#      This stub observes argv only; it does not claim real C-job containment.
+#   8. Both entrypoints and the DSL library receive exactly one
+#      --parallelBuild value, resolved as scripts/lib/build_width.sh
+#      documents: REPRO_BUILD_JOBS first (an invalid value stops the build before any
+#      compile), then a RunQuota grant (RUNQUOTA_RUN_WIDTH), then
+#      NIX_BUILD_CORES only in a real Nix build (IN_NIX_SHELL unset, passed
+#      through verbatim, 0 included), then a default between 1 and 8 --
+#      never Nim's per-core 0. Inside the dev shell (IN_NIX_SHELL set) the
+#      shell's NIX_BUILD_CORES, which it derives from the Nix ``cores``
+#      setting and which replaced the caller's own value, is not used:
+#      ``NIX_BUILD_CORES=8 nix develop --command just build`` on a 32-core
+#      host whose ``cores`` is 0 compiled with ``--parallelBuild:32``. The
+#      width and its source are printed. This stub observes argv only; it
+#      does not claim real C-job containment.
 #   9. On Linux, a failing sandbox-launcher builder (apps/reprobuild-sandbox-
 #      launcher/build.sh) stops the build with a diagnostic naming the launcher
 #      step, and no launcher binary is left at ``build/bin``.
@@ -74,10 +84,13 @@ STAGE_NIX_DAEMON="${REPO_ROOT}/scripts/stage_nix_daemon.py"
 # sandbox is not a git work tree, so it reports the revision unknown and the
 # fake ``nim`` sees no ``-d:ReprobuildSourceRevision=`` define.
 SOURCE_REVISION="${REPO_ROOT}/scripts/source_revision.sh"
+# The C-compile width resolver build_apps.sh sources (contract 8). Copied
+# verbatim; the default-width cases below also source it directly.
+BUILD_WIDTH="${REPO_ROOT}/scripts/lib/build_width.sh"
 
 for required in "${BUILD_APPS}" "${SOURCE_PATHS}" \
   "${PRELOADED_SHIM_LOADER}" "${DEV_SHELL_OVERRIDES}" \
-  "${STAGE_NIX_DAEMON}" "${SOURCE_REVISION}"; do
+  "${STAGE_NIX_DAEMON}" "${SOURCE_REVISION}" "${BUILD_WIDTH}"; do
   if [ ! -f "${required}" ]; then
     echo "FIXTURE ERROR: missing ${required}" >&2
     exit 2
@@ -163,6 +176,7 @@ new_sandbox() {
   cp "${PRELOADED_SHIM_LOADER}" "${sandbox}/scripts/lib/preloaded_shim_loader.sh"
   cp "${DEV_SHELL_OVERRIDES}" "${sandbox}/scripts/lib/dev_shell_overrides.sh"
   cp "${PACKAGE_BUILD_OPENSSL}" "${sandbox}/scripts/lib/package_build_openssl.sh"
+  cp "${BUILD_WIDTH}" "${sandbox}/scripts/lib/build_width.sh"
   cp "${STAGE_NIX_DAEMON}" "${sandbox}/scripts/stage_nix_daemon.py"
   cp "${SOURCE_REVISION}" "${sandbox}/scripts/source_revision.sh"
 
@@ -298,6 +312,14 @@ NIM
 
 # run_build <sandbox> [VAR=VALUE ...] -> writes stdout+stderr to
 # <sandbox>/run.log, echoes the exit status.
+#
+# The variables that choose the C-compile width are removed from the
+# inherited environment first, so a case states every one it depends on: the
+# suite itself normally runs inside the dev shell (IN_NIX_SHELL and the
+# shell's NIX_BUILD_CORES set) and may run under a RunQuota lease.
+# NIX_BUILD_TOP goes too: without IN_NIX_SHELL it would make the script take
+# the sandbox for a Nix package build (scripts/lib/package_build_openssl.sh)
+# and demand that build's library prefixes.
 run_build() {
   local sandbox="$1"
   shift
@@ -305,6 +327,8 @@ run_build() {
   (
     cd "${sandbox}"
     env \
+      -u REPRO_BUILD_JOBS -u RUNQUOTA_RUN_WIDTH \
+      -u NIX_BUILD_CORES -u IN_NIX_SHELL -u NIX_BUILD_TOP \
       PATH="${sandbox}/bin:${PATH}" \
       IO_MON_SRC="${sandbox}/io-mon" \
       BEARSSL_SRC="${sandbox}/deps/bearssl" \
@@ -338,33 +362,99 @@ case "$(uname -s)" in
 esac
 
 # Worker forwarding is checked through the real complete producer, not a
-# copied argument builder. The existing compiler stub requires and records
-# each invocation, so omitting the flag from either producer arm is red.
-for request in unset empty 0 1 2; do
-  sandbox="$(new_sandbox "workers_${request}")"
-  expected="${request}"
-  case "${request}" in
-    unset|empty) expected=0 ;;
-  esac
+# copied argument builder. The compiler stub requires and records each
+# invocation, so omitting the flag from either producer arm is red.
+#
+# check_width <case> <expected width> <expected source> [VAR=VALUE ...]
+check_width() {
+  local name="$1" expected="$2" source="$3"
+  shift 3
+  local sandbox log status count target
+  sandbox="$(new_sandbox "workers_${name}")"
   log="${sandbox}/parallel.log"
-  if [ "${request}" = unset ]; then
-    status="$(unset NIX_BUILD_CORES; run_build "${sandbox}" \
-      FAKE_NIM_EXPECT_PARALLEL_BUILD="${expected}" FAKE_NIM_PARALLEL_LOG="${log}")"
-  elif [ "${request}" = empty ]; then
-    status="$(run_build "${sandbox}" NIX_BUILD_CORES= \
-      FAKE_NIM_EXPECT_PARALLEL_BUILD="${expected}" FAKE_NIM_PARALLEL_LOG="${log}")"
-  else
-    status="$(run_build "${sandbox}" NIX_BUILD_CORES="${request}" \
-      FAKE_NIM_EXPECT_PARALLEL_BUILD="${expected}" FAKE_NIM_PARALLEL_LOG="${log}")"
-  fi
-  check "workers ${request}: complete producer succeeds" 0 "${status}"
-  check "workers ${request}: all three compiler calls recorded" 3 \
-    "$(wc -l < "${log}" | tr -d '[:space:]')"
+  status="$(run_build "${sandbox}" "$@" \
+    FAKE_NIM_EXPECT_PARALLEL_BUILD="${expected}" FAKE_NIM_PARALLEL_LOG="${log}")"
+  check "workers ${name}: complete producer succeeds" 0 "${status}"
+  check "workers ${name}: all three compiler calls recorded" 3 \
+    "$( (wc -l < "${log}") 2>/dev/null | tr -d '[:space:]')"
   for target in alpha beta "librepro_project_dsl_runtime.new.${dsl_ext}"; do
-    count="$(grep -Fxc "$(printf '%s\t1\t%s' "${target}" "${expected}")" "${log}" || true)"
-    check "workers ${request}: ${target} receives exactly the requested flag" 1 "${count}"
+    # "<flag count> <value>" as the stub recorded it, so a red case names the
+    # width the compile really got (e.g. "1 32"), not only a missing match.
+    count="$(awk -F '\t' -v t="${target}" '$1 == t { print $2 " " $3 }' \
+      "${log}" 2>/dev/null | paste -sd, - || true)"
+    check "workers ${name}: ${target} receives --parallelBuild:${expected} (flag count, value)" \
+      "1 ${expected}" "${count}"
   done
+  count="$(grep -Fc "build_apps: C-compile width --parallelBuild:${expected} (from ${source};" "${sandbox}/run.log" || true)"
+  check "workers ${name}: the log states width ${expected} from ${source}" 1 "${count}"
+}
+
+# The width this host's default resolves to, from the resolver itself; the
+# default's arithmetic is pinned separately below with fixed inputs.
+# shellcheck source=scripts/lib/build_width.sh
+host_default="$(source "${BUILD_WIDTH}"; repro_default_build_width)"
+if [[ "${host_default}" =~ ^[0-9]+$ ]] && (( host_default >= 1 && host_default <= 8 )); then
+  pass "default width on this host is between 1 and 8 (${host_default})"
+else
+  fail "default width on this host is between 1 and 8 (got '${host_default}')"
+fi
+
+# The failure this guards: the dev shell has replaced the caller's
+# NIX_BUILD_CORES with its own 32, and the caller asked for 8.
+check_width devshell_knob 8 REPRO_BUILD_JOBS \
+  IN_NIX_SHELL=impure NIX_BUILD_CORES=32 REPRO_BUILD_JOBS=8
+# Without the knob the shell's 32 is still not taken.
+check_width devshell_default "${host_default}" default \
+  IN_NIX_SHELL=impure NIX_BUILD_CORES=32
+# Outside any Nix context Nim's per-core 0 is not used either.
+check_width no_request "${host_default}" default
+check_width empty_request "${host_default}" default NIX_BUILD_CORES=
+check_width empty_knob "${host_default}" default REPRO_BUILD_JOBS= \
+  IN_NIX_SHELL=impure NIX_BUILD_CORES=32
+# No IN_NIX_SHELL (a real Nix build, or a caller outside Nix that set it):
+# the request is passed through verbatim.
+for request in 0 1 2; do
+  check_width "nix_build_${request}" "${request}" NIX_BUILD_CORES \
+    NIX_BUILD_CORES="${request}"
 done
+# The knob wins over a Nix build's request, and over a lease.
+check_width nix_build_knob 3 REPRO_BUILD_JOBS NIX_BUILD_CORES=16 REPRO_BUILD_JOBS=3
+check_width knob_over_grant 5 REPRO_BUILD_JOBS RUNQUOTA_RUN_WIDTH=3 REPRO_BUILD_JOBS=5
+# A RunQuota grant is the width when no knob is set, in or out of the shell.
+check_width devshell_grant 3 RUNQUOTA_RUN_WIDTH \
+  IN_NIX_SHELL=impure NIX_BUILD_CORES=32 RUNQUOTA_RUN_WIDTH=3
+check_width nix_build_grant 2 RUNQUOTA_RUN_WIDTH NIX_BUILD_CORES=16 RUNQUOTA_RUN_WIDTH=2
+# A malformed or zero grant is no grant.
+check_width zero_grant "${host_default}" default IN_NIX_SHELL=impure RUNQUOTA_RUN_WIDTH=0
+check_width bad_grant "${host_default}" default IN_NIX_SHELL=impure RUNQUOTA_RUN_WIDTH=abc
+
+# A knob that is set but is not a positive integer stops the build before any
+# compile, naming the variable; it never falls back to a wider width.
+for bad in 0 abc -2 3.5; do
+  sandbox="$(new_sandbox "workers_bad_knob")"
+  log="${sandbox}/parallel.log"
+  status="$(run_build "${sandbox}" REPRO_BUILD_JOBS="${bad}" FAKE_NIM_PARALLEL_LOG="${log}")"
+  check "bad knob '${bad}': exits non-zero" yes "$(nonzero "${status}")"
+  check "bad knob '${bad}': no compiler ran" no "$(exists "${log}")"
+  if grep -q 'REPRO_BUILD_JOBS=.* is not a positive integer' "${sandbox}/run.log"; then
+    pass "bad knob '${bad}': the diagnostic names REPRO_BUILD_JOBS"
+  else
+    fail "bad knob '${bad}': the diagnostic names REPRO_BUILD_JOBS"
+  fi
+  rm -rf "${sandbox}"
+done
+
+# The default's arithmetic, with fixed inputs: min(cores / 2, MiB / 1024, 8),
+# at least 1; an unmeasurable memory leaves the core and cap terms.
+# shellcheck source=scripts/lib/build_width.sh
+default_width() { (source "${BUILD_WIDTH}"; repro_default_build_width "$@"); }
+check "default: 32 cores, 143 GB free -> 8 (the cap)" 8 "$(default_width 32 143000)"
+check "default: 32 cores, 6 GB free -> 5 (memory binds)" 5 "$(default_width 32 6000)"
+check "default: 8 cores, 64 GB free -> 4 (half the cores)" 4 "$(default_width 8 64000)"
+check "default: 1 core -> 1" 1 "$(default_width 1 64000)"
+check "default: 512 MB free -> 1" 1 "$(default_width 32 512)"
+check "default: memory unmeasurable -> cores and cap decide" 6 "$(default_width 12 "")"
+check "default: nonsense cores -> 1" 1 "$(default_width abc 64000)"
 
 # ----------------------------------------------------------------------------
 # 1. Control: when every step really does produce its artifact, the script

@@ -394,13 +394,33 @@ proc emptyOrAbsent(dir, what: string) =
   createDir(dir)
 
 when defined(posix):
-  var environ {.importc, header: "<unistd.h>".}: cstringArray
+  when defined(macosx):
+    # macOS's <unistd.h> does not declare `environ`, and a shared library
+    # cannot link against it; Apple's documented accessor is _NSGetEnviron()
+    # from <crt_externs.h>, which returns the address of the live variable
+    # (environ(7), https://developer.apple.com/library/archive/documentation/
+    # System/Conceptual/ManPages_iPhoneOS/man7/environ.7.html). Nim's own
+    # std/envvars reads the environment the same way on macOS.
+    proc nsGetEnviron(): ptr cstringArray {.importc: "_NSGetEnviron",
+      header: "<crt_externs.h>".}
 
-  proc spawnWait(argv: openArray[string]; stdoutFile = ""): int =
+    proc processEnviron(): cstringArray =
+      ## The current `environ`, re-read on every call: `setenv` may replace
+      ## the array, so a cached pointer could name a freed one.
+      nsGetEnviron()[]
+  else:
+    var environ {.importc, header: "<unistd.h>".}: cstringArray
+
+    proc processEnviron(): cstringArray =
+      ## The current `environ` (see the macOS branch for why it is a call).
+      environ
+
+  proc spawnWait*(argv: openArray[string]; stdoutFile = ""): int =
     ## Run `argv` (argv[0] a path) with this process's environment and
     ## standard streams, standard output redirected to `stdoutFile` when one
     ## is given, and wait for it. Returns its exit status (128 + the signal
-    ## when it was killed).
+    ## when it was killed). Exported for its test
+    ## (`tests/t_plan_run_spawn_environment`); the edge calls it internally.
     var actions: Tposix_spawn_file_actions
     if posix_spawn_file_actions_init(actions) != 0:
       fail("posix_spawn_file_actions_init failed")
@@ -422,7 +442,7 @@ when defined(posix):
     defer: discard posix_spawnattr_destroy(attr)
     var pid: Pid
     let rc = posix_spawn(pid, argv[0].cstring, actions, attr, cargv,
-      environ)
+      processEnviron())
     if rc != 0:
       fail("cannot start " & argv[0] & ": " & $strerror(rc))
     var status: cint

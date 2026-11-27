@@ -1243,7 +1243,8 @@ jobs:
           set -euo pipefail
           # openssl and python3 from nixpkgs (macOS's own openssl is LibreSSL);
           # pkgbuild, productsign, pkgutil, security, xcrun and spctl are the
-          # system's.
+          # system's, which the scripts run by absolute path (this PATH has no
+          # /usr/sbin, where pkgutil and spctl live).
           dev-exec nix shell nixpkgs#openssl nixpkgs#python3 -c sh scripts/release/build_signed_installer.sh \
             --ecosystem pkg --version "${VERSION}" --archive "${ASSET_NAME}" --out installer-out \
             --platform "${{ matrix.platform }}" --asset-arch "${{ matrix.arch }}" < /dev/null

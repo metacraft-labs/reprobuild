@@ -759,9 +759,11 @@ proc renderAddonSections*(r: AddonApplyResult): string =
   if r.ownMigrated.len > 0:
     # Generation 0's own units this engine renders differently, for the
     # operator's review. Every switch carries them, an agent's too: §10.1's
-    # agent refusal judges the operator's services, and none of these
-    # widens a unit (the owner's decision of 2026-11-26 for the shipping
-    # and egress check units, which it narrows).
+    # agent refusal judges the operator's services. The shipping and egress
+    # check units lose privilege where they decode (the operator's decision
+    # of 2026-11-26), and on a host from before §13 decision 181 the
+    # shipping unit gains the privileged harvest step: the engine's own
+    # code, rendered from the installed text and the re-point.
     result.add("generation 0 migrated by this engine (every switch " &
       "carries it):\n")
     for u in r.ownMigrated: result.add("  " & u & "\n")

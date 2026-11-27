@@ -893,6 +893,7 @@ proc runBase(m: SnapshotMirror; b: BaseImage; record: JsonNode): seq[string] =
       "refused": refusedB, "restarted": pInvB != pInvB2, "uids": uidsB,
       "ranAsRoot": rootB, "output": putBOut, "ok": okB}
     record["secretPutJudged"] = %*{"b": spB, "ok": false}
+    # The secret put is judged as a switch (§13 decision 190).
     step("decision 190 (b): with a generator making the probe root at the " &
          "put's own reload, the put refuses and the probe never runs as root",
          okB, putBOut & "\nuser after: " & userAfterB & "\nuids: " &

@@ -5,9 +5,10 @@ kind: explanation
 persona: workspace-maintainer
 order: 50
 verifies:
-  commands: [workspace init, workspace sync, workspace status, workspace forall, workspace branch-roles, workspace lock, sync, switch, branch, develop]
+  commands: [workspace init, workspace enable, workspace pull, workspace sync, workspace status, workspace forall, workspace branch-roles, workspace lock, sync, switch, branch, develop]
   tests:
     - tests/integration/t_workspace_init_clones_missing_and_reports_existing.nim
+    - tests/integration/t_sync_clone_reports_uninitialized_submodules.nim
     - tests/integration/t_workspace_develop_overrides_round_trip.nim
 unverified:
   - claim: "Each repository commits its own repro.lock; there is no workspace-wide lock file."
@@ -38,7 +39,8 @@ remain the better choice.
 | `<project>` entry in `default.xml` | [repository fragment](../reference/glossary.md#repository-fragment), `repos/<name>.toml` |
 | manifest groups | [workspace projects](../reference/glossary.md#workspace-project), `projects/<name>.toml` |
 | `repo init` | `repro workspace init` |
-| `repo sync`, `git submodule update` | `repro sync`, `repro workspace pull` |
+| `repo sync` | `repro sync`, `repro workspace pull` |
+| `git submodule update` in a member repository | no equivalent: run `git submodule update --init --recursive` there (see below) |
 | `repo status` | `repro workspace status` |
 | `repo forall -c` | `repro workspace forall -c` |
 | `revision` attribute, submodule commit | [`repro.lock`](../reference/glossary.md#lock-file) in each repository |
@@ -87,6 +89,27 @@ fetching anything.
 
 A workspace can be forked. `repro branch ../<directory>` creates a second
 workspace next to the first, on a new branch, for parallel work.
+
+A repository's own submodules are left to git. The workspace manages the
+repositories its fragments declare, and a submodule recorded in a member
+repository's `.gitmodules` is not one of them. `repro workspace init`,
+`repro workspace enable`, `repro sync`, `repro workspace pull` and
+`repro branch ../<directory>` clone a repository the way a plain `git clone`
+does, with its submodules declared but not checked out, and
+`repro workspace pull` does not move the submodules of a repository that is
+already there. So that a clone does not look
+complete when it is not, each of these commands names every repository it has
+just cloned that still has uninitialised submodules, with the command that
+fills them in:
+
+```sh
+git -C <path-to-repository> submodule update --init --recursive
+```
+
+In `--json` output and in the report `--write-report` writes, the same
+repositories are listed under `submodulesUninitialized`. The notice does not
+change the exit code, and a repository that was already on disk is not
+inspected.
 
 ## When repo or submodules remain the better choice
 
