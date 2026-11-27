@@ -170,6 +170,29 @@ proc relativeToRoot(file, root: string): tuple[ok: bool; rel: string] =
     return withinRoot(slashed(file)[r.len .. ^1])
   (false, "")
 
+const ReprobuildStdlibAnchor = "/libs/repro_dsl_stdlib/"
+  ## The directory, in a reprobuild checkout, of the Nim standard library
+  ## whose packages a catalog may import (``packages/...``). Only reprobuild
+  ## has it, so a location below it is reprobuild's, wherever the checkout is.
+const ReprobuildStdlibSpelling* = "<reprobuild-stdlib>/"
+  ## The fixed, host-independent spelling such a location publishes as
+  ## (Federated-Catalog-Imports.md, "What a catalog publishes", step 2).
+
+proc stdlibRelative(file: string): tuple[ok: bool; rel: string] =
+  ## ``file`` as ``ReprobuildStdlibSpelling`` followed by its path below the
+  ## stdlib directory, when ``file`` lies below one (the last such directory
+  ## in it, so a checkout that itself sits under a ``libs/`` directory still
+  ## resolves to the stdlib); refused otherwise. Only the spelling changes:
+  ## the location is diagnostic, so no identity sees it.
+  let s = slashed(file)
+  let i = s.rfind(ReprobuildStdlibAnchor)
+  if i < 0:
+    return (false, "")
+  let (ok, below) = withinRoot(s[i + ReprobuildStdlibAnchor.len .. ^1])
+  if not ok:
+    return (false, "")
+  (true, ReprobuildStdlibSpelling & below)
+
 const PublishedLocationLine* = 1
   ## The line every published location carries (see ``relocateLocations``).
 
@@ -190,7 +213,13 @@ proc relocateLocations[T](x: var T; root: string; outside: var seq[string]) =
         # published it, and the line is diagnostic only, so it is fixed.
         x.line = PublishedLocationLine
       else:
-        outside.add(x.file & ":" & $x.line)
+        let (stdOk, stdRel) = stdlibRelative(x.file)
+        if stdOk:
+          # reprobuild's own stdlib: the same fixed spelling on every host.
+          x.file = stdRel
+          x.line = PublishedLocationLine
+        else:
+          outside.add(x.file & ":" & $x.line)
   elif T is object or T is tuple:
     for field in fields(x):
       relocateLocations(field, root, outside)

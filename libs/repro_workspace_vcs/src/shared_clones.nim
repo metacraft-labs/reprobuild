@@ -570,7 +570,7 @@ proc canonicalRemoteIdentity*(url: string): string =
     segments.add(raw)
   authority & "/" & segments.join("/")
 
-proc isLocalRemoteSpelling(url: string): bool =
+proc isLocalRemoteSpelling*(url: string): bool =
   ## ``true`` for a remote that names a directory on this machine: a
   ## ``file:`` URL, an absolute or relative path, a Windows drive path or a
   ## UNC path. Git reads such a spelling as a path even when it contains a

@@ -147,7 +147,11 @@ suite "NPC-M15: an alias retarget is an event the solve does not follow":
     check s2.input.aliasCandidates[0].target == "alpha"
     check s2.input.aliasCandidates[0].candidate == "beta"
     check aliasCandidateNotes(s2.input).len == 1
-    check AcceptingNotImplemented in aliasCandidateNotes(s2.input)[0]
+    # The remedy is the exact `[[policy]]` table that accepts beta (NPC-M17).
+    for l in policyTable("oldname", "<the nimble-index import's repo>",
+        target = "beta").splitLines():
+      check l in aliasCandidateNotes(s2.input)[0]
+    check "target = \"nimble:beta\"" in aliasCandidateNotes(s2.input)[0]
 
     # The next generation reports the retarget no more and keeps the
     # candidate.

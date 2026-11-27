@@ -4,8 +4,8 @@
 ##
 ##   repro cargo gc [--target-dir DIR] [--keep-sets N] [--min-age DURATION]
 ##                  [--dry-run] [--cargo-home [DIR]]
-##   repro cargo record-live [--target-dir DIR] [--from FILE|-] [--tee]
-##                           [--keep-sets N]
+##   repro cargo record-live [--target-dir DIR] [--from FILE|-]
+##                           [--tee | --pass-through] [--keep-sets N]
 ##   repro cargo run [-j N] [--products FILE] [--fragment FILE --action-id ID]
 ##                   [--relative-to DIR] [--libs] -- cargo ARGS...
 ##
@@ -99,6 +99,12 @@ proc runRecordLive(c: ReproCommandLineCargoRecordLive;
   let fromFlag = c.fromFile
   let keepFlag = typedOnly(c.keepSets, origin.keepSets)
   let tee = c.tee
+  let passThrough = c.passThrough
+  if tee and passThrough:
+    stderr.writeLine "repro cargo record-live: --tee and --pass-through " &
+      "are alternatives (--tee copies the whole stream, --pass-through " &
+      "forwards only what is not cargo\x27s JSON)"
+    return 2
   let resolved = resolveGcConfig(envReader, keepFlag, "")
   for problem in resolved.problems:
     stderr.writeLine "repro cargo record-live: warning: " & problem
@@ -114,10 +120,16 @@ proc runRecordLive(c: ReproCommandLineCargoRecordLive;
       opened = true
     defer:
       if opened: close(input)
-    let report = recordLiveSetFromStream(target, input,
-      (if tee: stdout else: nil), resolved.config.keepSets)
-    # With --tee stdout carries cargo's stream, so the summary goes to stderr.
-    let sink = if tee: stderr else: stdout
+    let report =
+      if passThrough:
+        recordLiveSetPassThrough(target, input, stdout,
+          resolved.config.keepSets)
+      else:
+        recordLiveSetFromStream(target, input,
+          (if tee: stdout else: nil), resolved.config.keepSets)
+    # With --tee or --pass-through stdout carries the forwarded stream, so
+    # the summary goes to stderr.
+    let sink = if tee or passThrough: stderr else: stdout
     if report.units == 0:
       sink.writeLine "repro cargo record-live: no unit under " & target &
         " in the stream; nothing recorded (" & $report.unresolved.len &

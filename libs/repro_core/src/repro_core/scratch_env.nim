@@ -25,6 +25,8 @@
 ## the cost of that rule for its own edge; this module only holds the list,
 ## so the classes cannot drift apart.
 
+import std/strutils
+
 const ScratchLocationEnvNames* = ["TMPDIR", "TMP", "TEMP", "TEMPDIR"]
   ## The four temp-directory variables, in the order the provider and
   ## profile compiles have always listed them.
@@ -62,3 +64,55 @@ static:
   # would keep one that names the per-sourcing directory.
   for name in ScratchLocationEnvNames:
     doAssert name in NixShellScratchNames, name
+
+const SessionScratchEnvNames* = ["NIX_BUILD_TOP", "TMPDIR", "TMP", "TEMP",
+  "TEMPDIR"]
+  ## The `NixShellScratchNames` that hold the per-sourcing directory (that
+  ## list less `terminfo`, which names the builder's terminal database, a
+  ## stable store path).
+
+const SessionScratchFingerprintValue* = "<nix-shell session directory>"
+  ## What an action key records, in place of the directory, for a
+  ## `SessionScratchEnvNames` variable whose value is a `nix print-dev-env`
+  ## session directory (`isNixShellSessionDir`).
+
+proc isNixShellSessionDir*(value: string): bool =
+  ## Whether `value` names a directory `nix print-dev-env`'s script made with
+  ## `mktemp -d -t nix-shell.XXXXXX`: an absolute path whose last component is
+  ## `nix-shell.` followed by the random part. A trailing separator is
+  ## allowed.
+  var path = value
+  while path.len > 1 and path[^1] in {'/', '\\'}:
+    path.setLen(path.len - 1)
+  if path.len == 0 or path[0] notin {'/', '\\'} and
+      not (path.len > 2 and path[1] == ':'):
+    return false
+  var start = path.len
+  while start > 0 and path[start - 1] notin {'/', '\\'}:
+    dec start
+  let leaf = path[start .. ^1]
+  leaf.len > "nix-shell.".len and leaf.startsWith("nix-shell.")
+
+proc fingerprintedEnvValue*(name, value: string): string =
+  ## The value an action key records for an environment variable the action
+  ## read: `value`, except that a `SessionScratchEnvNames` variable naming a
+  ## `nix print-dev-env` session directory is recorded as
+  ## `SessionScratchFingerprintValue`.
+  ##
+  ## WHY. The captured dev shell runs `export NIX_BUILD_TOP="$(mktemp -d -t
+  ## nix-shell.XXXXXX)"` (and points the four temp-directory names at it)
+  ## every time it is sourced, so an action whose process tree read one of
+  ## them missed in every new shell: measured 2026-11-26 on codetracer's
+  ## `stylus-*` edges, `cache-miss: input metadata changed: NIX_BUILD_TOP`
+  ## (reprobuild-pm issue 2026-11-26-a-second-build-in-the-same-checkout-
+  ## compiles-the-provider-again-on-both-edges).
+  ##
+  ## WHY IT IS SAFE. The name still counts: set and unset, and a deliberate
+  ## directory such as `TMPDIR=/scratch`, are different keys. Only the random
+  ## per-session spelling is dropped. An action that reads files UNDER that
+  ## directory records them as file inputs at their absolute paths, which
+  ## differ in the next session, so it misses exactly as before.
+  if name in SessionScratchEnvNames and isNixShellSessionDir(value):
+    SessionScratchFingerprintValue
+  else:
+    value

@@ -15,9 +15,11 @@
 ##      `rpm -qlp` and `bsdtar` for the .rpm, `bsdtar` for the Arch package
 ##      and the tarball, `unsquashfs` over the AppImage's embedded squashfs,
 ##      the directory for the prefix, assembled but not put through its
-##      builder-path gate: a clispec program's image carries the absolute
-##      path of its `repro.nim`, which that gate refuses, a separate
-##      defect), each byte-equal to what the built
+##      builder-path gate: a cross image keeps debug info that names
+##      build-host paths, which that gate refuses, a separate defect; its
+##      binary names the triple's system loader in `PT_INTERP` whichever C
+##      compiler on `PATH` linked it, the dev shell's Nix gcc included),
+##      each byte-equal to what the built
 ##      program prints for `--printCompletion=<shell>`, and no PowerShell
 ##      script (no Linux format has a place PowerShell reads one from).
 ##   2. **Cross-compiled.** With `--target=armv7-unknown-linux-gnueabihf`
@@ -322,6 +324,13 @@ proc readPackage(p: Project; format, scratch: string): PackageView =
       if kind == pcDir and path.extractFilename.startsWith("build"):
         if dirExists(path / "prefix"): prefixDir = path / "prefix"
     doAssert prefixDir.len > 0, "no installed prefix under " & p.root
+    # The assembly made the binary name the triple's system loader, not the
+    # one of the toolchain that linked it (a Nix gcc's store glibc).
+    let keyed = prefixDir.parentDir.extractFilename
+    let loader = if keyed == "build": "/lib64/ld-linux-x86-64.so.2"
+                 else: "/lib/ld-linux-armhf.so.3"
+    check ("[Requesting program interpreter: " & loader & "]") in
+      run("readelf -l -W " & quoteShell(prefixDir / binaryPath(format)))
     removeDir(result.extracted)
     copyDir(prefixDir, result.extracted)
     for path in walkDirRec(result.extracted, relative = true):

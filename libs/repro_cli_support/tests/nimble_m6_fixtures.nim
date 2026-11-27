@@ -12,7 +12,7 @@
 ##
 ## Nothing here contacts the internet; `example.invalid` names no host.
 
-import std/[os, osproc, posix, strutils, tables, tempfiles, times]
+import std/[options, os, osproc, posix, strutils, tables, tempfiles, times]
 
 import repro_lock
 import repro_nimble_index
@@ -51,13 +51,16 @@ proc newWorld*(tag: string): World =
 
 proc publish*(w: World; packages: seq[PackageEnvelope]; generatedAt: int64;
               message: string; events: seq[OriginEvent] = @[];
-              extraFiles: seq[(string, string)] = @[]):
+              extraFiles: seq[(string, string)] = @[];
+              sourceSet = none(IndexObjectId)):
     tuple[commit: string; built: BuiltIndex] =
   ## Commit a generation of ``packages`` on `main` and sync the shared
-  ## clone. Returns the commit and the index.
+  ## clone. Returns the commit and the index. ``sourceSet``: the source-set
+  ## identity the root names (the fixture's placeholder when none).
   var input = buildInput(packages)
   input.generatedAt = uint64(generatedAt)
   input.events = events
+  if sourceSet.isSome: input.sourceSet = sourceSet.get
   result.built = buildIndex(input)
   # Committed by hand rather than through ``publishCommit``, which checks
   # the branch out with `-f` after the files are written (and so would

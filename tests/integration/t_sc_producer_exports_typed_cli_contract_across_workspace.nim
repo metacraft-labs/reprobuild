@@ -104,6 +104,7 @@ package prodplain:
 
   uses:
     "sh"
+    "mkdir"
 
   build:
     discard shell(

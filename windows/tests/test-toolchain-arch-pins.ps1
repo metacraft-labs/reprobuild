@@ -470,6 +470,111 @@ try {
       if (-not (($out -join "`n") -match 'lib/bad\.dll imports libmissing\.dll')) { throw "violation not named in:`n$($out -join "`n")" }
     } finally { Remove-Item -LiteralPath $bad }
   }
+
+  # Copy-WindowsImportClosure: x64 staging copies only what the import walk
+  # finds, from the pinned sources, instead of a best-effort list.
+  $ic = Join-Path $synth "importclosure"
+  $icBin = Join-Path $ic "bin"
+  $icVc = Join-Path $ic "vc"
+  $icGcc = Join-Path $ic "gcc"
+  New-Item -ItemType Directory -Path $icBin, $icVc, $icGcc | Out-Null
+  $icSys = Join-Path $ic "system"
+  New-Item -ItemType Directory -Path $icSys | Out-Null
+  foreach ($n in @("KERNEL32.dll", "vcruntime140.dll")) { New-TestPeImage -Path (Join-Path $icSys $n) -Machine $x64 }
+  # Sources: the VC++ runtime package and the compiler's bin/.
+  New-TestPeImage -Path (Join-Path $icVc "vcruntime140.dll") -Machine $x64 -Imports @("KERNEL32.dll")
+  New-TestPeImage -Path (Join-Path $icVc "msvcp140.dll") -Machine $x64 -Imports @("vcruntime140.dll")
+  New-TestPeImage -Path (Join-Path $icVc "concrt140.dll") -Machine $x64 -Imports @("KERNEL32.dll")
+  New-TestPeImage -Path (Join-Path $icGcc "libgcc_s_seh-1.dll") -Machine $x64 -Imports @("KERNEL32.dll", "libwinpthread-1.dll")
+  New-TestPeImage -Path (Join-Path $icGcc "libwinpthread-1.dll") -Machine $x64 -Imports @("KERNEL32.dll")
+  New-TestPeImage -Path (Join-Path $icGcc "libstdc++-6.dll") -Machine $x64 -Imports @("KERNEL32.dll")
+  New-TestPeImage -Path (Join-Path $icGcc "libzstd.dll") -Machine $x64 -Imports @("KERNEL32.dll")
+  New-TestPeImage -Path (Join-Path $icGcc "KERNEL32.dll") -Machine $x64
+  # bin/: clingo imports the C++ runtime, libcrypto delay-loads libgcc_s.
+  New-TestPeImage -Path (Join-Path $icBin "clingo.dll") -Machine $x64 -Imports @("KERNEL32.dll", "msvcp140.dll")
+  New-TestPeImage -Path (Join-Path $icBin "libcrypto-3-x64.dll") -Machine $x64 -Imports @("KERNEL32.dll") -DelayImports @("libgcc_s_seh-1.dll")
+  New-TestPeImage -Path (Join-Path $icBin "libzstd.dll") -Machine $x64 -Imports @("KERNEL32.dll")
+  # A stale copy from an earlier build: in a source, imported by nothing.
+  Copy-Item -LiteralPath (Join-Path $icGcc "libstdc++-6.dll") -Destination (Join-Path $icBin "libstdc++-6.dll")
+  $icArgs = @{ BinDir = $icBin; SourceDirs = @($icVc, $icGcc); Arch = "x64"; SystemDir = $icSys; OsDlls = @("KERNEL32.dll"); KeepNames = @("libzstd.dll") }
+  Check "the import walk stages exactly the imported closure, transitively and through delay-loads" {
+    $copied = @(Copy-WindowsImportClosure @icArgs)
+    $want = @("libgcc_s_seh-1.dll", "libwinpthread-1.dll", "msvcp140.dll", "vcruntime140.dll")
+    if ((($copied | Sort-Object) -join ",") -ne ($want -join ",")) { throw "copied '$(($copied | Sort-Object) -join ",")'" }
+    $have = @(Get-ChildItem -LiteralPath $icBin -File | ForEach-Object Name | Sort-Object)
+    $wantBin = @("clingo.dll", "libcrypto-3-x64.dll", "libgcc_s_seh-1.dll", "libwinpthread-1.dll", "libzstd.dll", "msvcp140.dll", "vcruntime140.dll")
+    if (($have -join ",") -ne ($wantBin -join ",")) { throw "bin/ holds '$($have -join ",")'" }
+  }
+  Check "a redistributable in System32 is staged from its source, not taken as Windows" {
+    if (-not (Test-Path -LiteralPath (Join-Path $icBin "vcruntime140.dll"))) { throw "vcruntime140.dll was not staged" }
+  }
+  Check "an unimported DLL from a source is not staged, and a stale copy is removed" {
+    foreach ($n in @("concrt140.dll", "libstdc++-6.dll")) {
+      if (Test-Path -LiteralPath (Join-Path $icBin $n)) { throw "$n is in bin/" }
+    }
+  }
+  Check "an operating-system DLL is never staged, even when a source holds one" {
+    if (Test-Path -LiteralPath (Join-Path $icBin "KERNEL32.dll")) { throw "KERNEL32.dll was staged" }
+  }
+  Check "a name staged on purpose (KeepNames) is not removed as stale" {
+    if (-not (Test-Path -LiteralPath (Join-Path $icBin "libzstd.dll"))) { throw "libzstd.dll was removed" }
+  }
+  Check "the staged bin/ passes the closure audit" {
+    Assert-WindowsDllClosure -BinDir $icBin -Arch x64 -SystemDir $icSys -OsDlls @("KERNEL32.dll")
+  }
+  Check "an import that no source holds is refused, by name" {
+    $u = Join-Path $icBin "needs-missing.dll"
+    New-TestPeImage -Path $u -Machine $x64 -Imports @("libnowhere.dll")
+    try {
+      Assert-Throws { Copy-WindowsImportClosure @icArgs } 'needs-missing\.dll imports libnowhere\.dll, which no source holds'
+    } finally { Remove-Item -LiteralPath $u }
+  }
+  Check "a source DLL of the wrong machine is refused" {
+    $w = Join-Path $icBin "needs-arm.dll"
+    New-TestPeImage -Path (Join-Path $icGcc "libarm.dll") -Machine $arm64
+    New-TestPeImage -Path $w -Machine $x64 -Imports @("libarm.dll")
+    try {
+      Assert-Throws { Copy-WindowsImportClosure @icArgs } 'libarm\.dll is a PE image for machine 0xAA64, not the x64 machine 0x8664'
+    } finally { Remove-Item -LiteralPath $w, (Join-Path $icGcc "libarm.dll") -ErrorAction SilentlyContinue }
+  }
+  Check "an image that ships from lib/ has its imports staged into bin/" {
+    $l = Join-Path $ic "lib"
+    New-Item -ItemType Directory -Path $l | Out-Null
+    # As librepro_project_dsl_runtime.dll does on x64: it imports libgcc_s,
+    # which nothing in bin/ imports, and it reaches the archive at packaging.
+    New-TestPeImage -Path (Join-Path $l "librepro_project_dsl_runtime.dll") -Machine $x64 -Imports @("KERNEL32.dll", "libgcc_s_seh-1.dll")
+    $lb = Join-Path $ic "libbin"
+    New-Item -ItemType Directory -Path $lb | Out-Null
+    New-TestPeImage -Path (Join-Path $lb "repro.exe") -Machine $x64 -Imports @("KERNEL32.dll")
+    try {
+      $copied = @(Copy-WindowsImportClosure -BinDir $lb -SourceDirs @($icVc, $icGcc) -Arch x64 -SystemDir $icSys -OsDlls @("KERNEL32.dll") -ExtraImageDirs @($l))
+      if ((($copied | Sort-Object) -join ",") -ne "libgcc_s_seh-1.dll,libwinpthread-1.dll") { throw "copied '$(($copied | Sort-Object) -join ",")'" }
+      if (Test-Path -LiteralPath (Join-Path $l "libgcc_s_seh-1.dll")) { throw "staged into lib/ instead of bin/" }
+    } finally { Remove-Item -LiteralPath $l, $lb -Recurse }
+  }
+  Check "a staged DLL keeps its source file's name, whatever case the import spells" {
+    $cb = Join-Path $ic "casebin"; $cs = Join-Path $ic "casesrc"
+    New-Item -ItemType Directory -Path $cb, $cs | Out-Null
+    New-TestPeImage -Path (Join-Path $cs "msvcp140.dll") -Machine $x64 -Imports @("KERNEL32.dll")
+    New-TestPeImage -Path (Join-Path $cb "clingo.dll") -Machine $x64 -Imports @("MSVCP140.dll")
+    try {
+      $copied = @(Copy-WindowsImportClosure -BinDir $cb -SourceDirs @($cs) -Arch x64 -SystemDir $icSys -OsDlls @("KERNEL32.dll"))
+      $names = @(Get-ChildItem -LiteralPath $cb -File | ForEach-Object Name | Sort-Object)
+      if (($names -join ",") -cne "clingo.dll,msvcp140.dll") { throw "bin/ holds '$($names -join ",")'" }
+      if (($copied -join ",") -cne "msvcp140.dll") { throw "reported '$($copied -join ",")'" }
+    } finally { Remove-Item -LiteralPath $cb, $cs -Recurse }
+  }
+  Check "the first source that holds a DLL wins" {
+    $both = Join-Path $ic "both"
+    New-Item -ItemType Directory -Path $both | Out-Null
+    $b = Join-Path $both "bin"; $s1 = Join-Path $both "s1"; $s2 = Join-Path $both "s2"
+    New-Item -ItemType Directory -Path $b, $s1, $s2 | Out-Null
+    New-TestPeImage -Path (Join-Path $s1 "libdup.dll") -Machine $x64 -Imports @("KERNEL32.dll")
+    New-TestPeImage -Path (Join-Path $s2 "libdup.dll") -Machine $x64 -Imports @("KERNEL32.dll", "libextra.dll")
+    New-TestPeImage -Path (Join-Path $b "user.exe") -Machine $x64 -Imports @("libdup.dll")
+    $copied = @(Copy-WindowsImportClosure -BinDir $b -SourceDirs @($s1, $s2) -Arch x64 -SystemDir $icSys -OsDlls @("KERNEL32.dll"))
+    if (($copied -join ",") -ne "libdup.dll") { throw "copied '$($copied -join ",")' (s2's copy would also need libextra.dll)" }
+  }
 } finally {
   Remove-Item -LiteralPath $synth -Recurse -Force -ErrorAction SilentlyContinue
 }

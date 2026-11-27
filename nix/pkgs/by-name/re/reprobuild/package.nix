@@ -258,7 +258,7 @@ stdenv.mkDerivation (finalAttrs: {
   # forbids. reprobuild's flake overrides it with the value it parses from the
   # nimble manifest, and `checks.nixpkgs-package-version-sync` fails the build
   # if this literal and the manifest disagree, so the two cannot drift silently.
-  version = "0.2.37";
+  version = "0.2.38";
 
   # The default source: a published commit whose `reprobuild.nimble` carries
   # `version` above and whose `flake.lock` pins the `*Src` defaults above
@@ -541,6 +541,12 @@ stdenv.mkDerivation (finalAttrs: {
     # `t_packaging_wrapper_vars_match_flake.nim` checks both, so common source
     # defaults cannot drift and native wrappers never name unbundled tools.
     #
+    # THE CARGO SHIM IS NOT WRAPPED EITHER. `bin/repro-cargo-shim` is installed
+    # as `libexec/repro-cargo-shim/cargo` (below), a directory a dev shell or a
+    # session launcher puts first on PATH, so that every `cargo` there runs it.
+    # A wrapper script in front would put a shell start-up and the package's
+    # REPROBUILD_* variables into every cargo command and into every program
+    # cargo then runs: the shim must change nothing the caller can observe.
     # THE GRAPH HELPER IMAGE IS NOT WRAPPED. `bin/reprobuild-helper` is never
     # typed by a user: the engine runs it (from beside its own image, see
     # `graphHelperImagePath` in `libs/repro_core/src/repro_core/cli_images.nim`)
@@ -552,6 +558,7 @@ stdenv.mkDerivation (finalAttrs: {
     for b in "$out"/bin/*; do
       test -x "$b" || continue
       [ "$(basename "$b")" = reprobuild-helper ] && continue
+      [ "$(basename "$b")" = repro-cargo-shim ] && continue
       wrapProgram "$b" \
         --set-default REPROBUILD_RUNTIME_LIBRARY_PATH ${runtimeLibraryPath} \
         --set-default REPROBUILD_SOURCE_ROOT ${finalAttrs.src} \
@@ -647,6 +654,19 @@ stdenv.mkDerivation (finalAttrs: {
       }
     ln -sfn "$out/bin/reprobuild-helper" \
       "$out/libexec/reprobuild/reprobuild-helper"
+    # The cargo shim: a file named `cargo` in a directory of its own, so that
+    # prepending the directory (and nothing else) puts the shim ahead of the
+    # real cargo. A symlink, resolved by the shim by file identity when it
+    # looks for the next cargo on PATH.
+    test -x "$out/bin/repro-cargo-shim" && \
+      ! test -e "$out/bin/.repro-cargo-shim-wrapped" || {
+        echo "expected an unwrapped $out/bin/repro-cargo-shim; it is" \
+             "missing or was wrapped" >&2
+        exit 1
+      }
+    mkdir -p "$out/libexec/repro-cargo-shim"
+    ln -sfn "$out/bin/repro-cargo-shim" \
+      "$out/libexec/repro-cargo-shim/cargo"
   '';
 
   # Exposed so a consumer that has to compile against the SAME prefixes this

@@ -13,6 +13,13 @@
 ## ``placeRevertHold`` in a child (this binary, ``--place-hold``) under
 ## ``strace -f -y``, which names the directory each descriptor is open on.
 ##
+## The same trace shows the hold itself durable (A9 review round 25): the
+## hold file is synced before the rename that puts the staging directory
+## in place as ``<unit>.d``, and ``<root>`` is synced after it, so a power
+## loss after the revert never brings the hold back empty or missing. The
+## VM gate ``e2e_addon_uninstall_removes_revert_holds`` sees that only on a
+## boot that does not repair it first; this is the sync itself.
+##
 ## And (second suite) a drop-in that would widen a floored service's
 ## ``IPAddressAllow=``/``IPAddressDeny=`` or ``ProcSubset=`` never passes
 ## as "no weakening": the profile's drop-ins may not set them (the drop-in
@@ -21,7 +28,8 @@
 ## compares a single property. Generation 0's own units are not judged by
 ## that comparison at all: the effective check covers the floored units.
 ##
-## Falsifying build, red here: ``revert-hold-staging-not-synced``.
+## Falsifying builds, red here: ``revert-hold-staging-not-synced`` (the
+## first test), ``revert-hold-not-synced`` (the second).
 ##
 ## *Mocking.* None: the real file system, the real system calls, as the
 ## kernel reports them. ``strace`` is the dev shell's (flake.nix), resolved
@@ -74,6 +82,36 @@ suite "A9 review round 23: the staging directory is durable before it is recorde
     for i in syncs:
       if i > made and i < staged: between = true
     check between
+
+  test "the hold is synced before the rename into place, and the root after it":
+    let tmp = createTempDir("a9r23-", "-hold")
+    defer: removeDir(tmp)
+    let state = tmp / "state"
+    let root = tmp / "units"
+    createDir(state)
+    createDir(root)
+    let lines = tracedPlacement(state, root)
+    var placed = -1
+    var holdSyncs, rootSyncs: seq[int]
+    for i, l in lines:
+      # The staging directory renamed to a9r23.service.d (renameat2 with
+      # RENAME_NOREPLACE, ``renameNoReplace``).
+      if placed < 0 and "rename" in l and RevertHoldStagingPrefix in l and
+          "\"a9r23.service.d\"" in l:
+        placed = i
+      if l.contains("fsync(") and RevertHoldStagingPrefix in l and
+          RevertHoldName in l:
+        holdSyncs.add(i)
+      if l.contains("fsync(") and l.contains("<" & root & ">"): rootSyncs.add(i)
+    checkpoint lines.join("\n")
+    check placed >= 0
+    var before, after = false
+    for i in holdSyncs:
+      if i < placed: before = true
+    for i in rootSyncs:
+      if i > placed: after = true
+    check before
+    check after
 
 # ---------------------------------------------------------------------------
 # IPAddressAllow=, IPAddressDeny= and ProcSubset= in the effective check

@@ -138,7 +138,11 @@ suite "scanner-era cache entries are never served":
     let plan = NixAcquisitionPlan(packageSelector: "eraTool",
       packageId: "nixpkgs#era-tool", nixSelector: "nixpkgs#era-tool",
       declaredExecutablePath: "bin/era-tool", lockIdentity: "nixpkgs#era-tool")
-    let current = nixMaterializationCacheKey(useDef, plan)
+    # An empty workspace: no entry Nix could read the selector as a path
+    # (``isMutableLocalNixSelector``), so the key is the cacheable one.
+    let workspace = createTempDir("repro-scanner-era-ws-", "")
+    defer: removeDir(workspace)
+    let current = nixMaterializationCacheKey(useDef, plan, workspace)
     check current.cacheable
     # The control, as for the tool-identity key: the same layout under the
     # CURRENT tag is the production key.
@@ -150,7 +154,8 @@ suite "scanner-era cache entries are never served":
     # top-level file's bytes alone: versions only move forward.
     check current.key != materializationPayload(
       "reprobuild.nix.materialization.v1", useDef, plan)
-    check current.key == nixMaterializationCacheKey(useDef, plan).key
+    check current.key == nixMaterializationCacheKey(useDef, plan,
+      workspace).key
 
   test "a scanner-era tool identity on disk is not served, cold or prewarmed":
     let outDir = createTempDir("repro-scanner-era-", "")

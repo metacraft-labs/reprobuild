@@ -776,6 +776,7 @@ env	repro cargo gc	REPRO_CARGO_GC_MIN_AGE
 command	repro cargo record-live
 flag	repro cargo record-live	--from
 flag	repro cargo record-live	--keep-sets
+flag	repro cargo record-live	--pass-through
 flag	repro cargo record-live	--target-dir
 flag	repro cargo record-live	--tee
 env	repro cargo record-live	CARGO_TARGET_DIR

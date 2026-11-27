@@ -99,6 +99,14 @@ install_from_local_checkout() {
   eprint_note "Installing binaries into $prefix/bin"
   copy_tree_files "$root/build/bin" "$prefix/bin" 755
 
+  # The cargo shim answers to the name `cargo`: put a link of that name in a
+  # directory of its own, to be placed first on PATH (docs/cargo-gc.md, "The
+  # cargo shim").
+  if [ -x "$prefix/bin/repro-cargo-shim" ]; then
+    mkdir -p "$prefix/libexec/repro-cargo-shim"
+    ln -sfn "$prefix/bin/repro-cargo-shim" "$prefix/libexec/repro-cargo-shim/cargo"
+  fi
+
   eprint_note "Installing runtime libraries into $prefix/lib"
   copy_tree_files "$root/build/lib" "$prefix/lib" 755
 

@@ -141,23 +141,59 @@ type
       ## negative for no bound
     acceptedOrigins*: Table[string, string]
       ## nameKey of a canonical name -> the origin URL (with `?subdir=`)
-      ## the project accepts for it: the one its lock already records. A
-      ## package not listed accepts the first origin its envelope names --
-      ## the one it had before any repoint. Records of every other origin
-      ## are excluded as `repointed-origin`
+      ## the project's lock already records for it. A package not listed
+      ## (and not in ``acceptances``) takes the first origin its envelope
+      ## names -- the one it had before any repoint. Records of every other
+      ## origin are excluded as `repointed-origin` or `revived-origin`
+    acceptedCommits*: Table[string, string]
+      ## nameKey -> the commit the lock row records. A revival entry shares
+      ## its URL with the origin it revives, so when several entries match
+      ## the row's URL, the one whose record holds this commit is the
+      ## origin the lock records
+    acceptances*: Table[string, SourceAcceptance]
+      ## nameKey of a package (an origin acceptance) or of an alias (a
+      ## target acceptance) -> the project's committed acceptance of a
+      ## source the index records for it (NPC-AREQ16): a `[[policy]]` of
+      ## `repro-catalogs.toml`, or an `[[override]]` of the index's source
+      ## set. It decides before ``acceptedOrigins``: it is how a project
+      ## moves off the source its lock records
+    indexRepo*: string
+      ## the `repo` of the `nimble-index` import read, for the `[[policy]]`
+      ## table a remedy prints
+    catalogsFile*: string
+      ## the project's `repro-catalogs.toml`, named by the remedies
     roots*: seq[RootRequirement]
       ## the requirements the closure starts from, with their ranges, for
       ## the requirement chain a diagnostic prints; ``solverInput``'s
       ## ``roots`` names are enough to compute the closure
 
+  SourceAcceptance* = object
+    ## A project's acceptance of one source the pinned index records for a
+    ## name (NPC-AREQ16): an origin of a package (a repoint's new origin, or
+    ## a revival entry) or a target of an alias (its recorded target or its
+    ## candidate). Exactly one of ``origin`` and ``target`` is set.
+    package*: string   ## the package or alias, as the acceptance spells it
+    origin*: string    ## origin URL, `?subdir=` kept; "" for an alias
+    revivedAt*: uint64 ## the revival entry's time; 0 for a registry origin
+    target*: string    ## the accepted alias target; "" for an origin
+    at*: string        ## where it is written: `<file>:<line>`
+    what*: string      ## `[[policy]]` or `[[override]]`, for messages
+    fromOverride*: bool
+      ## from the index's source set, which may name packages the index
+      ## does not hold (a source set with roots): those are not refused
+
   AliasCandidate* = object
     ## An alias the closure resolved whose registry entry now names another
     ## package than its recorded target (NPC-AREQ3 `alias-retargeted`): the
     ## solve keeps the recorded target, and the new one is a candidate the
-    ## project accepts explicitly (NPC-AREQ16).
+    ## project accepts explicitly (NPC-AREQ16) -- or did (``acceptedAt``).
     alias*: string     ## the alias as the index spells it
-    target*: string    ## the recorded target, which the solve takes
-    candidate*: string ## the registry's new target, not taken
+    target*: string    ## the recorded target
+    candidate*: string ## the registry's new target ("" when the entry has none)
+    taken*: string     ## the target the solve takes
+    acceptedAt*: string
+      ## the acceptance that chose ``taken`` (`<file>:<line>`); "" when the
+      ## solve took the recorded target on its own
 
   RootRequirement* = object
     requirer*: string ## who states it (the project's package)
@@ -542,23 +578,105 @@ proc offeredSnapshot*(pkg: NimbleSolverPackage): int =
 proc originUrl(o: PackageOrigin): string =
   o.url & (if o.subdir.len > 0: "?subdir=" & o.subdir else: "")
 
+proc originIdentityText(url: string): string =
+  ## An origin URL without scheme, case, trailing `/` and `.git`: the
+  ## identity the generator compares origins by (``assemble.sameOrigin``),
+  ## so an acceptance spelled `https://h/o/r.git` names `https://h/o/r`.
+  result = url.toLowerAscii()
+  let sep = result.find("://")
+  if sep >= 0: result = result[sep + 3 .. ^1]
+  let q = result.find('?')
+  var query = ""
+  if q >= 0:
+    query = result[q .. ^1]
+    result.setLen(q)
+  while result.endsWith("/"): result.setLen(result.len - 1)
+  if result.endsWith(".git"): result.setLen(result.len - 4)
+  result.add query
+
+proc sameOriginText*(a, b: string): bool =
+  ## Whether two origin URLs (`?subdir=` kept) name one origin by the
+  ## generator's identity.
+  originIdentityText(a) == originIdentityText(b)
+
+proc originOf*(pkg: PackageEnvelope; origin: string; revivedAt: uint64): int =
+  ## The entry of ``pkg.origins`` an acceptance names: the origin URL
+  ## (`?subdir=` kept) spelled as recorded, else of the same identity, and
+  ## the revival time (0 for an entry the registry named). -1 when the
+  ## envelope records no such entry.
+  for i, o in pkg.origins:
+    if originUrl(o) == origin and o.revivedAt == revivedAt: return i
+  for i, o in pkg.origins:
+    if originIdentityText(originUrl(o)) == originIdentityText(origin) and
+        o.revivedAt == revivedAt: return i
+  -1
+
 proc acceptedOrigin*(pkg: PackageEnvelope; options: NimbleSolveOptions): int =
   ## The index in ``pkg.origins`` of the origin the solve may take records
-  ## from: the one ``options.acceptedOrigins`` names for the package, else
-  ## the first (the origin the name had before any repoint). -1 when the
-  ## accepted URL is not an origin of the envelope.
+  ## from: the one an acceptance (``options.acceptances``) names for the
+  ## package, else the one ``options.acceptedOrigins`` (the lock) names --
+  ## of entries sharing its URL, the one whose record holds the commit
+  ## ``options.acceptedCommits`` names -- else the first (the origin the name had before any repoint). -1 when
+  ## the accepted origin is not an origin of the envelope.
   let k = nameKey(pkg.name)
+  if k in options.acceptances and options.acceptances[k].origin.len > 0:
+    let a = options.acceptances[k]
+    return originOf(pkg, a.origin, a.revivedAt)
   if k in options.acceptedOrigins:
+    let url = options.acceptedOrigins[k]
+    result = -1
     for i, o in pkg.origins:
-      if originUrl(o) == options.acceptedOrigins[k]: return i
-    return -1
+      if originUrl(o) == url:
+        result = i
+        break
+    if result >= 0 and k in options.acceptedCommits:
+      # The entry whose record holds the locked commit: a row taken from a
+      # revival entry keeps it after the acceptance is removed, as a
+      # repointed origin's row keeps its origin.
+      let commit = options.acceptedCommits[k]
+      for r in pkg.versions:
+        if r.commit == commit and int(r.origin) < pkg.origins.len and
+            originUrl(pkg.origins[int(r.origin)]) == url:
+          return int(r.origin)
+    return
   if pkg.origins.len > 0: 0 else: -1
 
-const AcceptingNotImplemented* =
-  "accepting another origin is not implemented yet"
-    ## The remedy every unaccepted origin's exclusion ends with: the
-    ## acceptance path (a `[[policy]]` naming the index, or the project's
-    ## own `[[override]]`, NPC-AREQ16) is not built.
+proc acceptanceOf*(options: NimbleSolveOptions; name: string):
+    Option[SourceAcceptance] =
+  let k = nameKey(name)
+  if k in options.acceptances: some(options.acceptances[k])
+  else: none(SourceAcceptance)
+
+proc policyTable*(package, repo: string; origin = ""; revivedAt = 0'u64;
+                  target = ""): string =
+  ## The `[[policy]]` table of `repro-catalogs.toml` that accepts, for
+  ## `nimble:<package>` read through the import ``repo``, the origin
+  ## ``origin`` (a revival entry when ``revivedAt`` is set) or the alias
+  ## target ``target`` (NPC-AREQ16). Every remedy prints it whole.
+  result = "[[policy]]\npackage = " & ("nimble:" & package).escape() &
+    "\nrepo = " & repo.escape()
+  if target.len > 0:
+    result.add "\ntarget = " & ("nimble:" & target).escape()
+  else:
+    result.add "\norigin = " & origin.escape()
+    if revivedAt != 0:
+      result.add "\nrevived = " & formatTime(int64(revivedAt)).escape()
+
+proc indented(text, by: string): string =
+  let lines = text.splitLines()
+  for i, l in lines:
+    if i > 0: result.add "\n"
+    result.add by & l
+
+proc acceptRemedy(options: NimbleSolveOptions; table: string): string =
+  ## "to take it, add to <file>:" and the table, indented under the line.
+  let file = if options.catalogsFile.len > 0: options.catalogsFile
+             else: "repro-catalogs.toml"
+  "to take it, add to " & file & ":\n" & indented(table, "          ")
+
+proc repoOf(options: NimbleSolveOptions): string =
+  if options.indexRepo.len > 0: options.indexRepo
+  else: "<the nimble-index import's repo>"
 
 proc candidatesOf*(pkg: PackageEnvelope; p: NimblePlatform;
                    options = NimbleSolveOptions(excludeNewer: -1)):
@@ -582,7 +700,9 @@ proc candidatesOf*(pkg: PackageEnvelope; p: NimblePlatform;
                       else: "an origin this index does not record") &
           ". A revived origin is reviewed like a repoint: the project keeps " &
           "the origin the lock records (or, with no lock row, the one it had " &
-          "first) until it accepts the new one; " & AcceptingNotImplemented)
+          "first) until it accepts the new one; " &
+          acceptRemedy(options, policyTable(pkg.name, repoOf(options),
+            originUrl(o), o.revivedAt)))
     elif pkg.origins.len > 1 and int(r.origin) != accepted:
       let theirs = if int(r.origin) < pkg.origins.len:
                      originUrl(pkg.origins[int(r.origin)]) else: "?"
@@ -591,8 +711,12 @@ proc candidatesOf*(pkg: PackageEnvelope; p: NimblePlatform;
           " from " & (if accepted >= 0: originUrl(pkg.origins[accepted])
                       else: "an origin this index does not record") &
           ". A repointed name keeps the origin the lock records (or, with no " &
-          "lock row, the one it had before the repoint); " &
-          AcceptingNotImplemented)
+          "lock row, the one it had before the repoint), or the one the " &
+          "project accepts; " &
+          (if int(r.origin) < pkg.origins.len:
+             acceptRemedy(options, policyTable(pkg.name, repoOf(options),
+               theirs, pkg.origins[int(r.origin)].revivedAt))
+           else: "the record names no origin of the envelope"))
     result.add c
   equalVersionExclusions(result)
   snapshotExclusions(result, accepted, pkg.origins.len)
@@ -766,23 +890,43 @@ proc solverInput*(idx: var NimbleIndex; roots: openArray[string];
     if not found.found:
       missing.incl w.name
       continue
-    let canon = found.package.name
+    var package = found.package
+    if found.alias.len > 0:
+      let ak = nameKey(found.alias)
+      let accepted = options.acceptanceOf(found.alias)
+      if accepted.isSome and accepted.get.target.len > 0:
+        # NPC-AREQ16: the project accepts a target of the alias (its
+        # candidate, or the recorded one), so every requirement that
+        # reaches the package through the alias takes it.
+        # ``acceptanceRefusals`` has checked the name map records it.
+        let t = lookupPackage(idx, accepted.get.target)
+        if t.found and t.alias.len == 0:
+          package = t.package
+        if ak notin candidates:
+          if nameMap.isNone: nameMap = some(loadNameMap(idx))
+          for e in nameMap.get.entries:
+            if nameKey(e.name) == ak:
+              candidates[ak] = AliasCandidate(alias: e.name, target: e.target,
+                candidate: e.candidate, taken: package.name,
+                acceptedAt: accepted.get.at)
+      elif ak notin candidates:
+        # NPC-AREQ3: the alias resolves to its recorded target; a candidate
+        # the registry names now is reported, never taken. Only a solve that
+        # meets an alias reads the name map.
+        if nameMap.isNone: nameMap = some(loadNameMap(idx))
+        for e in nameMap.get.entries:
+          if nameKey(e.name) == ak and e.candidate.len > 0:
+            candidates[ak] = AliasCandidate(
+              alias: e.name, target: e.target, candidate: e.candidate,
+              taken: e.target)
+    let canon = package.name
     let ck = nameKey(canon)
-    if found.alias.len > 0 and nameKey(found.alias) notin candidates:
-      # NPC-AREQ3: the alias resolves to its recorded target; a candidate
-      # the registry names now is reported, never taken. Only a solve that
-      # meets an alias reads the name map.
-      if nameMap.isNone: nameMap = some(loadNameMap(idx))
-      for e in nameMap.get.entries:
-        if nameKey(e.name) == nameKey(found.alias) and e.candidate.len > 0:
-          candidates[nameKey(found.alias)] = AliasCandidate(
-            alias: e.name, target: e.target, candidate: e.candidate)
     result.canonical[key] = canon
     result.canonical[ck] = canon
     if ck notin byKey:
       byKey[ck] = NimbleSolverPackage(name: canon, identity: identityOf(canon),
-        origins: found.package.origins,
-        candidates: candidatesOf(found.package, p, options))
+        origins: package.origins,
+        candidates: candidatesOf(package, p, options))
       followed[ck] = initHashSet[string]()
       followedCandidates[ck] = initHashSet[int]()
     if w.pseudo.isSome:
@@ -832,13 +976,135 @@ proc solverInput*(idx: var NimbleIndex; roots: openArray[string];
     cmp(nameKey(a.alias), nameKey(b.alias)))
 
 proc aliasCandidateNotes*(input: NimbleSolverInput): seq[string] =
-  ## One line per alias the closure resolved that the registry has
-  ## retargeted (NPC-AREQ3, NPC-AREQ16): the solve took the recorded target.
+  ## One note per alias the closure resolved that the registry has
+  ## retargeted, or whose target the project accepts (NPC-AREQ3,
+  ## NPC-AREQ16): which target the solve took, and, when it took the
+  ## recorded one on its own, the `[[policy]]` table that takes the new one.
   for c in input.aliasCandidates:
-    result.add "nimble:" & c.alias & " resolves to nimble:" & c.target &
-      ", the target it was first recorded with; the registry now names " &
-      "nimble:" & c.candidate & " (alias-retargeted), a separate candidate " &
-      "the project accepts explicitly: " & AcceptingNotImplemented
+    if c.acceptedAt.len > 0:
+      result.add "nimble:" & c.alias & " resolves to nimble:" & c.taken &
+        ", the target " & c.acceptedAt & " accepts (the alias was first " &
+        "recorded with nimble:" & c.target &
+        (if c.candidate.len > 0: "; the registry now names nimble:" &
+           c.candidate & ", alias-retargeted" else: "") & ")"
+    else:
+      result.add "nimble:" & c.alias & " resolves to nimble:" & c.target &
+        ", the target it was first recorded with; the registry now names " &
+        "nimble:" & c.candidate & " (alias-retargeted), a separate " &
+        "candidate the project accepts explicitly; " &
+        acceptRemedy(input.options, policyTable(c.alias,
+          repoOf(input.options), target = c.candidate))
+
+proc originLabel*(origins: seq[PackageOrigin]; i: int;
+                 registryOrigin = -1): string =
+  let o = origins[i]
+  result = originUrl(o)
+  var tags: seq[string]
+  # Every entry after the first is a repoint's new origin or a revival
+  # (NPC-AREQ4): the envelope keeps each origin the name has had.
+  if o.revivedAt != 0: tags.add "revived " & formatTime(int64(o.revivedAt))
+  elif i > 0: tags.add "repointed"
+  if i == 0: tags.add "the first recorded"
+  if i == registryOrigin: tags.add "the registry's now"
+  if tags.len > 0: result.add " (" & tags.join(", ") & ")"
+
+proc recordedOrigins*(pkg: PackageEnvelope): seq[string] =
+  ## Every origin entry of the envelope, labelled: its URL, its revival
+  ## time, whether it is the first and whether the registry names it now.
+  for i in 0 ..< pkg.origins.len:
+    result.add originLabel(pkg.origins, i, int(pkg.registryOrigin))
+
+proc originCandidateNotes*(input: NimbleSolverInput): seq[string] =
+  ## One note per origin of a package the closure reached whose records the
+  ## solve excluded because the project has not accepted that origin
+  ## (`repointed-origin`, `revived-origin`): the versions it offers, the
+  ## origin the solve took, and the `[[policy]]` table that takes the other
+  ## one (NPC-AREQ16). A package the project has accepted an origin for gets
+  ## none: it has chosen.
+  for pkg in input.packages:
+    if input.options.acceptanceOf(pkg.name).isSome: continue
+    var byOrigin = initOrderedTable[int, seq[string]]()
+    var taken = ""
+    for c in pkg.candidates:
+      let oi = int(c.record.origin)
+      if oi >= pkg.origins.len: continue
+      if c.exclusions.anyIt(it.kind in {exOtherOrigin, exRevivedOrigin}):
+        let v = if c.version.len > 0: c.version else: versionText(c.record.version)
+        byOrigin.mgetOrPut(oi, @[]).add v
+      elif taken.len == 0:
+        taken = originUrl(pkg.origins[oi])
+    for oi, versions in byOrigin:
+      let o = pkg.origins[oi]
+      result.add pkg.identity & ": the index records the origin " &
+        originLabel(pkg.origins, oi) & ", offering " & versions.join(", ") &
+        ", which the solve does not take" &
+        (if taken.len > 0: " (it takes " & pkg.identity & " from " & taken & ")"
+         else: "") & "; " &
+        acceptRemedy(input.options, policyTable(pkg.name,
+          repoOf(input.options), originUrl(o), o.revivedAt))
+
+proc acceptanceRefusals*(idx: var NimbleIndex; options: NimbleSolveOptions;
+                         indexLabel: string): seq[string] =
+  ## Every acceptance of ``options.acceptances`` that names a source the
+  ## index does not record for its name (NPC-AREQ16): an origin no entry of
+  ## the package's envelope is, a target that is neither the alias's
+  ## recorded target nor its candidate, a package or alias the index does
+  ## not hold, or an origin accepted for an alias (or a target for a
+  ## package). Each names where the acceptance is written. Never ignored:
+  ## an acceptance the solve could not apply would leave the project on a
+  ## source it did not choose, with nothing said. A source-set override of
+  ## a package the index does not hold is not refused (``fromOverride``).
+  var keys: seq[string]
+  for k in options.acceptances.keys: keys.add k
+  keys.sort()
+  var nameMap: Option[NimbleNameMap]
+  for k in keys:
+    let a = options.acceptances[k]
+    let head = a.at & ": " & a.what & " accepts "
+    let found = lookupPackage(idx, a.package)
+    if not found.found:
+      if not a.fromOverride:
+        result.add head & (if a.target.len > 0: "a target for the alias "
+                           else: "an origin for ") & "nimble:" & a.package &
+          ", which " & indexLabel & " does not hold; remove the table, or " &
+          "name the package as the index spells it"
+      continue
+    if a.origin.len > 0:
+      if found.alias.len > 0:
+        result.add head & "the origin " & a.origin & " for nimble:" &
+          a.package & ", which " & indexLabel & " records as an alias of " &
+          "nimble:" & found.package.name & "; accept an origin of nimble:" &
+          found.package.name & ", or a target of the alias with `target`"
+        continue
+      if originOf(found.package, a.origin, a.revivedAt) < 0:
+        result.add head & "the origin " & a.origin &
+          (if a.revivedAt != 0: " revived " & formatTime(int64(a.revivedAt))
+           else: "") & " for nimble:" & found.package.name & ", which " &
+          indexLabel & " does not record for it; it records " &
+          recordedOrigins(found.package).join(", ") &
+          ". Name one of them" &
+          (if found.package.origins.anyIt(it.revivedAt != 0):
+             " (a revival entry with its `revived` time)" else: "")
+    else:
+      if found.alias.len == 0:
+        result.add head & "the target nimble:" & a.target & " for nimble:" &
+          a.package & ", which " & indexLabel & " records as a package, not " &
+          "an alias; an alias target is accepted only for an alias"
+        continue
+      if nameMap.isNone: nameMap = some(loadNameMap(idx))
+      var recorded: seq[string]
+      for e in nameMap.get.entries:
+        if nameKey(e.name) == nameKey(found.alias):
+          recorded.add e.target
+          if e.candidate.len > 0: recorded.add e.candidate
+      if not recorded.anyIt(nameKey(it) == nameKey(a.target)):
+        var named: seq[string]
+        for r in recorded: named.add "nimble:" & r
+        result.add head & "the target nimble:" & a.target & " for the alias " &
+          "nimble:" & found.alias & ", which " & indexLabel & " does not " &
+          "record for it; its name map records " & named.join(" and ") &
+          " (the recorded target" &
+          (if named.len > 1: ", then the registry's new one" else: "") & ")"
 
 proc packageOf*(input: NimbleSolverInput; name: string): int =
   ## The index in ``input.packages`` of the package ``name`` reached (by

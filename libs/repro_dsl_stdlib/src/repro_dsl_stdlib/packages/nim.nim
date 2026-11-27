@@ -58,9 +58,17 @@ var reproConfigNimsFile {.threadvar.}: string
 
 package nim:
   provisioning:
+    # NOT the canonical pin. Recipe compilation requires Nim 2.2.10 (operator
+    # decision of 2026-11-24), and the canonical snapshot (addf7cf...) carries
+    # Nim 2.2.4, whose generated C file names grow with the recipe's depth
+    # until the compile dies with `cannot open`. This is the snapshot the engine's
+    # own Linux bootstrap already uses for its Nim
+    # (`repro_tool_profiles.BootstrapNimNixpkgsRev`), which carries 2.2.10;
+    # `t_catalog_nim_nix_arm_is_the_recipe_compiler_release` holds the two
+    # equal. Listed in `CanonicalPinExemptions` of the catalog audit.
     nixPackage "nixpkgs#nim", executablePath = "bin/nim",
-      nixpkgsRev = CanonicalNixpkgsRev,
-      nixpkgsNarHash = CanonicalNixpkgsNarHash
+      nixpkgsRev = "eec3e392d1862d49969beb75dd07a729002b6800",
+      nixpkgsNarHash = "sha256-Wp5g3mKC+QIjiO39yuiXkSMxzvH4PO4TAuEjCvyWvcI="
     # Windows / non-Nix Linux provisioning via Scoop's ScoopInstaller/Main
     # bucket. The bucket version is the source of truth — `preferredVersion`
     # is used here (vs. `version`) so any later 2.2.x publication satisfies
@@ -1176,7 +1184,21 @@ proc nimRepropathsConfig*(pkg: NimPackage;
   # `repro:project:<package>:repro-paths-bootstrap`. Its sentinels are
   # rendered by the managed-file writer from the block id; a block an
   # earlier release wrote with a `:v1` suffix is replaced in place.
-  let snippet = "when withDir(thisDir(), system.fileExists(\"" & reproPathsFile & "\")):\n  include \"" & reproPathsFile & "\""
+  #
+  # NOT IN THE RECIPE'S OWN COMPILES. The provider compile
+  # (`-d:reproProviderMode`) and the interface extraction
+  # (`-d:reproInterfaceMode`) evaluate this `config.nims` too, but the file
+  # is an OUTPUT of the graph they compute: the first build compiles the
+  # provider before `generate_nim_paths_*` has written it, and the second
+  # finds it, so both provider edges recompiled on the first re-run of an
+  # unchanged checkout (reprobuild-specs issue 2026-11-26-a-second-build-in-
+  # the-same-checkout-compiles-the-provider-again-on-both-edges). Those
+  # compiles are handed their library paths by the engine, and the first
+  # build already compiles without the file.
+  let snippet = "when not defined(reproProviderMode) and " &
+    "not defined(reproInterfaceMode) and\n    withDir(thisDir(), " &
+    "system.fileExists(\"" & reproPathsFile & "\")):\n  include \"" &
+    reproPathsFile & "\""
   
   let snippetAction = fs.ensureSnippet(configNimsFile,
     blockId = "repro-paths-bootstrap",

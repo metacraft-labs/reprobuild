@@ -41,6 +41,9 @@
 ##    release`` resumes the agent, the producer publishes sequence 3 and the
 ##    natural tick applies it; the documented off-host check, run as the
 ##    user guide prints it, exits 0 with the refusal listed as handled.
+## 7. ``decision 187``: after the recovery check, the add-on's nftables
+##    table is deleted by hand, the producer publishes sequence 4, and the
+##    agent's own apply loads the table again (§13 decision 187).
 ##
 ## The drill runs the host as a host runs: the fetch timer and the
 ## shipping path unit do the work; the gate never starts the shipping unit,
@@ -54,6 +57,9 @@
 ## Falsifying builds (sink side): ``ack-by-sequence-only`` (the
 ## mistyped-kind acknowledgement handles the refusal),
 ## ``check-ignores-acks``, ``check-ignores-containment``.
+## Host side: ``apply-skips-egress-reload`` (step 7: the agent's apply
+## leaves the deleted table unloaded; §13 decision 187, the add-on's
+## nftables table reloaded).
 ##
 ## Opt-in: ``REPRO_ADDON_VM_GATES=1``.
 ##
@@ -369,6 +375,24 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
   step("every record left the host within 15 s of being written (D1)",
        worst.ms < 15_000, $worst)
   phase("recovery", %*{"check": c3.output})
+
+  # 7. §13 decision 187 through the agent's own apply (A11 round 26): the
+  # add-on's table deleted by hand is loaded again by the next agent tick's
+  # switch, not only by an operator's apply. After the drill's own checks:
+  # while the table is gone, the egress check rightly raises
+  # `egress-observer-missing`, which the recovery check above must not see.
+  discard g.exec("nft delete table inet repro_addon_egress")
+  step("decision 187: the add-on's table is gone before the tick",
+       g.exec("nft list table inet repro_addon_egress").exitCode != 0, "")
+  let beforeReload = sink.headSeq()
+  publish(4)
+  step("decision 187: sequence 4 applies by the timer",
+       sink.waitForApplied(host, 4, waitSec, since = beforeReload), "")
+  let tableBack = g.exec("nft list table inet repro_addon_egress")
+  record["tableAfterAgentApply"] = %(tableBack.stdout & tableBack.stderr)
+  step("decision 187: the agent's apply loaded the table again",
+       tableBack.exitCode == 0, tableBack.stdout & tableBack.stderr &
+       g.exec("journalctl -q -o cat -u repro-agent-apply.service | tail -20").stdout)
 
 suite Gate:
   test "the drill: a compromised fetch unit, from detection to recovery":

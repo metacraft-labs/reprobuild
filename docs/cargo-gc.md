@@ -74,7 +74,12 @@ artifacts, which cargo reports only by their final name, are matched to their
 equality where it copied them (macOS), and, for the `.dSYM` bundle macOS
 debug builds can carry, by the symlink cargo makes to the bundle in `deps/`.
 A copy equal to a surviving unit's file is that unit's artifact and is kept. `--tee` copies the stream to
-standard output so the recorder can sit in a pipe. The live sets are stored as
+standard output so the recorder can sit in a pipe. `--pass-through` is for a
+MIXED stream, such as `cargo test --message-format=json-render-diagnostics`,
+whose standard output carries the test binaries' own output among the JSON
+messages: the recorder takes the lines that begin with `{"reason":` and copies
+every other line to standard output unchanged, as it arrives (a partial last line
+too). The summary line then goes to standard error. The live sets are stored as
 TOML under `target/.repro-cargo-gc/live-sets/`, one file per invocation, and
 only the last K per profile directory are kept.
 
@@ -83,8 +88,101 @@ from the target directory (`build.build-dir`), point `--target-dir` at the
 build directory, where `deps/` and `.fingerprint/` live.
 
 Library entry points for callers that already hold the stream (a cargo
-wrapper, a build edge): `recordLiveSet`, `recordLiveSetFromStream` and
-`collectGarbage` in `libs/repro_cargo_gc`.
+wrapper, a build edge): `recordLiveSet`, `recordLiveSetFromStream`,
+`recordLiveSetPassThrough` and `collectGarbage` in `libs/repro_cargo_gc`.
+
+## The cargo shim
+
+Nothing calls `record-live` by itself, so a target directory that was only ever
+built by bare `cargo` has no live set and `repro cargo gc` skips it. The shim
+makes every cargo invocation record one without anyone changing a call site.
+
+`repro-cargo-shim` is installed as a file named `cargo` in a directory of its
+own, `libexec/repro-cargo-shim/` beside `bin/` (a symlink to `bin/repro-cargo-shim`
+in the Nix package, and in `install-on-distributions.sh`). Put that directory
+FIRST on `PATH`: in a dev shell's `shellHook` or `devEnv`, and in the session
+launcher for commands typed outside a dev shell. A dev shell that puts its own
+Rust toolchain ahead of the inherited `PATH` hides a shim that was only
+prepended by the launcher. Only the Nix package and
+`install-on-distributions.sh` create the `cargo`-named link; no other packaging
+was examined. Windows is not supported (the shim says so and exits 127).
+
+**What it records.** For a compiling subcommand (`build`, `check`, `clippy`,
+`doc`, with their short aliases, and `test`, `bench`) it adds
+`--message-format=json-render-diagnostics` before a bare `--` when the caller
+gave no `--message-format`. With that format cargo renders rustc's diagnostics
+to standard error itself, as a human build does, and standard output carries
+only JSON artifact messages. The shim forwards every line that is not one of
+those at once, and diverts the JSON lines to
+`<target>/.repro-cargo-gc/shim-<pid>.stream` (the system temporary directory
+when the target directory does not exist yet, so the shim never creates it
+before cargo does). When cargo has exited 0 it stores the live set from that
+file with the same code as `repro cargo record-live --pass-through`, then
+deletes the file. If the caller already chose a JSON format (`json`,
+`json-render-diagnostics`, `json-diagnostic-short`, ...), argv is not touched;
+the caller receives the stream byte for byte and the recorder reads a copy.
+A failed build records nothing: its partial set would count as one of the last
+K and weaken the protection of units that are still live. K is
+`REPRO_CARGO_GC_KEEP_SETS` / the user config, resolved as the CLI resolves it.
+
+The target directory is `--target-dir`, else `CARGO_TARGET_DIR`, else
+`CARGO_BUILD_TARGET_DIR`, else `target_directory` of one silenced
+`cargo metadata --no-deps --format-version 1` run with the caller's toolchain
+and global options. A split `build.build-dir` is not followed (see
+`record-live`).
+
+**What it never touches.** It does not interpose at all (it `exec`s the real
+cargo: no pipe, no extra process, the terminal stays) for `run`, `install`,
+`fetch`, `metadata`, `clean`, `tree`, `nextest` and every other subcommand,
+`--version`, `-h`/`--help`, an unparseable command line, a non-JSON
+`--message-format` (`human`, `short`), `--build-plan`, `--unit-graph`, `--no-run`
+(in a JSON message format cargo does not print the `Executable ...` lines it
+prints otherwise: measured with cargo 1.94), and when
+`REPRO_CARGO_RECORD=0` (also `off`, `false`, `no`) or `REPRO_CARGO_SHIM_ACTIVE`
+is set. What the person sees is byte-identical to bare cargo in standard
+output, standard error and exit status (a signal N is reported as 128+N). The
+cargo the shim starts shares its process group, so Ctrl-C reaches it directly;
+SIGINT, SIGTERM, SIGHUP and SIGQUIT sent to the shim alone are forwarded, a
+signal the caller had ignored (`nohup`) stays ignored, and on Linux cargo is
+killed if the shim is. The shim never writes to either stream itself, and never
+reads standard input.
+
+**The terminal rule.** `test` and `bench` let the program they run write to
+cargo's standard output, and a test binary that finds a terminal there behaves
+differently from one that finds a pipe. So for those two the shim stands aside
+whenever standard output is a terminal, and records nothing. It also stands aside
+when standard output and standard error are the same open file (`2>&1`): what a
+test binary writes to standard output would then reach that file through the
+shim's pipe, later than what it writes to standard error, and the interleaving
+the caller sees would differ from bare cargo's. `build`, `check`,
+`clippy` and `doc` print nothing of their own to standard output and are
+recorded on a terminal too. One consequence of diverting by line prefix: a
+program that prints a line beginning with exactly `{"reason":` through cargo's
+standard output loses that line to the recorder, as it would to any consumer of
+`--message-format=json`.
+
+**Recursion.** The cargo the shim starts has `REPRO_CARGO_SHIM_ACTIVE=1` in its
+environment, so a `cargo` that its build scripts or test binaries run through
+`PATH` passes straight through. Cargo's own `CARGO` variable names the real
+cargo, which the shim is not in front of.
+
+**Finding the real cargo.** `REPRO_CARGO_REAL` if it names an executable file,
+else the next `cargo` on `PATH` that is not the shim (same file by identity, or
+in the shim's directory). The path is not resolved through symlinks, so a rustup
+proxy still sees the name `cargo`. A copy of the shim binary (a different file)
+under the name `cargo` is not recognised as itself: install a link.
+
+**`cargo nextest` is not covered.** `cargo nextest` runs the cargo named by the
+`CARGO` environment variable, which is the real cargo, not the shim, and it asks
+that cargo for `--message-format json` itself. Whether the shim sees nextest's
+compile, and what it must do about it, has still to be measured; until then
+nextest runs leave no live set.
+
+**The log.** Anything that goes wrong while recording (an unreadable stream, a
+failure to store the set, a stream naming no unit under the target directory)
+is appended to `<target>/.repro-cargo-gc/shim.log` and nowhere else: a recording
+problem never changes the caller's output or exit status. The log is truncated
+when it passes 1 MB.
 
 ## `CARGO_HOME`
 

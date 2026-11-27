@@ -554,7 +554,27 @@ brings it forward (`git -C <sibling> merge --ff-only …`, `repro ws sync
 line of the sibling's history, is spelled out:
 `repro lock refresh <path> --allow-pin-regression=<sibling>[,<sibling>…]`
 (or `REPRO_ALLOW_PIN_REGRESSION=<sibling>`, the same variable the
-`pre-commit` re-pin honors). A pin records the commit and nothing about
+`pre-commit` re-pin honors).
+
+The managed `pre-commit` hook judges "backward" against the pin the lock
+already carries, not against the checkout. When a sibling's checkout is
+behind that pin, has diverged from it, or lacks the pinned commit, the hook
+**keeps the pin**: the `repro.lock` entry (and the `flake.lock` node of the
+same sibling) is committed exactly as the lock records it, and the commit
+proceeds. A checkout older than the pin gives the hook nothing to advance
+to, and keeping the pin moves nothing — which matters when several projects
+share one workspace root and the sibling checkouts sit at another project's
+older pins. The hook prints one notice per kept sibling, on stderr and as a
+`repro-lock kept-pin:` line in `.repro/build/reports/pre-commit-lock.log`,
+naming the sibling, the distance, both commits, the command that brings the
+checkout forward, and
+`REPRO_ALLOW_PIN_REGRESSION=<sibling> git commit --amend --no-edit`, which
+runs the hook again over the commit just made and records the checkout's
+revision in it when the downgrade is deliberate. Siblings that are ahead of their pins still advance in the same
+commit. The push gate still compares the committed pins with the sibling
+checkouts.
+
+A pin records the commit and nothing about
 branches: no `ref`, so neither a local-only branch name nor which published
 branch contains the commit. Which branches a remote publishes is a fact
 about your clone's remote-tracking refs, and recording it made two clones

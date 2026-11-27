@@ -187,18 +187,22 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
          it.record.field("destination") == EgressControlAddress), "")
   # 3b. A burst of records (A11 audit F2): thirty refused destinations from
   # the fetch slice make the check write thirty records at once. The path
-  # unit must survive the burst and ship them all. The connects run in one
-  # shell, each in a subshell: the unit's IPAddressDeny= refuses each at
-  # once (EPERM), so none needs a timeout, and a loaded host cannot skip
-  # one (a `timeout 1 bash` that did not start within its second sent no
-  # SYN, A11 round 25). The table's set is recorded, so a destination the
-  # table never counted is told apart from a record that did not ship, and
-  # the arrival is polled for three minutes with the time it took recorded.
+  # unit must survive the burst and ship them all. The unit's
+  # IPAddressDeny= drops each SYN rather than refusing the connect, so a
+  # connect waits for TCP's retries (measured: 6-7 packets per address, A11
+  # round 26); the thirty run at once, each in its own background subshell,
+  # and are killed after ten seconds, long enough for every one to start
+  # and send its first SYN on a loaded host (a serial `timeout 1 bash` that
+  # did not start within its second sent none, round 25). The
+  # table's set is recorded, so a destination the table never counted is
+  # told apart from a record that did not ship, and the arrival is polled
+  # for three minutes with the time it took recorded.
   let burstSince = sink.headSeq()
   discard g.exec("systemd-run --wait --quiet --slice=" & "system-reproagent.slice" &
     " -p DynamicUser=yes -p IPAddressDeny=any -p IPAddressAllow=10.0.2.2 " &
     "/bin/bash -c 'for i in $(seq 20 49); do " &
-    "( exec 3<>/dev/tcp/198.51.100.$i/443 ) 2>/dev/null; done; true'",
+    "( exec 3<>/dev/tcp/198.51.100.$i/443 ) >/dev/null 2>&1 & done; " &
+    "sleep 10; kill $(jobs -p) 2>/dev/null; wait; true'",
     timeoutSec = 300)
   let burstSet = g.exec("nft list set inet repro_addon_egress refused4").stdout
   var burstCounted = 0

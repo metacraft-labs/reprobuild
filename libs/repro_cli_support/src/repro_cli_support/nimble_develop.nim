@@ -786,13 +786,26 @@ proc solveDevelopOverlay*(projectDir, lockPath: string;
   for p in ld.packages:
     if p.name == "nim": solvedNim = p.version
   var options = NimbleSolveOptions(excludeNewer: -1,
-    nimDeclared: solvedNim.len > 0)
+    nimDeclared: solvedNim.len > 0, indexRepo: index.repo,
+    catalogsFile: projectDir / CatalogImportsFileName)
+  # The project's acceptances decide the origin as they do for the
+  # committed lock's solve (NPC-AREQ16); without one, the lock row's URL and
+  # commit name the entry (a revival entry shares its URL with the origin it
+  # revives).
+  var acceptRefusals: seq[string]
+  options.acceptances = nimbleAcceptances(projectDir, index, acceptRefusals)
+  acceptRefusals.add acceptanceRefusals(idx, options,
+    "the Nimble index \"" & index.repo & "\" at " & index.revision)
+  if acceptRefusals.len > 0:
+    result.refusals.add acceptRefusals
+    return
   var depOf = initTable[string, LockedDep]()
   for d in ld.deps:
     if d.isNimbleDep:
       depOf[d.name] = d
-      options.acceptedOrigins[repro_nimble_index.nameKey(
-        d.name[NimbleOverridePrefix.len .. ^1])] = d.coordinates.url
+      let k = repro_nimble_index.nameKey(d.name[NimbleOverridePrefix.len .. ^1])
+      options.acceptedOrigins[k] = d.coordinates.url
+      options.acceptedCommits[k] = d.coordinates.revision
   let nimValue = nimVersionValueOf(solvedNim)
   proc active(reqs: seq[SolverRequirement]): seq[SolverRequirement] =
     for r in reqs:

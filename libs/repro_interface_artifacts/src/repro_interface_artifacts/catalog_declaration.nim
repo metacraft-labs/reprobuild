@@ -33,6 +33,15 @@
 ## refused, naming the line it is on: read as the default, a Nimble index
 ## would be looked for as a provisioning catalog (threat model G21).
 ##
+## A ``[[policy]]`` is a curator policy (``package``, ``contributor``) or a
+## Nimble acceptance (``package = "nimble:<name>"``, ``repo`` naming a
+## ``nimble-index`` import, and exactly one of ``origin`` -- with
+## ``revived`` for a revival entry -- and ``target``): the project's
+## committed choice of a repointed or revived origin, or of a retargeted
+## alias's new target, that the solve would not take on its own
+## (Nimble-Package-Catalog NPC-AREQ16). A table mixing the two forms is
+## refused.
+##
 ## ## What a catalog publishes
 ##
 ## ``publishedCatalogContent`` turns the decoded ``published-interfaces/*.rbsz``
@@ -57,7 +66,7 @@
 ## which is the safe side. It does not bind code OUTSIDE the catalog
 ## repository that the provider imports; that limit is stated in the spec.
 
-import std/[algorithm, options, sequtils, strutils]
+import std/[algorithm, options, sequtils, strutils, times]
 from std/unicode import validateUtf8
 
 import repro_hash
@@ -108,6 +117,24 @@ type
     contributor*: string
     line*: int
 
+  NimbleAcceptanceDeclaration* = object
+    ## One ``[[policy]]`` table that accepts, for a ``nimble:`` package read
+    ## through the ``nimble-index`` import ``repo``, a source the pinned
+    ## index records but the solve would not take on its own
+    ## (Nimble-Package-Catalog NPC-AREQ16): a repointed or revived origin
+    ## (``origin``, with ``revived`` naming a revival entry), or a
+    ## retargeted alias's new target (``target``). Exactly one of ``origin``
+    ## and ``target`` is non-empty. Never a provisioning selection rule.
+    package*: string   ## the Nimble name, without `nimble:`
+    repo*: string      ## the `nimble-index` import it reads
+    origin*: string    ## the accepted origin URL (`?subdir=` kept), or ""
+    revived*: string
+      ## the revival entry's time as written (`YYYY-MM-DDTHH:MM:SSZ`), or ""
+      ## for the origin as the registry named it
+    revivedAt*: int64  ## ``revived`` as Unix seconds; 0 when ""
+    target*: string    ## the accepted alias target, without `nimble:`, or ""
+    line*: int         ## where the table starts
+
   CatalogImportsDeclaration* = object
     imports*: seq[CatalogImportDeclaration]
       ## Sorted by ``repo``: declaration order is not an input.
@@ -115,6 +142,10 @@ type
       ## The ``[[policy]]`` rules. Their order is not an input either
       ## (``composeCatalogs`` folds them into a map and refuses a
       ## contradiction).
+    nimbleAcceptances*: seq[NimbleAcceptanceDeclaration]
+      ## The ``[[policy]]`` tables that accept a Nimble source, sorted by
+      ## (repo, package). They are not ``policy`` rules: a Nimble name is
+      ## resolved through its index, not composed from contributions.
 
   CatalogDeclarationError* = object of ValueError
     ## The declaration cannot be read; the message names every cause.
@@ -380,8 +411,87 @@ proc parseCatalogImportsDeclaration*(text, path: string;
           "one remote is one catalog import")
       remotes.add(d.remote)
 
+  const NimbleAcceptanceKeys = ["package", "repo", "origin", "revived",
+    "target"]
+  proc nimbleKey(name: string): string =
+    ## NPC-AREQ3's name key: ASCII case folded, underscores removed.
+    for c in name:
+      if c != '_': result.add toLowerAscii(c)
+
   var rules: seq[CatalogSelectionRule] = @[]
+  var acceptances: seq[NimbleAcceptanceDeclaration] = @[]
   for (at, raw) in policies:
+    if raw.anyIt(it[0] in ["repo", "origin", "revived", "target"]):
+      # A Nimble acceptance (NPC-AREQ16): `package = "nimble:<name>"`, the
+      # import it reads, and the origin or alias target it accepts.
+      if raw.anyIt(it[0] == "contributor"):
+        fail(at, "[[policy]] names both a `contributor` (a provisioning " &
+          "policy) and a Nimble acceptance key (`repo`, `origin`, " &
+          "`revived`, `target`); a table is one or the other")
+        continue
+      let pairs = fields(at, raw, NimbleAcceptanceKeys, "policy")
+      var a = NimbleAcceptanceDeclaration(line: at)
+      for required in ["package", "repo"]:
+        if not pairs.hasKey(required):
+          fail(at, "[[policy]] accepting a Nimble source is missing `" &
+            required & "`")
+      let package = pairs.valueOf("package")
+      if pairs.hasKey("package"):
+        if not package.startsWith("nimble:") or package.len == 7 or
+            nameProblem(package).len > 0:
+          fail(at, "policy package " & package.escape() & " is not a " &
+            "`nimble:<name>` package; only a Nimble package's origin or " &
+            "alias target is accepted this way")
+        else:
+          a.package = package[7 .. ^1]
+      a.repo = pairs.valueOf("repo")
+      if pairs.hasKey("repo"):
+        var isIndex = false
+        for d in declared:
+          if d.repo == a.repo and d.kind == cikNimbleIndex: isIndex = true
+        if not isIndex:
+          fail(at, "policy repo " & a.repo.escape() & " is not a " &
+            "`nimble-index` [[import]] of this file; name the import the " &
+            "package is read through")
+      let hasOrigin = pairs.hasKey("origin")
+      let hasTarget = pairs.hasKey("target")
+      if hasOrigin == hasTarget:
+        fail(at, "[[policy]] accepting a Nimble source names exactly one " &
+          "of `origin` (a repointed or revived origin) and `target` (a " &
+          "retargeted alias's new target)")
+      if hasOrigin:
+        a.origin = pairs.valueOf("origin")
+        # Compared exactly with the origins the index records, so it is
+        # not normalized; `?subdir=` is part of it.
+        if a.origin.strip().len == 0:
+          fail(at, "policy origin is empty")
+        elif a.origin != a.origin.strip():
+          fail(at, "policy origin " & a.origin.escape() & " has leading or " &
+            "trailing whitespace")
+      if pairs.hasKey("revived"):
+        a.revived = pairs.valueOf("revived")
+        if not hasOrigin:
+          fail(at, "policy `revived` names a revival entry of an origin " &
+            "and needs `origin`")
+        else:
+          try:
+            a.revivedAt = parse(a.revived, "yyyy-MM-dd'T'HH:mm:ss'Z'",
+              utc()).toTime.toUnix
+            if a.revivedAt <= 0: raise newException(ValueError, "not after 1970")
+          except CatchableError:
+            fail(at, "policy revived " & a.revived.escape() & " is not a " &
+              "UTC time spelled YYYY-MM-DDTHH:MM:SSZ (the revival's time, " &
+              "as the remedy prints it)")
+      if hasTarget:
+        let t = pairs.valueOf("target")
+        if not t.startsWith("nimble:") or t.len == 7 or
+            nameProblem(t).len > 0:
+          fail(at, "policy target " & t.escape() & " is not a " &
+            "`nimble:<name>` package")
+        else:
+          a.target = t[7 .. ^1]
+      acceptances.add(a)
+      continue
     let pairs = fields(at, raw, ["package", "contributor"], "policy")
     for required in ["package", "contributor"]:
       if not pairs.hasKey(required):
@@ -399,6 +509,14 @@ proc parseCatalogImportsDeclaration*(text, path: string;
     policyTables.add(CatalogPolicyDeclaration(package: package,
       contributor: contributor, line: at))
 
+  for i, a in acceptances:
+    for b in acceptances[0 ..< i]:
+      if a.package.len > 0 and a.repo == b.repo and
+          nimbleKey(a.package) == nimbleKey(b.package):
+        fail(a.line, "nimble:" & a.package & " is accepted twice through " &
+          a.repo.escape() & " (the other [[policy]] is at line " & $b.line &
+          "); one package takes one source, so keep one table")
+
   if errors.len > 0:
     raise newException(CatalogDeclarationError,
       "the catalog import declaration cannot be read:\n  " &
@@ -411,8 +529,12 @@ proc parseCatalogImportsDeclaration*(text, path: string;
     result = cmp(a.package, b.package)
     if result == 0: result = cmp(a.contributor, b.contributor)
     if result == 0: result = cmp(a.line, b.line))
+  acceptances.sort(proc (a, b: NimbleAcceptanceDeclaration): int =
+    result = cmp(a.repo, b.repo)
+    if result == 0: result = cmp(nimbleKey(a.package), nimbleKey(b.package)))
   CatalogImportsDeclaration(imports: declared,
-    policy: CatalogSelectionPolicy(selections: rules))
+    policy: CatalogSelectionPolicy(selections: rules),
+    nimbleAcceptances: acceptances)
 
 proc parseCatalogImportsDeclaration*(text, path: string):
     CatalogImportsDeclaration =
