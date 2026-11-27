@@ -794,7 +794,8 @@ suite "the plan of a record run":
     createSymlink(cc, tcBin / "cc")
     let toolchain = @["PATH=" & tcBin & ":" & storeOnlyPath()]
     let cfg = BuildScriptEdgesConfig(
-      units: PlanUnitsConfig(projectRoot: ws, storeRoot: reg.store,
+      units: PlanUnitsConfig(governingLockIdentity:
+        lockIdentityOutsideSolvedGraph(), projectRoot: ws, storeRoot: reg.store,
         outRoot: outRoot, registryCrates: reg.rows, toolchainEnv: toolchain),
       devEnv: devEnv.mapIt(it[0] & "=" & it[1]), rustc: t.rustc,
       cToolchain: CToolchain(cc: cc, cxx: cxx, ar: ar, binDir: tcBin),

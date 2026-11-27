@@ -31,7 +31,10 @@
 ## 2. `sysdep`'s compile and run edges (`buildScriptEdgesOf`): ids, the run's
 ##    policy (monitored, `hybrid`, network denied, one slot), `OUT_DIR` an
 ##    opaque output, `TMPDIR` a scratch directory, and the rewritten
-##    variables.
+##    variables. Each edge equals the action the engine creates from its
+##    `create-action` record under the producer's lock identity (same key,
+##    command, environment, inputs, outputs, scratch directories, isolation
+##    and network mode); the run's record lacks only the opaque `OUT_DIR`.
 ## 3. Built through the engine and monitor, both succeed. The static library
 ##    the script built with the C toolchain it was given is in `OUT_DIR`.
 ##    The interpreted files, with `${OUT_DIR}` expanded to cargo's `OUT_DIR`,
@@ -76,7 +79,9 @@
 ## not run again after the edit under `extra/`); not rewriting `CC` fails
 ## check 2; writing the link-search values without normalising them fails
 ## check 3 (the comparison with cargo's linked paths and the physical-path
-## scan); letting a run with providers through fails check 1. Not removing
+## scan); letting a run with providers through fails check 1. Building the
+## run edge with `action` instead of the engine's `createdAction` of its
+## spec fails check 2's record comparison. Not removing
 ## the toolchain selectors fails check 2 (they are in the run's
 ## environment) and check 3 (the script picks the failing compiler); taking
 ## the shell's own variables from the dev environment fails check 2 (in the
@@ -100,9 +105,15 @@ import repro_build_engine
 import repro_build_engine/embedded_root_scan
 import repro_cargo_edge/[build_script_edges, build_script_output, cargo_plan,
                          plan_units, record_mode]
+import repro_core/input_check_policy
+import repro_lock/identity
 import repro_test_support
 
 import ./rqe_cg5_plan_fixture
+
+let ProducerLock = LockIdentity("blake3:" & '7'.repeat(64))
+  ## Stands for the lock identity of the edges' producer: an identity other
+  ## than the default shows the edges' keys follow the one they are given.
 
 proc writeSysWorkspace(root: string) =
   writeFileIn(root, "Cargo.toml",
@@ -332,7 +343,8 @@ suite "a build script as edges":
     let edgeDevEnv = devEnv.mapIt(it[0] & "=" & it[1]) & selectors & shellVars
     proc edgesConfig(dev: seq[string]): BuildScriptEdgesConfig =
       BuildScriptEdgesConfig(
-        units: PlanUnitsConfig(projectRoot: ws, outRoot: outRoot,
+        units: PlanUnitsConfig(governingLockIdentity: ProducerLock,
+          projectRoot: ws, outRoot: outRoot,
           toolchainEnv: @["PATH=" & tcBin & ":" & storeOnlyPath()]),
         devEnv: dev, rustc: rustc,
         cToolchain: CToolchain(cc: cc, cxx: cxx, ar: ar, binDir: tcBin),
@@ -369,6 +381,29 @@ suite "a build script as edges":
     check e.executable in e.runAction.inputs and
       wrapper in e.runAction.inputs
     check e.runAction.cwd == ws / "sysdep"
+    # Each edge is the action the engine creates from its `create-action`
+    # record, key included; the run's record states every field but the
+    # opaque OUT_DIR, which no record can carry.
+    for (spec, direct) in [(e.compileSpec, e.compile),
+                           (e.runSpec, e.runAction)]:
+      let created = createdAction(parseCreatedActionSpec(
+        createActionRecord(spec)), ProducerLock)
+      checkpoint "created from its record: " & created.id
+      check created.id == direct.id
+      check created.weakFingerprint == direct.weakFingerprint
+      check created.argv == direct.argv and created.cwd == direct.cwd
+      check created.env == direct.env
+      check created.inputs == direct.inputs and
+        created.outputs == direct.outputs and created.deps == direct.deps
+      check created.scratchDirs == direct.scratchDirs
+      check created.isolateHostEnvironment and created.cacheable
+      check created.networkMode == netDenied
+      check created.cpuMilli == 1000'u32
+      check $created.governingLockIdentity == $ProducerLock
+    check e.runSpec.policyKind == CreatedActionAutomaticMonitor
+    check e.runSpec.actionCachePolicy == ffpHybrid
+    check e.runSpecLacks == @["removeBeforeRun"]
+    check createdAction(e.runSpec, ProducerLock).removeBeforeRun.len == 0
     var runEnv = initTable[string, string]()
     for entry in e.runAction.env:
       let eq = entry.find('=')

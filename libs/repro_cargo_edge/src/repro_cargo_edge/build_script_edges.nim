@@ -88,6 +88,14 @@
 ## - a registry crate's script with no lock row, not in the store, or not
 ##   compiled and run from the crate's store prefix.
 ##
+## CREATED-ACTION FORM. Each edge is a `CreatedActionSpec` and the engine's
+## own `createdAction` of it, under the caller's governing lock identity, as
+## `plan_units`' unit edges are, so an edge built here and one the engine
+## creates from its `create-action` record have one key. The run edge's
+## spec states every field of it but one: `OUT_DIR` as an opaque output
+## directory (`removeBeforeRun`), which no record can carry
+## (`BuildScriptEdge.runSpecLacks`).
+##
 ## A workspace is built either wholly by these edges and `plan_units`' or
 ## wholly by cargo: `buildScriptEdges` returns the edges of every build script
 ## of the plan or raises `BuildScriptRefusal` naming every one it refuses,
@@ -98,7 +106,6 @@
 import std/[algorithm, os, sequtils, strutils, tables]
 
 import repro_build_engine
-import repro_core/dependency_gathering
 import repro_core/input_check_policy
 import repro_lock/identity
 import repro_local_store
@@ -166,7 +173,14 @@ type
       ## the script and its arguments, as the interpreter runs them
     runCwd*: string
     runEnv*: seq[string]      ## the run edge's whole environment
+    compileSpec*, runSpec*: CreatedActionSpec
+      ## the two edges as their `create-action` records state them
+      ## (`repro_build_engine.createActionRecord`)
+    runSpecLacks*: seq[string]
+      ## the fields of `runAction` that `runSpec` cannot state (see `build`)
     compile*, runAction*: BuildAction
+      ## `createdAction` of each spec under the configured lock identity,
+      ## the run's with `runSpecLacks` set besides
 
 proc buildScriptCompileEdgeId*(u: PlanUnit): string =
   BuildScriptCompileEdgePrefix & u.package & "@" & u.version & "-" &
@@ -452,47 +466,65 @@ proc interpreterArgv(p: Prepared; cfg: BuildScriptEdgesConfig): seq[string] =
   result.add "--"
   result.add p.runArgv
 
+proc runSpecOf(p: Prepared; compileId: string;
+               cfg: BuildScriptEdgesConfig): CreatedActionSpec =
+  ## The run edge as a created-action spec: monitored (the automatic
+  ## monitor), content-checked (`hybrid`), cacheable, one slot (the spec's
+  ## default `cpuMilli`), isolated, with its two scratch directories. The
+  ## network is denied because a created action has no other mode (the
+  ## engine's zero value).
+  result = initCreatedActionSpec(buildScriptRunEdgeId(p.run),
+    interpreterArgv(p, cfg))
+  result.cwd = p.runCwd
+  result.deps = @[compileId]
+  # Its inputs are content: the script's executable, the interpreter and
+  # what the monitor records the script reading.
+  result.inputs = @[p.executable, cfg.interpreter]
+  result.outputs = @[p.outDir, p.stdoutFile]
+  for name in outputFileNames():
+    result.outputs.add p.directivesDir / name
+  result.env = p.runEnv
+  result.commandStatsId = BuildScriptRunStatsId
+  result.cacheable = true
+  result.actionCachePolicy = ffpHybrid
+  result.policyKind = CreatedActionAutomaticMonitor
+  result.isolateHostEnvironment = true
+  result.scratchDirs = @[p.tmpDir, p.workDir]
+
 proc build(p: Prepared; cfg: BuildScriptEdgesConfig): BuildScriptEdge =
-  ## The two actions of a checked run, creating their directories.
-  createDir(p.compileOutDir)
-  createDir(p.runDir)
-  let compile = rustcUnitAction(buildScriptCompileEdgeId(p.compileUnit),
+  ## The two actions of a checked run, each the engine's created action of
+  ## its spec, creating their directories unless the engine is to
+  ## (`PlanUnitsConfig.deferOutputDirs`).
+  if not cfg.units.deferOutputDirs:
+    createDir(p.compileOutDir)
+    createDir(p.runDir)
+  let lock = cfg.units.governingLockIdentity
+  let compileSpec = rustcUnitSpec(buildScriptCompileEdgeId(p.compileUnit),
     p.compileArgv & p.compileArgvDifference, cwd = p.compileCwd,
     deps = p.compileDeps, inputs = p.compileInputs,
     outputs = p.compileOutputs, env = p.compileLaunchEnv,
     commandStatsId = BuildScriptCompileStatsId,
     isolateHostEnvironment = true, scratchDirs = p.compileScratch)
-  var outputs = @[p.outDir, p.stdoutFile]
-  for name in outputFileNames():
-    outputs.add p.directivesDir / name
-  var run = action(buildScriptRunEdgeId(p.run),
-    interpreterArgv(p, cfg),
-    cwd = p.runCwd,
-    deps = [compile.id],
-    inputs = [p.executable, cfg.interpreter],
-    outputs = outputs,
-    commandStatsId = BuildScriptRunStatsId,
-    cacheable = true,
-    actionCachePolicy = ffpHybrid,
-    dependencyPolicy = automaticMonitorGatheringPolicy(),
-    isolateHostEnvironment = true,
-    env = p.runEnv,
-    # Its inputs are content: the script's executable, the interpreter and
-    # what the monitor records the script reading.
-    governingLockIdentity = lockIdentityOutsideSolvedGraph())
-  # The network denied: the zero value, stated where it matters (a build
-  # script downloads nothing).
-  run.networkMode = netDenied
+  let compile = rustcUnitAction(compileSpec, lock)
+  let runSpec = runSpecOf(p, compile.id, cfg)
+  var run = createdAction(runSpec, lock)
+  # The one field the created-action form cannot state: `OUT_DIR` as an
+  # opaque output directory, removed before each run. A `create-action`
+  # record has no field for it, and a fragment's `opaque-output` record
+  # applies to the fragment's producer, not to an action it creates. So it
+  # is set on this action only (`runSpecLacks`), and an action created from
+  # `runSpec`'s record would keep an earlier run's `OUT_DIR`, which the
+  # interpreter refuses (it requires an empty one).
   run.removeBeforeRun = @[p.outDir]
-  run.scratchDirs = @[p.tmpDir, p.workDir]
   BuildScriptEdge(run: p.run, compileUnit: p.compileUnit,
     registry: p.registry, compileCargoArgv: p.compileCargoArgv,
     compileArgvDifference: p.compileArgvDifference,
     compileEnv: p.compileEnv, executable: p.executable, runDir: p.runDir,
     outDir: p.outDir, directivesDir: p.directivesDir,
     stdoutFile: p.stdoutFile, tmpDir: p.tmpDir, workDir: p.workDir,
-    runArgv: p.runArgv,
-    runCwd: p.runCwd, runEnv: p.runEnv, compile: compile, runAction: run)
+    runArgv: p.runArgv, runCwd: p.runCwd, runEnv: p.runEnv,
+    compileSpec: compileSpec, runSpec: runSpec,
+    runSpecLacks: @["removeBeforeRun"], compile: compile, runAction: run)
 
 proc refusalMessage(refused: seq[(string, string)]): string =
   result = "the cargo plan holds build scripts these edges do not build, " &
@@ -509,6 +541,9 @@ proc raiseRefusal(refused: var seq[(string, string)]) {.noreturn.} =
 proc setup(plan: CargoPlan; cfg: BuildScriptEdgesConfig):
     (seq[RecordRoot], Table[string, PlanUnit], Table[string, CrateRow]) =
   checkConfig(cfg)
+  if ($cfg.units.governingLockIdentity).len == 0:
+    raise newException(ValueError, "the build-script edges need the " &
+      "governing lock identity they are built under")
   for (what, path) in [("workspace root", cfg.units.projectRoot),
                        ("output root", cfg.units.outRoot)]:
     if path.len == 0 or not path.isAbsolute:

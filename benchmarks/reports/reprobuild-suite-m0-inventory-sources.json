@@ -59741,6 +59741,8 @@
       "localDependencyShape": [
         "repro_build_engine",
         "repro_cargo_edge",
+        "repro_core",
+        "repro_lock",
         "repro_test_support"
       ],
       "owner": "tests/integration",
