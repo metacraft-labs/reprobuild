@@ -157,6 +157,31 @@ const
     "fs.quota.syncs", "fs.quota.writes", # quota statistics counters
   ]
 
+  MemoryDerivedSysctlFields* = [
+    # Fields the kernel sizes from the memory it finds free at boot
+    # (https://docs.kernel.org/networking/ip-sysctl.html): ``tcp_mem`` and
+    # ``udp_mem`` are "calculated at boot time from amount of available
+    # memory"; the maximum of ``tcp_rmem`` and ``tcp_wmem`` (their third
+    # field) defaults to a value "depending on RAM size". So they move with
+    # the guest's memory and, where the kernel's cap is above what that
+    # memory gives (Ubuntu 26.04's kernel), between two boots of the same
+    # host: measured 2026-11-27 on a stock ubuntu-26.04 guest, no add-on,
+    # ``tcp_rmem``'s maximum 14894464 at one boot and 14894496 at the next.
+    # Only these fields are dropped (1-based; empty: the whole value); a
+    # change to any other field still counts. The cost: a profile that
+    # changes only these fields is not seen by the fingerprint.
+    (key: "net.ipv4.tcp_rmem", fields: @[3]),
+    (key: "net.ipv4.tcp_wmem", fields: @[3]),
+    (key: "net.ipv4.tcp_mem", fields: newSeq[int]()),
+    (key: "net.ipv4.udp_mem", fields: newSeq[int]()),
+    # The default maximum number of threads, sized from the total RAM
+    # pages at boot (kernel/fork.c ``set_max_threads``;
+    # https://docs.kernel.org/admin-guide/sysctl/kernel.html#threads-max).
+    # Measured 2026-11-27 on ubuntu-24.04: 15437 before a bootstrap, 15436
+    # after the uninstall, a boot later.
+    (key: "kernel.threads-max", fields: newSeq[int]()),
+  ]
+
   VolatileSysctlPrefixes* = [
     # ``/proc/sys/fs/binfmt_misc`` is an automount point: reading below it
     # mounts binfmt_misc, which would make the fingerprint change the
@@ -449,6 +474,29 @@ proc tmpfsHalfRamSizeOption*(memTotalKb, pageSize: int): string =
   if pages mod 2 == 0: return ""
   "size=" & $(((pages + 1) div 2) * (pageSize div 1024)) & "k"
 
+proc withoutDevtmpfsDefaults*(superOpts: string; memTotalKb, pageSize: int): string =
+  ## ``superOpts`` of a ``devtmpfs`` mount without the ``size=`` and
+  ## ``nr_inodes=`` the kernel gives it by default, which follow the RAM
+  ## pages of this boot: the tmpfs defaults, half the total RAM pages for
+  ## both (``shmem_default_max_blocks`` and ``shmem_default_max_inodes``,
+  ## mm/shmem.c; ``MemTotal`` is the total RAM pages in kB,
+  ## https://docs.kernel.org/filesystems/proc.html#meminfo). devtmpfs
+  ## prints them always, unlike a tmpfs at its default. Measured 2026-11-27
+  ## on ubuntu-24.04: ``size=987968k,nr_inodes=246992`` before a
+  ## bootstrap, ``size=987964k,nr_inodes=246991`` a boot later. A size or
+  ## an inode count set explicitly (systemd's ``size=4m,nr_inodes=1m`` when
+  ## it mounts ``/dev`` itself) differs from the default and is kept; one
+  ## set to exactly half the RAM cannot be told from the default and is
+  ## dropped too.
+  let pages = memTotalKb div (pageSize div 1024)
+  let half = pages div 2
+  let sizeDefault = "size=" & $(half * (pageSize div 1024)) & "k"
+  let inodesDefault = "nr_inodes=" & $half
+  var kept: seq[string]
+  for o in superOpts.split(','):
+    if o != sizeDefault and o != inodesDefault: kept.add(o)
+  kept.join(",")
+
 proc parseMountinfo*(text: string; memTotalKb = 0; pageSize = 4096):
     seq[tuple[key, value: string]] =
   ## ``/proc/self/mountinfo``. Key: the mount point, with ``#<n>`` appended
@@ -479,6 +527,8 @@ proc parseMountinfo*(text: string; memTotalKb = 0; pageSize = 4096):
     let fstype = post[0]
     let source = unescapeMountField(post[1])
     var superOpts = post[2]
+    if fstype == "devtmpfs" and memTotalKb > 0:
+      superOpts = withoutDevtmpfsDefaults(superOpts, memTotalKb, pageSize)
     if fstype == "tmpfs" and memTotalKb > 0:
       let half = tmpfsHalfRamSizeOption(memTotalKb, pageSize)
       if half.len > 0:
@@ -586,6 +636,25 @@ proc parseListUnits*(text: string): seq[tuple[key, value: string]] =
     if f[2] in ["active", "failed"]:
       result.add((key: f[0], value: f[2]))
 
+proc isMemoryDerivedSysctl*(key: string): bool =
+  ## Whether ``MemoryDerivedSysctlFields`` names ``key``.
+  for m in MemoryDerivedSysctlFields:
+    if m.key == key: return true
+  false
+
+proc withoutMemoryDerived*(key, value: string): tuple[keep: bool, value: string] =
+  ## ``value`` (whitespace-normalised) with the fields
+  ## ``MemoryDerivedSysctlFields`` names for ``key`` replaced by ``-``;
+  ## ``keep`` is false when the whole value is memory-derived.
+  for m in MemoryDerivedSysctlFields:
+    if m.key != key: continue
+    if m.fields.len == 0: return (false, "")
+    var f = value.splitWhitespace()
+    for i in m.fields:
+      if i >= 1 and i <= f.len: f[i - 1] = "-"
+    return (true, f.join(" "))
+  (true, value)
+
 proc isVolatileSysctl*(key: string): bool =
   if key in VolatileSysctlKeys: return true
   for p in VolatileSysctlPrefixes:
@@ -663,7 +732,8 @@ proc collectSysctl(fp: var Fingerprint) =
           value = readFile(abs)
         except IOError, OSError:
           continue
-        fp.add(fcSysctl, key, value.splitWhitespace().join(" "))
+        let kept = withoutMemoryDerived(key, value.splitWhitespace().join(" "))
+        if kept.keep: fp.add(fcSysctl, key, kept.value)
   walk(fp, "/proc/sys", "")
 
 proc collectUnits(fp: var Fingerprint) =
