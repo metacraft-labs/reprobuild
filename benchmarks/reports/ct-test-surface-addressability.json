@@ -50,16 +50,16 @@
   "counts": {
     "catalogs": 5,
     "itemsByKind": {
-      "case": 21924,
-      "suite": 5169
+      "case": 21952,
+      "suite": 5173
     },
     "itemsByProvider": {
       "assembly-fallback": 3,
-      "nim-unittest": 26130,
+      "nim-unittest": 26162,
       "python-pytest": 7,
       "python-unittest": 953
     },
-    "itemsTotal": 27093,
+    "itemsTotal": 27125,
     "responseDiagnostics": {
       "info": 1,
       "warning": 33
@@ -349,21 +349,21 @@
   ],
   "reconciliation": {
     "caseCoveragePercent": 98.03,
-    "caseItemsInCatalog": 21924,
-    "casesAddressableThroughTheSurface": 20665,
+    "caseItemsInCatalog": 21952,
+    "casesAddressableThroughTheSurface": 20693,
     "collidingIdentities": 18,
-    "distinctCaseIdentities": 21904,
+    "distinctCaseIdentities": 21932,
     "groundTruth": "benchmarks/reports/reprobuild-suite-m0-inventory-sources.json",
     "perSourceCaseCountAgreement": {
-      "agree": 3321,
-      "compared": 3330,
+      "agree": 3325,
+      "compared": 3334,
       "disagree": 9
     },
     "sourceCoveragePercent": 99.76,
-    "sourcesAddressableThroughTheSurface": 3330,
+    "sourcesAddressableThroughTheSurface": 3334,
     "sourcesNotAddressable": 8,
-    "trackedNimSuiteSources": 3338,
-    "trackedStaticCaseCount": 21080
+    "trackedNimSuiteSources": 3342,
+    "trackedStaticCaseCount": 21108
   },
   "schemaVersion": 2,
   "surface": {
@@ -423,6 +423,7 @@
     "libs/repro_addon/tests/t_addon_evidence_key_survives_retention.nim",
     "libs/repro_addon/tests/t_addon_evidence_lag_resigned.nim",
     "libs/repro_addon/tests/t_addon_evidence_probe_owns_its_connection.nim",
+    "libs/repro_addon/tests/t_addon_evidence_round28.nim",
     "libs/repro_addon/tests/t_addon_evidence_ship_confinement.nim",
     "libs/repro_addon/tests/t_addon_evidence_ships_off_host.nim",
     "libs/repro_addon/tests/t_addon_evidence_units_and_tick_records.nim",
@@ -660,6 +661,8 @@
     "libs/repro_build_engine/tests/test_umask_wrap_both_spawn_paths.nim",
     "libs/repro_build_engine/tests/test_wrapped_monitor_evidence_ownership.nim",
     "libs/repro_bundle/tests/t_repro_bundle_halves.nim",
+    "libs/repro_cargo_edge/tests/t_build_script_edges.nim",
+    "libs/repro_cargo_edge/tests/t_build_script_output.nim",
     "libs/repro_cargo_edge/tests/t_cargo_plan.nim",
     "libs/repro_cargo_edge/tests/t_plan_run_spawn_environment.nim",
     "libs/repro_cargo_edge/tests/t_plan_units.nim",
@@ -3113,6 +3116,7 @@
     "tests/integration/t_rqe_cg3_per_crate_totals_learned.nim",
     "tests/integration/t_rqe_cg3_wrapper_is_transparent.nim",
     "tests/integration/t_rqe_cg3_wrapper_is_transparent_fixture_crates.nim",
+    "tests/integration/t_rqe_cg5_build_script_cfg_and_links.nim",
     "tests/integration/t_rqe_cg5_no_mixed_rlibs.nim",
     "tests/integration/t_rqe_cg5_plan_completes_to_cargos_argv.nim",
     "tests/integration/t_rqe_cg5_plan_edges_lower_isolated.nim",

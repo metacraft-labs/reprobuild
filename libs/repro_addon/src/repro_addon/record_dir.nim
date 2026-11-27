@@ -747,6 +747,13 @@ proc writeDelegatedEntry*(dir, name, bytes: string; staging = "";
     raiseOSError(e, "rename into " & dir / name)
   if fsync(dfd) != 0: raiseOSError(osLastError(), "fsync " & dir)
 
+proc ensureDelegatedState*(state: string) =
+  ## The dynamic user's state directory, made (root 0700, its parent 0700
+  ## as ``/var/lib/private`` must be) when absent, as the delegated writers
+  ## make it; systemd hands it to the user at the unit's next start.
+  let fd = openDelegatedState(state, create = true)
+  discard posix.close(fd)
+
 proc delegatedStateFileExists*(state, name: string): bool =
   ## Whether ``state/name`` exists (as anything: judged without following a
   ## link), ``state`` reached as ``writeDelegatedStateFile`` reaches it.
@@ -860,14 +867,39 @@ proc dropEntryNames*(dir: string; suffix = ".evr"): seq[string] =
   discard closedir(d)
   result.sort()
 
+var displacedAsideNotes*: seq[string]
+  ## What ``moveAside`` found in the place of an aside directory and moved
+  ## out of the way since the caller last cleared it (A11 round 28, M-a):
+  ## the caller reports them.
+
 proc moveAside(dfd: cint; dir, name: string): string =
   ## ``name`` renamed (the entry itself, never what a link names) into
   ## ``dropAsideDir(dir)``, made root 0700 beside ``dir``; "" when done,
   ## else why not, after which the entry is unlinked if it can be.
+  ##
+  ## Anything but a directory in the aside directory's place (a file, a
+  ## link, a FIFO: the egress check, uid 0 with the evidence directory
+  ## writable, can plant one there to disable this) is renamed out of the
+  ## way first, as itself and never through a link, to
+  ## ``<aside>.displaced.<ns>``, and noted in ``displacedAsideNotes``.
   let parent = parentDir(dir)
   let pfd = posix.open(parent.cstring, O_RDONLY or ODirectory or O_CLOEXEC)
   if pfd < 0: return "open " & parent & ": " & osErrorMsg(osLastError())
   defer: discard posix.close(pfd)
+  let asideName = extractFilename(dropAsideDir(dir))
+  when not mutated("aside-dir-planted-file-kept"):
+    var ast: Stat
+    if fstatatC(pfd, asideName.cstring, ast, AtSymlinkNoFollow) == 0 and
+        not S_ISDIR(ast.st_mode):
+      let t0 = getTime()
+      let moved = asideName & ".displaced." &
+        $(t0.toUnix() * 1_000_000_000 + int64(t0.nanosecond))
+      if renameatC(pfd, asideName.cstring, pfd, moved.cstring) == 0:
+        displacedAsideNotes.add(dropAsideDir(dir) & " was not a directory; " &
+          "moved out of the way to " & parent / moved)
+      else:
+        return "rename " & dropAsideDir(dir) & " (not a directory) out of " &
+          "the way: " & osErrorMsg(osLastError())
   var afd: cint
   try:
     afd = openOrMakeDirAt(pfd, extractFilename(dropAsideDir(dir)),
@@ -880,6 +912,23 @@ proc moveAside(dfd: cint; dir, name: string): string =
   if renameatC(dfd, name.cstring, afd, target.cstring) != 0:
     return "rename aside: " & osErrorMsg(osLastError())
   ""
+
+proc dirHasEntries*(path: string): bool =
+  ## Whether the directory at ``path`` (opened ``O_NOFOLLOW``) holds any
+  ## entry; false when it cannot be opened as one.
+  let fd = posix.open(path.cstring, O_RDONLY or ODirectory or ONoFollow or
+                      O_CLOEXEC)
+  if fd < 0: return false
+  let d = fdopendirC(fd)
+  if d == nil:
+    discard posix.close(fd)
+    return false
+  defer: discard closedir(d)
+  while true:
+    let ent = readdir(d)
+    if ent == nil: return false
+    let name = $cast[cstring](addr ent.d_name)
+    if name != "." and name != "..": return true
 
 proc moveAsidePath*(path: string): string =
   ## ``path`` itself (a link, a FIFO, a file: never what a link names)
@@ -934,10 +983,19 @@ proc takeDropEntries*(dir: string; maxBytes: int; suffix = ".evr";
     if failed.len == 0:
       h.asideNames.add(name & ": " & why & "; moved aside unread to " &
                             dropAsideDir(dir))
-    else:
-      discard unlinkatC(dfd, name.cstring, 0)
+    elif unlinkatC(dfd, name.cstring, 0) == 0 or errno == ENOENT:
       h.asideNames.add(name & ": " & why & "; could not be moved aside (" &
-                            failed & "), removed if it could be")
+                            failed & "), removed")
+    else:
+      # Still there (a directory unlinkat cannot remove): it keeps the
+      # directory non-empty, so it counts as left, and the shipping unit's
+      # backoff spaces the restarts the path unit makes for it (A11 round
+      # 28, M-a).
+      let note = name & ": " & why & "; could not be moved aside (" & failed &
+        ") nor removed (" & osErrorMsg(osLastError()) & "); left"
+      h.asideNames.add(note)
+      when not mutated("aside-failure-not-left"):
+        h.left.add(note)
   for name in names:
     var st: Stat
     let statFlags = when mutated("egress-drop-follows-links"): 0.cint

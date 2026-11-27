@@ -685,6 +685,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "",
     singleReason: "self-spawn marker getAppFilename"),
   TestSpec(
+    source: "libs/repro_addon/tests/t_addon_evidence_round28.nim",
+    binary: "build/test-bin/t_addon_evidence_round28",
+    defines: @[],
+    requiresReproBinary: false,
+    requiresMonitorShim: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "",
+    singleReason: "module-level statement runs at every start-up: let root = getTempDir() / (\"addon-evidence-r28-\" & $getCurre..."),
+  TestSpec(
     source: "libs/repro_addon/tests/t_addon_evidence_ship_confinement.nim",
     binary: "build/test-bin/t_addon_evidence_ship_confinement",
     defines: @[],
