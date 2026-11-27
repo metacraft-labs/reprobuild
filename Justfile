@@ -365,6 +365,13 @@ dev-shell-hooks:
 test-run-tests-runquota-endpoint:
     bash ./tests/test_run_tests_runquota_endpoint.sh
 
+# The `nim check` sweep in `just lint` leases each check from RunQuota, and
+# runs at most four at a time where no daemon answers, instead of one per
+# processor. Needs `runquota` and `runquotad`; see
+# tests/test_lint_nim_checks_are_admitted.sh.
+test-lint-nim-checks-are-admitted:
+    bash ./tests/test_lint_nim_checks_are_admitted.sh
+
 # The test phase of `just test` bounds every process's memory, so a runaway
 # case dies of its own failed allocation rather than the host's OOM killer.
 # Allocates up to 3 GiB in the control case; see
