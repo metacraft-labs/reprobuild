@@ -108,6 +108,9 @@ export RUNQUOTA_BIN="${rq_cli}"
 mkdir -p "${scratch}/bin"
 cat >"${scratch}/bin/nim" <<'EOF'
 #!/usr/bin/env bash
+# `nim dump` is the sweep's sibling judgement (scripts/lib/sibling_verdicts.sh),
+# not a check: it is answered with no verdicts and not counted.
+[[ "${1:-}" == dump ]] && exit 0
 d="${FAKE_NIM_DIR:?}"
 src="${*: -1}"
 bump() {

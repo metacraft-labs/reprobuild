@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 36,
-    "nimTestBinaries": 3321,
+    "nimTestBinaries": 3324,
     "pureUnitConsolidationGroups": 97,
     "pureUnitTests": 857,
     "staticallyDetectedRuntimeCompilerFlowTests": 165,
-    "testEntries": 3382
+    "testEntries": 3385
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1873,7 +1873,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 30,
-      "integration": 1888,
+      "integration": 1890,
       "platform/destructive": 206,
       "pure unit": 857,
       "unclassified": 402
@@ -2096,9 +2096,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 3321,
+    "nimTestBinaryCount": 3324,
     "pythonTestFileCount": 61,
-    "testEntryCount": 3382
+    "testEntryCount": 3385
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -23899,6 +23899,24 @@
       "source": "libs/repro_interface_artifacts/tests/t_seeded_source_root_ranks_below_sibling_checkout.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 3,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_sibling_observation_names_an_unfetched_pin",
+      "class": "integration",
+      "classificationReason": "subprocess or repro CLI invocation in test body",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_core",
+        "repro_interface_artifacts"
+      ],
+      "owner": "libs/repro_interface_artifacts",
+      "requiresReproBinary": false,
+      "source": "libs/repro_interface_artifacts/tests/t_sibling_observation_names_an_unfetched_pin.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 4,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -68659,6 +68677,23 @@
       "source": "tests/unit/t_msi_archive_type.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_nim_check_follows_the_sibling_verdict_of_nim_c",
+      "class": "integration",
+      "classificationReason": "subprocess or repro CLI invocation in test body",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_core"
+      ],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/t_nim_check_follows_the_sibling_verdict_of_nim_c.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 7,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

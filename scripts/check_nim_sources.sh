@@ -18,6 +18,15 @@ export ENTRYPOINTS_SRC="$(resolve_entrypoints_src)"
 export CONFUTILS_SRC="$(resolve_confutils_src)"
 export BEARSSL_SRC="$(resolve_bearssl_src)"
 
+# `nim check` evaluates config.nims where git cannot run, so it cannot tell a
+# workspace sibling that is behind its pin from one ahead of it, and would
+# compile a stale one that `nim c` replaces with the pinned `$<PKG>_SRC`. The
+# siblings are judged once here, where git runs, and every check below
+# follows that verdict (scripts/lib/sibling_verdicts.sh).
+# shellcheck source=scripts/lib/sibling_verdicts.sh
+source scripts/lib/sibling_verdicts.sh
+judge_config_siblings
+
 # Mirror the compile defines used by the real app build in
 # scripts/build_apps.sh:
 #   --define:reproProviderMode  — gates the repro_provider_runtime

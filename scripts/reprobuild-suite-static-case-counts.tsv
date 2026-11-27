@@ -774,6 +774,7 @@ libs/repro_interface_artifacts/tests/t_rp4_resource_codec_roundtrip.nim	nim	9
 libs/repro_interface_artifacts/tests/t_runtime_tool_uses_codec.nim	nim	3
 libs/repro_interface_artifacts/tests/t_sdk_package_roots_come_from_the_sdk.nim	nim	5
 libs/repro_interface_artifacts/tests/t_seeded_source_root_ranks_below_sibling_checkout.nim	nim	3
+libs/repro_interface_artifacts/tests/t_sibling_observation_names_an_unfetched_pin.nim	nim	4
 libs/repro_interface_artifacts/tests/t_sqlite_lib_dir_prefers_the_toolchain_sqlite.nim	nim	8
 libs/repro_interface_artifacts/tests/t_windows_dynlib_staging.nim	nim	4
 libs/repro_interface_artifacts/tests/t_windows_long_command_script.nim	nim	15
@@ -3253,6 +3254,7 @@ tests/unit/t_manifest_string_keys_refuse_non_strings.nim	nim	4
 tests/unit/t_measurement_axes.nim	nim	21
 tests/unit/t_missing_json_evidence.nim	nim	6
 tests/unit/t_msi_archive_type.nim	nim	2
+tests/unit/t_nim_check_follows_the_sibling_verdict_of_nim_c.nim	nim	7
 tests/unit/t_nimcache_is_worktree_local.nim	nim	4
 tests/unit/t_nix_daemon_spawn_wait.nim	nim	4
 tests/unit/t_nix_propagated_store_paths.nim	nim	13
