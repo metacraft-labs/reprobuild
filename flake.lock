@@ -2657,11 +2657,11 @@
         "runquota-package-catalog": "runquota-package-catalog"
       },
       "locked": {
-        "lastModified": 1795746680,
-        "narHash": "sha256-IQioTpe/T911wcJvGrSByBKpziEs912jjao13VvGZUw=",
+        "lastModified": 1795763284,
+        "narHash": "sha256-zhgYWjaNdKYha1FI8APxkIwJuv84jQ91c/jFOImZi9E=",
         "owner": "metacraft-labs",
         "repo": "runquota",
-        "rev": "fe60c2360ad0660bb1baacfac84c411d054d891d",
+        "rev": "7c98da54daa1b828c39da4cea47cc06c6af3ddd1",
         "type": "github"
       },
       "original": {

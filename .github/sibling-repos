@@ -300,7 +300,7 @@ nim-stackable-hooks
 # commits behind the pin.
 # Private auto-start requires the explicit endpoint policy in this revision;
 # keep release archives and CI overrides on the same API as the Nix pin.
-runquota=fe60c2360ad0660bb1baacfac84c411d054d891d
+runquota=7c98da54daa1b828c39da4cea47cc06c6af3ddd1
 nim-shm-queue
 # Moved to 803a4fa (2026-11-22), nim-shm-gset's `agents` tip, with
 # `nim-shm-gset-src` in flake.nix and flake.lock: a reader handle stops

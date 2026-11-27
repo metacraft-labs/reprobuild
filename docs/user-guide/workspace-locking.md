@@ -711,6 +711,24 @@ A full `repro lock refresh` (every version pin and every sibling
 revision pin re-solved) and relaxing the declared constraint are still
 available. Use them when that is the change you want.
 
+**When the producer's checkout is not at its pin.** A lock-pinned
+producer's ranges come from the checkout of it that the build finds
+beside your project, and that checkout may be at another revision than
+the one your lock pins. A checkout that is behind can still declare a
+floor that the pinned revision has dropped. In that case the conflict
+does not mean your lock is wrong, and the diagnostic says so. It names
+the checkout, its HEAD and the pinned revision, and its first remedy is
+to bring the checkout to the pin:
+
+```
+git -C <checkout> checkout --detach <pinned revision>
+```
+
+You can also place a checkout at that revision beside your project. Run
+the targeted re-pin only if the conflict remains once the checkout is at
+the pin. Running it first would change a correct lock to fit a checkout
+your lock does not name.
+
 `repro workspace lock` resolves a bare invocation against the **current
 directory**, with no upward search. The gate speaks from inside the
 pushed repo, so its remedies spell out `--workspace-root=` and can be

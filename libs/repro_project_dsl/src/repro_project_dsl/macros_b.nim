@@ -1044,6 +1044,15 @@ proc emitVariantDeclarations(variants: seq[VariantDecl];
     else: "sdsLibraryModule"
   let siteExpr = "(when isMainModule: sdsRootRecipe else: " & importedSite &
     ")"
+  # A cross-repo producer's recipe also says WHERE it was read from, so a
+  # lock conflict over one of its ranges can find the checkout and say when it
+  # is not at the revision the lock pins (`variants.SolverPackageInput
+  # .declarationFile`). Only a sibling's: the consumer's own recipe and the
+  # bundled library modules emit exactly what they did before.
+  let fileArg =
+    if importedSite == "sdsSiblingRecipe":
+      ", declarationFile = " & escForCode(recipeFile)
+    else: ""
   var emitted: seq[string] = @[]
   for (uses, kind) in [(pkg.toolUses, DepKindTarget),
                        (pkg.nativeBuildDeps, DepKindNative),
@@ -1062,7 +1071,7 @@ proc emitVariantDeclarations(variants: seq[VariantDecl];
         ", gateVariant = " & escForCode(useDef.gateVariant) &
         ", gateValue = " & escForCode(useDef.gateValue) &
         ", depKind = " & escForCode(kind) &
-        ", declarationSite = " & siteExpr & ")\n"))
+        ", declarationSite = " & siteExpr & fileArg & ")\n"))
   # ``finalizeVariantsAtModuleInit`` rather than ``finalizeVariants``: this
   # call sits at MODULE SCOPE, and the imports emitted above it mean one runs
   # per recipe in the transitive closure, over a registry that only grows. The
