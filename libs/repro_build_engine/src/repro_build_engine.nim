@@ -19141,6 +19141,23 @@ proc registerWorkspaceVcsExecutor*(executor: WorkspaceVcsExecutor) =
   ## a fresh executor bound to a resolved ``GitToolIdentity``.
   workspaceVcsExecutor = executor
 
+const NestedPassBuiltinKinds* = {bakLockUpdate}
+  ## Built-in kinds whose inline executor runs NESTED ENGINE PASSES that take
+  ## RunQuota leases of their own. The HL-10 lock-update node's writers
+  ## evaluate the recipe -- an interface extract, a provider compile -- and
+  ## each of those is a ``runBuild`` with its own session.
+  ##
+  ## The scheduler runs such a node as a BARRIER for its own leases: only when
+  ## nothing of this scheduler is in flight, and with no process edge
+  ## launched while the node waits to run. An inline node suspends the
+  ## scheduler -- it polls no grant and reaps no child until the node returns
+  ## -- so a lease the scheduler held at that moment could be released only
+  ## after the node finished, and a nested pass queued behind it waited for
+  ## its own caller, and a certifying ``repro test`` hung until CI's six-hour
+  ## job limit killed it
+  ## (Build-Engine-And-Scheduler.md §"Inline nodes that run nested engine
+  ## passes").
+
 proc registerLockUpdateExecutor*(executor: LockUpdateExecutor) =
   ## Register the per-thread executor for ``bakLockUpdate`` actions (HL-10).
   ## The certifying run installs one bound to its own state for the duration
@@ -23991,6 +24008,16 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       running: running.len,
       ready: ready.len))
 
+  proc nestedPassNodeWaiting(): bool =
+    ## Is a node that runs nested engine passes (``NestedPassBuiltinKinds``)
+    ## ready and not yet run? Read from the ready queue itself, so a node a
+    ## dynamic action-create record adds is covered as well. The ready scan
+    ## already walks the whole queue every pass, so this costs no more.
+    for readyId in ready:
+      if actionsById[readyId].kind in NestedPassBuiltinKinds:
+        return true
+    false
+
   proc hasPendingInlineRunQuota(): bool =
     for item in running:
       if item.processKind == rpkInlineRunQuotaPending:
@@ -24234,8 +24261,23 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       discard
     of rqwAnnounce, rqwHeartbeat, rqwTimedOut:
       let pending = pendingRunQuotaSummary()
-      let holders = runQuotaLeaseHolders(inlineRunQuotaSession)
       let waitedMs = now - runQuotaQueueWait.blockedSinceMs
+      # A WAIT THAT CANNOT END. This pass may be a nested one, run inline by
+      # an outer scheduler of this thread that is suspended until it returns
+      # (``withRunQuotaSessionSuspended``). When only that scheduler's leases
+      # hold the capacity, nothing can release them before this pass gives
+      # up, so it gives up now and names them -- not after a queue bound, and
+      # not never (Build-Engine-And-Scheduler.md §"Inline nodes that run
+      # nested engine passes"). A holder outside a suspended session can end
+      # on its own, so the wait goes on while there is one.
+      let split = runQuotaLeaseHolderSplit(inlineRunQuotaSession)
+      if split.known and split.suspended.len > 0 and split.others.len == 0:
+        return failAllPendingRunQuota(runQuotaSelfBlockedMessage(
+          pending.actions, pending.reason, runQuotaEndpointText(),
+          split.suspended, waitedMs))
+      let holders =
+        if split.known: split.others & split.suspended
+        else: runQuotaLeaseHolders(inlineRunQuotaSession)
       if verdict == rqwTimedOut:
         return failAllPendingRunQuota(runQuotaQueueTimeoutMessage(
           pending.actions, pending.reason, runQuotaEndpointText(), holders,
@@ -25272,6 +25314,13 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       sweepCanonicalLeases()
       var stagedInlineLaunches: seq[StagedInlineLaunch] = @[]
       var builtinBatch: seq[PendingConcurrentBuiltin] = @[]
+      # THE NESTED-PASS BARRIER (``NestedPassBuiltinKinds``). Up while a node
+      # that runs nested engine passes is ready and has not run: no process
+      # edge launches, so the leases in flight drain, and the node runs once
+      # none is left. Raised again below if such a node becomes ready during
+      # this pass. A launch-blocked action is still consulted once, so the
+      # cache keeps serving hits while the barrier is up.
+      var nestedPassBarrier = nestedPassNodeWaiting()
       var i = 0
       # LAUNCH CAPACITY GATES LAUNCHES, NOT CACHE CONSULTATION. The
       # parallel slots, the RunQuota frontier, a named pool's capacity and
@@ -25324,7 +25373,19 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           if not siteTableRoots.hasKey(id):
             siteTableRoots[id] = siteTableRootImage(action, unsafeAddr config)
           siteTableHold = siteTables.holdsLaunch(siteTableRoots[id], isRunning)
-        let launchBlocked = slotsFull or poolFull or siteTableHold
+        # The nested-pass barrier: such a node waits until nothing of this
+        # scheduler is in flight (running, queued at RunQuota, or staged to
+        # be offered after this scan), and a process edge waits while such a
+        # node does.
+        var nestedPassHold = false
+        if action.kind in NestedPassBuiltinKinds:
+          nestedPassHold = running.len + stagedInlineLaunches.len > 0
+          if nestedPassHold:
+            nestedPassBarrier = true
+        elif action.kind == bakProcess:
+          nestedPassHold = nestedPassBarrier
+        let launchBlocked = slotsFull or poolFull or siteTableHold or
+          nestedPassHold
         if launchBlocked:
           # Consulted once while blocked (see above). An action with a
           # canonical work tree is not consulted early: taking its tree is
@@ -26420,8 +26481,22 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             launchedAny = true
             continue
           let builtinStart = statStart()
-          let finished = executeBuiltinAction(plan.action)
+          var finished: ActionResult
+          if inlineRunQuotaSessionOpen:
+            # The node runs on this thread, so until it returns this
+            # scheduler polls no grant and reaps no child: its session is
+            # SUSPENDED. A nested engine pass the node runs reads that, and
+            # fails at once rather than wait behind a lease of ours that
+            # cannot be released before it returns (``tickRunQuotaQueue``).
+            withRunQuotaSessionSuspended(inlineRunQuotaSession):
+              finished = executeBuiltinAction(plan.action)
+          else:
+            finished = executeBuiltinAction(plan.action)
           finishStat("repro builtin execute", builtinStart)
+          if plan.action.kind in NestedPassBuiltinKinds:
+            # It left the ready queue when it was admitted: lift the barrier
+            # for the rest of this scan unless another such node waits.
+            nestedPassBarrier = nestedPassNodeWaiting()
           settleBuiltinResult(id, plan, finished, launchedAny)
 
         # In-Process-Monitor-Hosting P3 — A HOSTED PLAN MAY ONLY REACH A

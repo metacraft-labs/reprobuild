@@ -151,6 +151,71 @@ suite "who holds the RunQuota budget":
     check summarizeRunQuotaLeaseHolders("""{"error":"unknown"}""").len == 0
     check summarizeRunQuotaLeaseHolders("""{"leases":[1,"x",null]}""").len == 0
 
+suite "holders a nested pass can never wait out":
+  # The 2026-11-21 Windows CI shape: the only lease holding capacity is the
+  # outer scheduler's own test-build edge (session 6), and that scheduler is
+  # suspended in the inline node that runs this wait. Plus, in the second
+  # document, a lease of another session, which can end on its own.
+  const selfOnly = """{"leases":[
+    {"id":16,"session_id":6,"label":"nim_termctl.test_build.test_termctl_restore_from_any_thread",
+     "state":"granted","resources":{"cpu_milli":24000,"memory_bytes":134217728,"named_pools":[]}},
+    {"id":17,"session_id":7,"label":"__repro_interface_extract-07341c72d0606192",
+     "state":"queued","resources":{"cpu_milli":1000,"memory_bytes":134217728,"named_pools":[]}}]}"""
+  const mixed = """{"leases":[
+    {"id":16,"session_id":6,"label":"outer edge","state":"granted",
+     "resources":{"cpu_milli":4000,"memory_bytes":0,"named_pools":[]}},
+    {"id":30,"session_id":11,"label":"another workspace's build","state":"running",
+     "resources":{"cpu_milli":2000,"memory_bytes":0,"named_pools":[]}}]}"""
+
+  test "a suspended session's lease is told apart from the rest":
+    let split = splitRunQuotaLeaseHolders(selfOnly, [6'u64])
+    check split.known
+    check split.suspended.len == 1
+    check "lease 16" in split.suspended[0]
+    check "cpu=24000m" in split.suspended[0]
+    check split.others.len == 0
+
+  test "the queued waiter itself is never a holder":
+    let split = splitRunQuotaLeaseHolders(selfOnly, [6'u64, 7'u64])
+    for line in split.suspended & split.others:
+      check "__repro_interface_extract" notin line
+
+  test "a lease of another session keeps the wait alive":
+    let split = splitRunQuotaLeaseHolders(mixed, [6'u64])
+    check split.suspended.len == 1
+    check split.others.len == 1
+    check "another workspace's build" in split.others[0]
+
+  test "with nothing suspended every holder is an other":
+    let split = splitRunQuotaLeaseHolders(selfOnly, [])
+    check split.suspended.len == 0
+    check split.others.len == 1
+
+  test "an unreadable document decides nothing":
+    check not splitRunQuotaLeaseHolders("", [6'u64]).known
+    check not splitRunQuotaLeaseHolders("not json", [6'u64]).known
+    check not splitRunQuotaLeaseHolders("""{"error":"x"}""", [6'u64]).known
+
+  test "the failure names the waiter and the holder, and says waiting cannot help":
+    let split = splitRunQuotaLeaseHolders(selfOnly, [6'u64])
+    let text = runQuotaSelfBlockedMessage(
+      @["__repro_interface_extract-07341c72d0606192"],
+      "waiting for resource budget", r"\\.\pipe\runquota\runquotad",
+      split.suspended, 3_000)
+    check "can never be granted" in text
+    check "__repro_interface_extract-07341c72d0606192" in text
+    check "nim_termctl.test_build.test_termctl_restore_from_any_thread" in text
+    check "waiting for resource budget" in text
+    check "Waiting longer cannot help" in text
+
+  test "a suspension is scoped and undone even when its body raises":
+    # No daemon: a nil session has no id and suspends nothing.
+    check suspendedRunQuotaSessionIds().len == 0
+    expect ValueError:
+      withRunQuotaSessionSuspended(ReproRunQuotaSession(nil)):
+        raise newException(ValueError, "body failed")
+    check suspendedRunQuotaSessionIds().len == 0
+
 suite "what the wait and the give-up say":
 
   let holders = summarizeRunQuotaLeaseHolders("""{"leases":[

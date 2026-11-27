@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 36,
-    "nimTestBinaries": 3324,
+    "nimTestBinaries": 3325,
     "pureUnitConsolidationGroups": 97,
     "pureUnitTests": 857,
     "staticallyDetectedRuntimeCompilerFlowTests": 165,
-    "testEntries": 3385
+    "testEntries": 3386
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1873,7 +1873,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 30,
-      "integration": 1890,
+      "integration": 1891,
       "platform/destructive": 206,
       "pure unit": 857,
       "unclassified": 402
@@ -2096,9 +2096,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 3324,
+    "nimTestBinaryCount": 3325,
     "pythonTestFileCount": 61,
-    "testEntryCount": 3385
+    "testEntryCount": 3386
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -54278,6 +54278,27 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_lock_update_node_does_not_wait_behind_its_own_leases",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_build_engine",
+        "repro_cli_support",
+        "repro_core",
+        "repro_runquota",
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_lock_update_node_does_not_wait_behind_its_own_leases.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_lock_update_node_failure_withholds_only_the_certificate",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -69338,8 +69359,8 @@
       "owner": "tests/unit",
       "requiresReproBinary": false,
       "source": "tests/unit/t_runquota_queue_wait_is_loud_and_bounded.nim",
-      "sourceSuiteCount": 4,
-      "staticCaseCount": 15,
+      "sourceSuiteCount": 5,
+      "staticCaseCount": 22,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

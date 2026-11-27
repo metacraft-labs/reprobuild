@@ -29329,6 +29329,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_tests_integration_g09",
     singleReason: ""),
   TestSpec(
+    source: "tests/integration/t_lock_update_node_does_not_wait_behind_its_own_leases.nim",
+    binary: "build/test-bin/t_lock_update_node_does_not_wait_behind_its_own_leases",
+    defines: @[],
+    requiresReproBinary: true,
+    requiresMonitorShim: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "",
+    singleReason: "self-spawn marker isMainModule"),
+  TestSpec(
     source: "tests/integration/t_lock_update_node_failure_withholds_only_the_certificate.nim",
     binary: "build/test-bin/t_lock_update_node_failure_withholds_only_the_certificate",
     defines: @[],

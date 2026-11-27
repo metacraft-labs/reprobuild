@@ -2947,6 +2947,122 @@ proc summarizeRunQuotaLeaseHolders*(leasesJson: string;
   except CatchableError:
     result = @[]
 
+# ---------------------------------------------------------------------------
+# Suspended sessions: the leases a nested engine pass can never wait out.
+#
+# The scheduler runs some built-in nodes INLINE, on its own thread, and a node
+# may run a whole nested engine pass (the HL-10 lock-update node evaluates the
+# recipe: an interface extract, a provider compile). While it does, the outer
+# scheduler is suspended: it polls nothing and reaps nothing, so a lease its
+# session holds cannot be released until the node returns. A nested pass
+# queued behind such a lease alone waits for something only its own caller
+# can end -- hold-and-wait inside one thread.
+#
+# The engine marks its session suspended for the length of an inline node
+# (``withRunQuotaSessionSuspended``); a nested pass's queue diagnostic splits
+# the daemon's lease holders into those of a suspended session and the rest
+# (``splitRunQuotaLeaseHolders``), and fails at once when only the former hold
+# capacity (Build-Engine-And-Scheduler.md §"Inline nodes that run nested
+# engine passes").
+#
+# Per THREAD: a nested pass suspends the scheduler of the thread it runs on.
+# A worker thread runs nothing that takes a lease (``builtin_dispatch``), so a
+# session suspended on one thread never explains a wait on another.
+# ---------------------------------------------------------------------------
+
+var suspendedRunQuotaSessions {.threadvar.}: seq[uint64]
+
+proc runQuotaSessionId*(session: ReproRunQuotaSession): uint64 =
+  ## The daemon's id for ``session``; ``0`` for nil or an inactive session.
+  if session.isNil or not session.active:
+    return 0'u64
+  session.session.id.value
+
+proc suspendedRunQuotaSessionIds*(): seq[uint64] =
+  ## The sessions of this thread whose scheduler is suspended in an inline
+  ## node, innermost last.
+  suspendedRunQuotaSessions
+
+proc suspendRunQuotaSession*(session: ReproRunQuotaSession) =
+  ## Mark ``session`` suspended: its scheduler is about to run something
+  ## inline and will release none of its leases until it returns. Paired with
+  ## ``resumeRunQuotaSession``; prefer ``withRunQuotaSessionSuspended``.
+  let id = runQuotaSessionId(session)
+  if id != 0'u64:
+    suspendedRunQuotaSessions.add(id)
+
+proc resumeRunQuotaSession*(session: ReproRunQuotaSession) =
+  ## Undo the innermost ``suspendRunQuotaSession`` of ``session``. Matched by
+  ## id rather than position, so a session closed in between (its id then
+  ## reads ``0``) cannot leave a stale entry behind.
+  if session.isNil:
+    return
+  let id = session.session.id.value
+  for i in countdown(suspendedRunQuotaSessions.high, 0):
+    if suspendedRunQuotaSessions[i] == id:
+      suspendedRunQuotaSessions.delete(i)
+      return
+
+template withRunQuotaSessionSuspended*(session: ReproRunQuotaSession;
+                                       body: untyped) =
+  ## Run ``body`` with ``session`` marked suspended (see above).
+  let suspendedSession = session
+  suspendRunQuotaSession(suspendedSession)
+  try:
+    body
+  finally:
+    resumeRunQuotaSession(suspendedSession)
+
+type
+  RunQuotaLeaseHolderSplit* = object
+    ## The daemon's capacity holders, split by whether a suspended scheduler
+    ## of this thread owns them. ``known`` is false when the daemon could not
+    ## be asked; a caller must then decide nothing from the split.
+    known*: bool
+    suspended*: seq[string]
+      ## Leases of a suspended session: released only after the waiter's
+      ## own caller returns.
+    others*: seq[string]
+      ## Every other lease holding capacity: these can end on their own.
+
+proc splitRunQuotaLeaseHolders*(leasesJson: string;
+                                suspendedSessions: openArray[uint64]):
+    RunQuotaLeaseHolderSplit =
+  ## Pure: the holder lines of ``summarizeRunQuotaLeaseHolders``, split by
+  ## the session that owns each. Malformed input yields ``known = false``.
+  try:
+    let doc = parseJson(leasesJson)
+    if doc.kind != JObject or not doc.hasKey("leases") or
+        doc["leases"].kind != JArray:
+      return
+    result.known = true
+    for lease in doc["leases"]:
+      if lease.kind != JObject or lease{"state"}.getStr() == "queued":
+        continue
+      let sessionId = uint64(lease{"session_id"}.getBiggestInt())
+      # One lease at a time through the summarizer keeps a single rendering
+      # of a holder line.
+      let lines = summarizeRunQuotaLeaseHolders($(%*{"leases": [lease]}))
+      if sessionId in suspendedSessions:
+        result.suspended.add(lines)
+      else:
+        result.others.add(lines)
+  except CatchableError:
+    result = RunQuotaLeaseHolderSplit()
+
+proc runQuotaLeaseHolderSplit*(session: ReproRunQuotaSession):
+    RunQuotaLeaseHolderSplit =
+  ## ``splitRunQuotaLeaseHolders`` over the daemon's current lease table,
+  ## against this thread's suspended sessions. Best effort: ``known = false``
+  ## on any failure.
+  if session.isNil or not session.active:
+    return
+  try:
+    result = splitRunQuotaLeaseHolders(
+      session.client.inspectionJson("leases"), suspendedRunQuotaSessions)
+  except CatchableError:
+    result = RunQuotaLeaseHolderSplit()
+
 proc runQuotaLeaseHolders*(session: ReproRunQuotaSession): seq[string] =
   ## Best-effort snapshot of who holds the daemon's capacity right now, via
   ## the ``leases`` inspection subject on the session's own connection. Empty
@@ -3116,6 +3232,28 @@ proc runQuotaQueueTimeoutMessage*(actions: openArray[string];
     runQuotaQueueTimeoutEnv & "=<milliseconds>; or bypass RunQuota for this " &
     "command with REPROBUILD_NO_RUNQUOTA=1 (unsafe: its processes are then " &
     "not admitted against the host budget).")
+
+proc runQuotaSelfBlockedMessage*(actions: openArray[string];
+                                 reason, endpoint: string;
+                                 suspendedHolders: openArray[string];
+                                 waitedMs: int): string =
+  ## The failure of a queue wait that cannot end: every lease holding the
+  ## capacity belongs to a scheduler of this thread that is suspended in an
+  ## inline node -- the one this wait runs inside -- so it is released only
+  ## after this wait returns. Names the actions, the daemon's reason and the
+  ## holders, so the report points at the scheduler that ran the node.
+  result = "the RunQuota lease for " & actions.join(", ") & " (endpoint " &
+    endpoint & ") can never be granted"
+  if reason.len > 0:
+    result.add(": " & reason)
+  result.add(".\n  The capacity it waits for is held only by leases of a " &
+    "build scheduler in this process that is suspended while it runs this " &
+    "nested pass inline, and that scheduler releases them only after the " &
+    "pass returns (waited " & $(waitedMs div 1000) & "s):\n" &
+    holdersText(suspendedHolders))
+  result.add("\n  Waiting longer cannot help: this is a defect in the " &
+    "scheduler that started the nested pass while it held those leases. " &
+    "Report it with this message.")
 
 proc startGrantedWithRunQuota*(session: ReproRunQuotaSession;
                                queued: var ReproRunQuotaQueuedProcess;
