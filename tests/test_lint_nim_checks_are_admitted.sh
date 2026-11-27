@@ -106,6 +106,7 @@ mkdir -p "$tree/scripts/lib" "$tree/apps" "$tree/libs" "$work/bin" "$work/src"
 cp "$repo/scripts/check_nim_sources.sh" "$tree/scripts/"
 cp "$repo/scripts/source_paths.sh" "$tree/scripts/"
 cp "$repo/scripts/lib/runquota_lease_endpoint.sh" "$tree/scripts/lib/"
+cp "$repo/scripts/test_parallelism.sh" "$tree/scripts/"
 for i in $(seq 1 12); do echo "lib$i" >>"$tree/libs/libraries.txt"; done
 for i in $(seq 1 4); do echo "app$i apps/app$i/app$i.nim --define:x" >>"$tree/apps/entrypoints.txt"; done
 echo "repro apps/repro/repro.nim --define:ssl" >>"$tree/apps/entrypoints.txt"

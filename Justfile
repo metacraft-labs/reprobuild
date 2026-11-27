@@ -379,6 +379,14 @@ test-lint-nim-checks-are-admitted:
 test-run-tests-bounds-process-memory:
     bash ./tests/test_run_tests_bounds_process_memory.sh
 
+# The lint's `nim check` sweep runs no more checks at once than the memory
+# available to it (a cgroup `memory.max`, or MemAvailable) holds, and names
+# a check that is killed. Runs the real sweep in transient user scopes with
+# `nim` replaced by a recorder; needs `systemd-run --user`. About a minute;
+# see tests/test_check_nim_sources_fan_out_fits_memory.sh.
+test-check-nim-sources-fan-out:
+    bash ./tests/test_check_nim_sources_fan_out_fits_memory.sh
+
 dev-env-full-regression:
     mkdir -p test-logs
     bash ./scripts/run_tests.sh 2>&1 | tee test-logs/dev-env-full-regression.log
