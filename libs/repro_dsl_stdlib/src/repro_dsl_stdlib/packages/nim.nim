@@ -539,6 +539,15 @@ package nim:
 # subsume this alias.
 # ---------------------------------------------------------------------------
 
+const
+  ZigNoDebugPassC* = ["-g0"]
+    ## What `nim.c` passes to every C compile of an edge built for a zig
+    ## target, ahead of the caller's `passC`: no debug info (see `c`).
+  ZigNoDebugPassL* = ["-Wl,--strip-debug"]
+    ## What `nim.c` passes to the link of an edge built for a zig target,
+    ## ahead of the caller's `passL`: the linker drops every debug section,
+    ## including those of the start-up objects zig compiles itself.
+
 proc defaultNimcacheDir(binary: string): string =
   let outputName = splitFile(binary).name
   if outputName.len > 0:
@@ -884,7 +893,23 @@ proc c*(pkg: NimPackage; source: string; binary: string;
                       else: defaultNimcacheDir(binary))
     elif nimcache.len > 0: nimcache
     else: defaultNimcacheDir(binary)
-  let effectivePassL = passL & opensslPassLForSsl(defines)
+  # Under a zig target the image is for another machine, and goes there as
+  # an installed prefix: no debug info is
+  # produced for it. Debug info names build-host directories -- the C
+  # headers zig ships, zig's cache under `$HOME`, the project root -- which
+  # the prefix's builder-path gate refuses, and which the prefix's assembly
+  # would strip again anyway. So it is not made in the first place: `-g0`
+  # for every C compile of the edge, and `-Wl,--strip-debug` at the link,
+  # for the start-up objects zig compiles itself, with debug info, outside
+  # any flag of ours (`ZigNoDebugPassC` / `ZigNoDebugPassL`). They come
+  # ahead of the caller's own flags; the link's strip holds whatever those
+  # say. A native compile keeps exactly the flags it was given.
+  let effectivePassC =
+    if threadZig: @ZigNoDebugPassC & passC
+    else: passC
+  let effectivePassL =
+    (if threadZig: @ZigNoDebugPassL & passL else: passL) &
+    opensslPassLForSsl(defines)
   var inputs = @extraInputs
   if reproNimPathsEnabled and reproConfigNimsFile.len > 0:
     inputs.add(reproConfigNimsFile)
@@ -924,7 +949,7 @@ proc c*(pkg: NimPackage; source: string; binary: string;
     clangExe = (if threadZig: cross.ccExe else: ""),
     clangLinkerExe = (if threadZig: cross.ccExe else: ""),
     gccExe = gccExe, gccLinkerExe = gccLinkerExe, mm = mm,
-    paths = paths.mapIt(fromRunDir(it)), passC = passC,
+    paths = paths.mapIt(fromRunDir(it)), passC = effectivePassC,
     passL = effectivePassL, nimcache = fromRunDir(cacheDir),
     appLib = appLib, skipUserCfg = skipUserCfg,
     # Every Nim edge, whatever ``noNimblePath`` says (NPC-AREQ22, threat
