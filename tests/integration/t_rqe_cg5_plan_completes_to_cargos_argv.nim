@@ -53,15 +53,15 @@
 ## whose members declare no feature and depend on crates.io crates
 ## (`writeRegistryWorkspace`: a registry crate with features and a registry
 ## dependency of its own), emitted by the production Rust convention with the
-## registry lift switched on (`REPRO_CARGO_MODE_A_REGISTRY=on`), which runs
-## the fetch wave and the record run itself. Every action of the fragment is
-## a rustc edge of the plan, and each, as the fragment declares it (argv,
-## working directory, environment), mapped back, must equal what the logging
-## wrapper saw in a real `cargo build --release --workspace` (the selection
-## the convention plans), with the registry crates' remap as the one
-## difference and the toolchain's `PATH` as the one variable beyond cargo's.
-## Built through the engine and monitor, the binaries print what cargo's
-## print.
+## registry lift switched on (`REPRO_CARGO_MODE_A_REGISTRY=on`), and built
+## with `repro build`, whose graph-production edges fetch the crates, plan
+## the build and create one rustc edge per unit of the plan. Each created
+## edge, as the units edge's fragment states it (argv, working directory,
+## environment), mapped back, must equal what the logging wrapper saw in a
+## real `cargo build --release --workspace` (the selection the convention
+## plans), with the registry crates' remap as the one difference and the
+## toolchain's `PATH` as the one variable beyond cargo's. The binaries the
+## build made print what cargo's print.
 ##
 ## KNOWN DIFFERENCE, compared explicitly: the plan gives every unit its own
 ## output directory, so cargo's one `-L dependency=<deps>` becomes one
@@ -107,7 +107,7 @@
 ## monitor. The logging wrapper runs the real compiler with the arguments it
 ## was given and changes nothing.
 
-import std/[algorithm, os, osproc, sequtils, sets, strutils, tables,
+import std/[algorithm, json, os, osproc, sequtils, sets, strutils, tables,
             tempfiles, unittest]
 
 import repro_build_engine
@@ -119,6 +119,8 @@ import repro_standard_provider/conventions/rust_plan_mode
 
 import ./rqe_cg5_plan_fixture
 import ./rqe_cg5_mode_a_support
+import ./rqe_cg5_repro_build_support
+import repro_lock/identity
 
 const
   ShellVariables = ["_", "SHLVL", "PWD", "OLDPWD"]
@@ -476,7 +478,8 @@ suite "the plan of a record run":
     let outRoot = work / "edges-out"
     var refused: seq[(string, string)]
     try:
-      discard planUnitEdges(plan, PlanUnitsConfig(projectRoot: ws,
+      discard planUnitEdges(plan, PlanUnitsConfig(governingLockIdentity: lockIdentityOutsideSolvedGraph(),
+      projectRoot: ws,
         storeRoot: reg.store, outRoot: outRoot, registryCrates: reg.rows,
         toolchainEnv: @["PATH=" & storeOnlyPath()]))
       checkpoint "the plan was not refused"
@@ -542,7 +545,8 @@ suite "the plan of a record run":
     createSymlink(cc, tcBin / "cc")
     let toolchain = @["PATH=" & tcBin & ":" & storeOnlyPath()]
     check toolchain[0] != "PATH=" & storeOnlyPath()
-    let edges = planUnitEdges(plan, PlanUnitsConfig(projectRoot: ws,
+    let edges = planUnitEdges(plan, PlanUnitsConfig(governingLockIdentity: lockIdentityOutsideSolvedGraph(),
+      projectRoot: ws,
       storeRoot: reg.store, outRoot: outRoot, registryCrates: rows,
       toolchainEnv: toolchain))
     check edges.len == plan.units.len
@@ -597,7 +601,8 @@ suite "the plan of a record run":
     checkpoint "plan PATHs: " & unitPaths(plan).join(" | ")
     check unitPaths(plan).len > 0
     check unitPaths(plan) != unitPaths(plan2)
-    let edges2 = planUnitEdges(plan2, PlanUnitsConfig(projectRoot: ws,
+    let edges2 = planUnitEdges(plan2, PlanUnitsConfig(governingLockIdentity: lockIdentityOutsideSolvedGraph(),
+      projectRoot: ws,
       storeRoot: reg.store, outRoot: outRoot, registryCrates: rows,
       toolchainEnv: toolchain))
     check edges2.len == edges.len
@@ -666,12 +671,12 @@ suite "the plan of a record run":
     writeRegistryWorkspace(ws)
     let reg = setupRegistry(work, smReal, withRegmid = true)
     lockWorkspace(ws, work, reg)
-    let env = prepareModeAEnv(work, "cg5-plan-convention")
-    putEnv("REPRO_STORE_ROOT", reg.store)
-    putEnv(ModeARegistrySwitch, "on")
-    defer: delEnv(ModeARegistrySwitch)
-    let fragment = emitWorkspace(ws)
-    let defs = actionDefs(fragment).filterIt(it.isPlanEdge)
+    # Built with `repro build`: the units edge creates the unit edges from
+    # the plan while the build runs, and its fragment states them.
+    let built = reproBuild(reproBuildEnv(work / "build", reg), ws)
+    checkpoint built.describe
+    require built.code == 0
+    let defs = unitRecords(ws)
     checkpoint "actions: " & defs.mapIt(it.id).join(" ")
     check defs.len == 5
     let plan = readCargoPlan(ws / PlanFileRel)
@@ -695,7 +700,7 @@ suite "the plan of a record run":
           found = true
       require found
       check def.isolateHostEnvironment
-      let argv = inlineArgvOf(def)
+      let argv = def.argv
       let registry = unit.cwd.startsWith("${store}/")
       var cargoArgv = argv
       if registry:
@@ -711,25 +716,25 @@ suite "the plan of a record run":
       # only PATH.
       var cargoEnv: seq[(string, string)]
       var paths = 0
-      for (name, value) in def.env:
+      for entry in def.env:
+        let eq = entry.find('=')
+        let (name, value) = (entry[0 ..< eq], entry[eq + 1 .. ^1])
         if name == "PATH": inc paths
         else: cargoEnv.add (name, value)
       check paths == 1
       var closureDirs: seq[string]
       for c in unit.closure: closureDirs.add outRoot / c
       closureDirs.sort()
-      compareToOracle(cargoArgv, def.callArg("cwd"), cargoEnv, closureDirs,
+      compareToOracle(cargoArgv, def.cwd, cargoEnv, closureDirs,
         false, matched[unit.id], oracle, mp, edge = true)
 
-    let run = buildFragment(env, fragment, ws, work / "engine-cache")
-    for r in run.results:
-      checkpoint r.id & ": " & $r.status & " " & r.reason &
-        (if r.stderr.len > 0: "\nstderr: " & r.stderr else: "")
-      check r.status == asSucceeded
+    for def in defs:
+      checkpoint def.id
+      check built.action(def.id){"status"}.getStr() == "asSucceeded"
     for crate in ["app", "util"]:
       var built = ""
       for def in defs:
-        if "bin" in inlineArgvOf(def) and
+        if "bin" in def.argv and
             ("cargo.rustc/" & crate & "@") in def.id:
           for o in def.outputs:
             if extractFilename(o).startsWith(crate & "-") and

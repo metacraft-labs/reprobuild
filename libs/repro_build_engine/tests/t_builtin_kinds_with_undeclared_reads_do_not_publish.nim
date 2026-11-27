@@ -73,7 +73,7 @@ registerMetadataFetchExecutor(stubExecutor)
 registerSolveLockExecutor(stubExecutor)
 registerLockUpdateExecutor(stubExecutor)
 registerCatalogIndexExecutor(stubExecutor)
-registerSourceFetchExecutor(stubExecutor)
+registerSourceFetchExecutor("", stubExecutor)
 registerForeignProvisionExecutor(StubProvisioner, stubExecutor)
 
 proc project(name: string): string =

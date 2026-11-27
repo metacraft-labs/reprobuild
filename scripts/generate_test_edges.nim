@@ -559,6 +559,10 @@ proc isProviderModePath(path: string): bool =
     "tests/integration/t_rqe_cg5_plan_edges_lower_isolated.nim",
     "tests/integration/t_rqe_cg5_registry_lift_graph_production.nim",
     "tests/integration/t_rqe_cg5_registry_lift_is_gated.nim",
+    # Build a crates.io workspace with `repro build` through the same
+    # support module, which imports the Rust convention.
+    "tests/integration/test_rqe_cg5_fetch_edges_run_in_repro_build.nim",
+    "tests/integration/test_rqe_cg5_refused_plan_builds_through_mode_b.nim",
     "tests/unit/t_from_source_cabal_recognition.nim",
     "tests/unit/t_from_source_cargo_recognition.nim",
     "tests/unit/t_from_source_go_recognition.nim",

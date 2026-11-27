@@ -156,6 +156,8 @@ type
     closure*: seq[RegistryCrateEdge]
       ## every unit this one depends on, transitively, without duplicates
       ## (empty for a unit from cargo's plan, which holds the closure itself)
+    spec*: CreatedActionSpec
+      ## the edge as a created-action spec (`rustcUnitSpec`)
     action*: BuildAction
 
 const
@@ -415,36 +417,42 @@ proc unitHash(row: CrateRow; m: CrateManifest; profileArgs: openArray[string];
   let digest = blake3.digest(s)
   for i in 0 ..< 8: result.add toHex(int(digest[i]), 2).toLowerAscii()
 
-proc rustcUnitAction*(id: string; argv: openArray[string]; cwd: string;
-                      deps, inputs, outputs, env: openArray[string];
-                      commandStatsId: string;
-                      isolateHostEnvironment = false;
-                      scratchDirs: openArray[string] = []): BuildAction =
-  ## The engine action of one rustc unit, as every cargo unit edge declares
-  ## it: cacheable, its inputs checked by content (`hybrid`) and gathered by
-  ## the automatic monitor (so nothing rests on the declared inputs, which
-  ## only order it), in the `compile` pool, outside any solved graph's lock
-  ## identity until a planner names one. ``scratchDirs`` are emptied before
-  ## each run and are never evidence (an incremental-compilation directory).
-  result = action(id, argv,
-    cwd = cwd,
-    deps = deps,
-    inputs = inputs,
-    outputs = outputs,
-    pool = "compile",
-    commandStatsId = commandStatsId,
-    cacheable = true,
-    actionCachePolicy = ffpHybrid,
-    dependencyPolicy = automaticMonitorGatheringPolicy(),
-    isolateHostEnvironment = isolateHostEnvironment,
-    env = env,
-    # Every input of the edge is content: the crate's checksum-addressed
-    # prefix or the workspace's sources, its dependencies' outputs and the
-    # toolchain. No solved graph's identity is wired in yet; the planner
-    # that derives these units from a build of the lock is what will name
-    # it.
-    governingLockIdentity = lockIdentityOutsideSolvedGraph())
+proc rustcUnitSpec*(id: string; argv: openArray[string]; cwd: string;
+                    deps, inputs, outputs, env: openArray[string];
+                    commandStatsId: string;
+                    isolateHostEnvironment = false;
+                    scratchDirs: openArray[string] = []): CreatedActionSpec =
+  ## The created-action spec of one rustc unit, as every cargo unit edge
+  ## declares it: cacheable, its inputs checked by content (`hybrid`) and
+  ## gathered by the automatic monitor (so nothing rests on the declared
+  ## inputs, which only order it), in the `compile` pool. ``scratchDirs`` are
+  ## emptied before each run and are never evidence (an
+  ## incremental-compilation directory).
+  ##
+  ## A spec, not an action, so the same value is both the edge
+  ## (`rustcUnitAction`) and the `create-action` record a graph-production
+  ## edge writes for it (`createActionRecord`): the engine builds the record
+  ## into exactly this action, key included.
+  result = initCreatedActionSpec(id, argv)
+  result.cwd = cwd
+  result.deps = @deps
+  result.inputs = @inputs
+  result.outputs = @outputs
+  result.env = @env
+  result.pool = "compile"
+  result.commandStatsId = commandStatsId
+  result.cacheable = true
+  result.actionCachePolicy = ffpHybrid
+  result.policyKind = CreatedActionAutomaticMonitor
+  result.isolateHostEnvironment = isolateHostEnvironment
   result.scratchDirs = @scratchDirs
+
+proc rustcUnitAction*(spec: CreatedActionSpec;
+                      governingLockIdentity: LockIdentity): BuildAction =
+  ## The engine action of a rustc unit's spec: the engine's own
+  ## constructor of a created action (`createdAction`), so a unit built here
+  ## and one created from its record have one key.
+  createdAction(spec, governingLockIdentity)
 
 proc registryCrateEdge*(row: CrateRow; storeRoot, rustc, outRoot: string;
                         profileArgs: openArray[string];
@@ -549,14 +557,19 @@ proc registryCrateEdge*(row: CrateRow; storeRoot, rustc, outRoot: string;
   env.add extraEnv
   createDir(outDir)
   # cargo runs a dependency's rustc in the package's root.
-  let compile = rustcUnitAction(registryCrateEdgeId(row, hash),
+  let spec = rustcUnitSpec(registryCrateEdgeId(row, hash),
     argv & difference, cwd = prefix, deps = depIds, inputs = inputs,
     outputs = [rmeta, rlib], env = env,
     commandStatsId = RegistryCrateStatsId)
+  # Every input of the edge is content: the crate's checksum-addressed
+  # prefix, its dependencies' outputs and the toolchain. No solved graph's
+  # identity is wired in for a caller-built unit.
+  let compile = rustcUnitAction(spec, lockIdentityOutsideSolvedGraph())
   RegistryCrateEdge(row: row, prefix: prefix, crateName: m.libName,
     metadataHash: hash, outDir: outDir, rmeta: rmeta, rlib: rlib,
     depInfo: outDir / (stem & ".d"), cargoArgv: argv,
-    argvDifference: difference, closure: closure, action: compile)
+    argvDifference: difference, closure: closure, spec: spec,
+    action: compile)
 
 # ---------------------------------------------------------------------------
 # The unit from cargo's plan
@@ -585,6 +598,10 @@ type
       ## directory), emptied before each run and never evidence
     isolateHostEnvironment*: bool
       ## launch from `env` alone, nothing of the engine's environment
+    governingLockIdentity*: LockIdentity
+      ## the identity of the lock the edge is built under: the one its
+      ## producer has when it is created from a graph-production edge's
+      ## record (Named-Lock-Files §4.1). Required.
 
 type
   RegistryCrateUnitCheck* = object
@@ -675,7 +692,8 @@ proc checkRegistryCrateUnit*(row: CrateRow; storeRoot: string;
     unitRefusal("does not write both an rlib and an rmeta")
 
 proc registryCrateUnitEdge*(row: CrateRow; storeRoot: string;
-                            unit: RegistryCrateUnit): RegistryCrateEdge =
+                            unit: RegistryCrateUnit;
+                            createOutDir = true): RegistryCrateEdge =
   ## The rustc edge of ``row`` for a unit cargo planned (see the module
   ## docstring, "The unit from cargo's plan"). The argv, working directory,
   ## environment and outputs are ``unit``'s; this proc checks them against
@@ -686,14 +704,20 @@ proc registryCrateUnitEdge*(row: CrateRow; storeRoot: string;
   # The remap names the prefix as the argv spells it, which is the path
   # rustc writes into its outputs.
   let difference = @[remapFlag(row, unit.cwd)]
-  createDir(unit.outDir)
-  let compile = rustcUnitAction(registryCrateEdgeId(row, unit.hash),
+  # Left to the engine (`ensureOutputParents`) when the edge is written as a
+  # record by a graph-production edge, which creates nothing else.
+  if createOutDir: createDir(unit.outDir)
+  if ($unit.governingLockIdentity).len == 0:
+    raise newException(ValueError, "the planned unit of " & row.label &
+      " names no governing lock identity")
+  let spec = rustcUnitSpec(registryCrateEdgeId(row, unit.hash),
     unit.argv & difference, cwd = unit.cwd, deps = unit.deps,
     inputs = unit.inputs, outputs = c.declared, env = unit.env,
     commandStatsId = RegistryCrateStatsId,
     isolateHostEnvironment = unit.isolateHostEnvironment,
     scratchDirs = unit.scratchDirs)
+  let compile = rustcUnitAction(spec, unit.governingLockIdentity)
   RegistryCrateEdge(row: row, prefix: c.prefix, crateName: c.manifest.libName,
     metadataHash: unit.hash, outDir: unit.outDir, rmeta: c.rmeta,
     rlib: c.rlib, depInfo: c.depInfo, cargoArgv: unit.argv,
-    argvDifference: difference, action: compile)
+    argvDifference: difference, spec: spec, action: compile)
