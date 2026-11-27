@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 36,
-    "nimTestBinaries": 3320,
+    "nimTestBinaries": 3321,
     "pureUnitConsolidationGroups": 97,
     "pureUnitTests": 857,
     "staticallyDetectedRuntimeCompilerFlowTests": 165,
-    "testEntries": 3381
+    "testEntries": 3382
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1876,7 +1876,7 @@
       "integration": 1887,
       "platform/destructive": 206,
       "pure unit": 857,
-      "unclassified": 401
+      "unclassified": 402
     },
     "graphOwnedTestArtifacts": [
       {
@@ -2096,9 +2096,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 3320,
+    "nimTestBinaryCount": 3321,
     "pythonTestFileCount": 61,
-    "testEntryCount": 3381
+    "testEntryCount": 3382
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -15045,6 +15045,24 @@
       "source": "libs/repro_cargo_edge/tests/t_cargo_plan.nim",
       "sourceSuiteCount": 5,
       "staticCaseCount": 24,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_plan_run_spawn_environment",
+      "class": "unclassified",
+      "classificationReason": "mutates the process environment",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_cargo_edge",
+        "repro_test_support"
+      ],
+      "owner": "libs/repro_cargo_edge",
+      "requiresReproBinary": false,
+      "source": "libs/repro_cargo_edge/tests/t_plan_run_spawn_environment.nim",
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 4,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
