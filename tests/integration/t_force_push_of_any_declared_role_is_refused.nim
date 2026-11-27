@@ -43,6 +43,15 @@
 ##     the record store's branch, never a role of the root: a root that
 ##     declares no `[workspace]` roles protects nothing by role, and nothing
 ##     is inferred from its store or its `origin/HEAD`.
+##   * a push that is merely OUT OF DATE — the role branch moved on the
+##     remote after this checkout fetched it, and HEAD contains what it
+##     fetched — is refused as `mainline-advanced` with git's fetch-first
+##     remedy, never as `mainline-history-rewrite`; following that remedy
+##     (fetch, merge, push) publishes it. Conversely, every rewrite above is
+##     asserted NOT to be reported as `mainline-advanced`. Calling an
+##     out-of-date push a rewrite told the user to stop rewriting a branch
+##     they were not rewriting, and automation that treats a rewrite refusal
+##     as final gave up instead of fetching and retrying.
 ##
 ## Mutation-checked: dropping the non-mainline roles from the protected set
 ## (`declaredRoleBranches` returning the mainline alone) passes the `next`
@@ -289,6 +298,8 @@ suite "pre-push gate — every declared role branch is protected":
           "the shared branch 'next' (role `unstable`)",
           "the branch of the `unstable` role", next.published,
           "is publishable"])
+        # A real rewrite of a branch this checkout fetched is not "behind".
+        check "mainline-advanced" notin refusedNext.output
         check fx.remoteTip(fx.app, "app-origin", "next") == next.published
         # The identical rewrite to a branch no role names is published.
         passes(fx.gitIn(fx.app,
@@ -317,6 +328,94 @@ suite "pre-push gate — every declared role branch is protected":
           ["push", "--force", "app-origin", "main"], required = false)
         refuses(refusedMain, ["mainline-history-rewrite",
           "the shared mainline 'main'", "the mainline branch", mainPublished])
+
+  test "an out-of-date push to a role branch is mainline-advanced, not a rewrite":
+    let gitBin = findExe("git")
+    if gitBin.len == 0:
+      skip("git is not on PATH; every fixture here is a real git repository")
+    else:
+      withFixture(gitBin, "advanced"):
+        # app's `next` (its declared `unstable`) is published at `base`, and
+        # this checkout's `app-origin/next` records that it fetched `base`.
+        discard fx.gitIn(fx.app, ["checkout", "-q", "-B", "next", "main"])
+        let base = fx.commitIn(fx.app, "next base")
+        passes(fx.gitIn(fx.app, ["push", "app-origin", "next"],
+          required = false))
+        check fx.gitIn(fx.app, ["rev-parse", "app-origin/next"])
+          .output.strip() == base
+
+        # A teammate lands work on `next` while this checkout builds on
+        # `base` (the issue's 30-minute gate). Their push bypasses the gate:
+        # it is the remote moving, not something under test.
+        let teammate = fx.scratch / "teammate"
+        discard require(q(gitBin) & " clone -q -b next " & q(fx.appOrigin) &
+          " " & q(teammate))
+        discard fx.gitIn(teammate, ["config", "user.email",
+          "teammate@example.invalid"])
+        discard fx.gitIn(teammate, ["config", "user.name", "Teammate"])
+        writeFile(teammate / "teammate.txt", "teammate work\n")
+        discard fx.gitIn(teammate, ["add", "teammate.txt"])
+        discard fx.gitIn(teammate, ["commit", "-q", "-m", "teammate work"])
+        let advanced = fx.headOf(teammate)
+        discard fx.gitIn(teammate, ["push", "-q", "--no-verify", "origin",
+          "next"])
+
+        # This checkout's own work, on top of the `base` it fetched.
+        let ours = fx.commitIn(fx.app, "our work on next")
+
+        # The teammate's commit reaches this checkout's object store WITHOUT
+        # moving `app-origin/next` — as it does in a workspace whose
+        # checkouts borrow objects from a shared bare cache that another
+        # workspace fetched into. Fetching from the teammate's path (not a
+        # configured remote) leaves every remote-tracking ref alone.
+        discard fx.gitIn(fx.app, ["fetch", "-q", teammate,
+          "next:refs/teammate/next"])
+        check fx.gitIn(fx.app, ["rev-parse", "app-origin/next"])
+          .output.strip() == base
+
+        # Git hands a non-fast-forward update to the pre-push hook when the
+        # old tip's object was absent at its own check (it arrived while the
+        # gate ran, in the issue's case) or under `--force`; `--force` is the
+        # deterministic way to put that same update in front of the gate.
+        let refused = fx.gitIn(fx.app,
+          ["push", "--force", "app-origin", "next"], required = false)
+        refuses(refused, ["mainline-advanced",
+          "the shared branch 'next' (role `unstable`)",
+          "fetch first", "non-fast-forward", "fetch app-origin next",
+          "last fetched it at " & base, "HEAD " & ours, advanced])
+        check "mainline-history-rewrite" notin refused.output
+        # The refusal itself never calls the push a rewrite: a retry loop
+        # treats that word as a stop condition. (Only the refusal line is
+        # read: the fixture's scratch path contains "role-rewrite".)
+        var refusalLines = 0
+        for line in refused.output.splitLines():
+          if "mainline-advanced" notin line: continue
+          inc refusalLines
+          let prose = line.replace(fx.scratch, "<scratch>")
+          if "rewrit" in prose.toLowerAscii():
+            checkpoint("the refusal calls the push a rewrite:\n" & line)
+          check "rewrit" notin prose.toLowerAscii()
+        check refusalLines > 0
+        # The refusal stands: the teammate's work is still the remote tip.
+        check fx.remoteTip(fx.app, "app-origin", "next") == advanced
+
+        # The remedy it names publishes the work.
+        discard fx.gitIn(fx.app, ["fetch", "-q", "app-origin", "next"])
+        discard fx.gitIn(fx.app, ["merge", "-q", "--no-edit",
+          "app-origin/next"])
+        let merged = fx.headOf(fx.app)
+        passes(fx.gitIn(fx.app, ["push", "app-origin", "next"],
+          required = false))
+        check fx.remoteTip(fx.app, "app-origin", "next") == merged
+
+        # Having fetched the new tip, discarding it IS a rewrite.
+        discard fx.gitIn(fx.app, ["reset", "-q", "--hard", ours])
+        let rewritten = fx.gitIn(fx.app,
+          ["push", "--force", "app-origin", "next"], required = false)
+        refuses(rewritten, ["mainline-history-rewrite",
+          "the shared branch 'next' (role `unstable`)", merged])
+        check "mainline-advanced" notin rewritten.output
+        check fx.remoteTip(fx.app, "app-origin", "next") == merged
 
   test "a role that resolves only by fallback protects nothing new":
     let gitBin = findExe("git")
