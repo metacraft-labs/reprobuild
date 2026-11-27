@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 36,
-    "nimTestBinaries": 3323,
+    "nimTestBinaries": 3325,
     "pureUnitConsolidationGroups": 97,
-    "pureUnitTests": 857,
+    "pureUnitTests": 856,
     "staticallyDetectedRuntimeCompilerFlowTests": 165,
-    "testEntries": 3384
+    "testEntries": 3386
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1139,7 +1139,7 @@
       "targetOs": "soAny"
     },
     {
-      "count": 20,
+      "count": 19,
       "defines": [
         "reproProviderMode"
       ],
@@ -1156,7 +1156,6 @@
         "libs/repro_standard_provider/tests/test_c_cpp_direct_convention.nim",
         "libs/repro_standard_provider/tests/test_c_cpp_make_convention.nim",
         "libs/repro_standard_provider/tests/test_c_cpp_meson_convention.nim",
-        "libs/repro_standard_provider/tests/test_crude_fallback.nim",
         "libs/repro_standard_provider/tests/test_crystal_convention.nim",
         "libs/repro_standard_provider/tests/test_elixir_mix_convention.nim",
         "libs/repro_standard_provider/tests/test_erlang_rebar3_convention.nim",
@@ -1873,9 +1872,9 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 30,
-      "integration": 1889,
+      "integration": 1892,
       "platform/destructive": 206,
-      "pure unit": 857,
+      "pure unit": 856,
       "unclassified": 402
     },
     "graphOwnedTestArtifacts": [
@@ -2096,9 +2095,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 3323,
+    "nimTestBinaryCount": 3325,
     "pythonTestFileCount": 61,
-    "testEntryCount": 3384
+    "testEntryCount": 3386
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -32270,8 +32269,8 @@
     },
     {
       "binary": "build/test-bin/test_crude_fallback",
-      "class": "pure unit",
-      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
       "defines": [
         "reproProviderMode"
       ],
@@ -32284,7 +32283,7 @@
         "repro_test_support"
       ],
       "owner": "libs/repro_standard_provider",
-      "requiresReproBinary": false,
+      "requiresReproBinary": true,
       "source": "libs/repro_standard_provider/tests/test_crude_fallback.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 3,
@@ -33013,7 +33012,7 @@
     {
       "binary": "build/test-bin/test_rust_convention",
       "class": "integration",
-      "classificationReason": "subprocess or repro CLI invocation in test body",
+      "classificationReason": "e2e/integration path or requires the repro binary",
       "defines": [
         "reproProviderMode"
       ],
@@ -33026,7 +33025,7 @@
         "repro_test_support"
       ],
       "owner": "libs/repro_standard_provider",
-      "requiresReproBinary": false,
+      "requiresReproBinary": true,
       "source": "libs/repro_standard_provider/tests/test_rust_convention.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 15,
@@ -33036,7 +33035,7 @@
     {
       "binary": "build/test-bin/test_rust_convention_build_script_members",
       "class": "integration",
-      "classificationReason": "subprocess or repro CLI invocation in test body",
+      "classificationReason": "e2e/integration path or requires the repro binary",
       "defines": [
         "reproProviderMode"
       ],
@@ -33049,7 +33048,7 @@
         "repro_test_support"
       ],
       "owner": "libs/repro_standard_provider",
-      "requiresReproBinary": false,
+      "requiresReproBinary": true,
       "source": "libs/repro_standard_provider/tests/test_rust_convention_build_script_members.nim",
       "sourceSuiteCount": 2,
       "staticCaseCount": 6,
@@ -33059,7 +33058,7 @@
     {
       "binary": "build/test-bin/test_rust_convention_crate_env_vs_cargo",
       "class": "integration",
-      "classificationReason": "subprocess or repro CLI invocation in test body",
+      "classificationReason": "e2e/integration path or requires the repro binary",
       "defines": [
         "reproProviderMode"
       ],
@@ -33072,7 +33071,7 @@
         "repro_test_support"
       ],
       "owner": "libs/repro_standard_provider",
-      "requiresReproBinary": false,
+      "requiresReproBinary": true,
       "source": "libs/repro_standard_provider/tests/test_rust_convention_crate_env_vs_cargo.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 2,
@@ -33082,7 +33081,7 @@
     {
       "binary": "build/test-bin/test_rust_convention_emit_cache_inputs",
       "class": "integration",
-      "classificationReason": "subprocess or repro CLI invocation in test body",
+      "classificationReason": "e2e/integration path or requires the repro binary",
       "defines": [
         "reproProviderMode"
       ],
@@ -33095,7 +33094,7 @@
         "repro_test_support"
       ],
       "owner": "libs/repro_standard_provider",
-      "requiresReproBinary": false,
+      "requiresReproBinary": true,
       "source": "libs/repro_standard_provider/tests/test_rust_convention_emit_cache_inputs.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 11,
@@ -33105,7 +33104,7 @@
     {
       "binary": "build/test-bin/test_rust_convention_lib_bin_and_path_deps",
       "class": "integration",
-      "classificationReason": "subprocess or repro CLI invocation in test body",
+      "classificationReason": "e2e/integration path or requires the repro binary",
       "defines": [
         "reproProviderMode"
       ],
@@ -33118,7 +33117,7 @@
         "repro_test_support"
       ],
       "owner": "libs/repro_standard_provider",
-      "requiresReproBinary": false,
+      "requiresReproBinary": true,
       "source": "libs/repro_standard_provider/tests/test_rust_convention_lib_bin_and_path_deps.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 12,
@@ -33128,7 +33127,7 @@
     {
       "binary": "build/test-bin/test_rust_convention_mode_b_test_target",
       "class": "integration",
-      "classificationReason": "subprocess or repro CLI invocation in test body",
+      "classificationReason": "e2e/integration path or requires the repro binary",
       "defines": [
         "reproProviderMode"
       ],
@@ -33141,7 +33140,7 @@
         "repro_test_support"
       ],
       "owner": "libs/repro_standard_provider",
-      "requiresReproBinary": false,
+      "requiresReproBinary": true,
       "source": "libs/repro_standard_provider/tests/test_rust_convention_mode_b_test_target.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 2,
@@ -33151,7 +33150,7 @@
     {
       "binary": "build/test-bin/test_rust_convention_mode_b_workspace_build",
       "class": "integration",
-      "classificationReason": "subprocess or repro CLI invocation in test body",
+      "classificationReason": "e2e/integration path or requires the repro binary",
       "defines": [
         "reproProviderMode"
       ],
@@ -33164,7 +33163,7 @@
         "repro_test_support"
       ],
       "owner": "libs/repro_standard_provider",
-      "requiresReproBinary": false,
+      "requiresReproBinary": true,
       "source": "libs/repro_standard_provider/tests/test_rust_convention_mode_b_workspace_build.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
@@ -33174,7 +33173,7 @@
     {
       "binary": "build/test-bin/test_rust_convention_target_edition",
       "class": "integration",
-      "classificationReason": "subprocess or repro CLI invocation in test body",
+      "classificationReason": "e2e/integration path or requires the repro binary",
       "defines": [
         "reproProviderMode"
       ],
@@ -33187,7 +33186,7 @@
         "repro_test_support"
       ],
       "owner": "libs/repro_standard_provider",
-      "requiresReproBinary": false,
+      "requiresReproBinary": true,
       "source": "libs/repro_standard_provider/tests/test_rust_convention_target_edition.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
@@ -33197,7 +33196,7 @@
     {
       "binary": "build/test-bin/test_rust_convention_unit_test_crates",
       "class": "integration",
-      "classificationReason": "subprocess or repro CLI invocation in test body",
+      "classificationReason": "e2e/integration path or requires the repro binary",
       "defines": [
         "reproProviderMode"
       ],
@@ -33210,7 +33209,7 @@
         "repro_test_support"
       ],
       "owner": "libs/repro_standard_provider",
-      "requiresReproBinary": false,
+      "requiresReproBinary": true,
       "source": "libs/repro_standard_provider/tests/test_rust_convention_unit_test_crates.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
@@ -59548,21 +59547,46 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_rqe_cg5_no_mixed_rlibs",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [
+        "reproProviderMode"
+      ],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_build_engine",
+        "repro_standard_provider",
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_rqe_cg5_no_mixed_rlibs.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_rqe_cg5_plan_completes_to_cargos_argv",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
-      "defines": [],
+      "defines": [
+        "reproProviderMode"
+      ],
       "language": "nim",
       "localDependencyShape": [
         "repro_build_engine",
         "repro_cargo_edge",
+        "repro_project_dsl",
+        "repro_standard_provider",
         "repro_test_support"
       ],
       "owner": "tests/integration",
       "requiresReproBinary": true,
       "source": "tests/integration/t_rqe_cg5_plan_completes_to_cargos_argv.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 2,
+      "staticCaseCount": 3,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -59618,6 +59642,28 @@
       "source": "tests/integration/t_rqe_cg5_record_run_refusals.nim",
       "sourceSuiteCount": 2,
       "staticCaseCount": 6,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_rqe_cg5_registry_lift_is_gated",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [
+        "reproProviderMode"
+      ],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_build_engine",
+        "repro_project_dsl",
+        "repro_provider_runtime",
+        "repro_standard_provider"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_rqe_cg5_registry_lift_is_gated.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

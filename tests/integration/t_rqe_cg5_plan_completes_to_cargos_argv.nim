@@ -49,6 +49,20 @@
 ## with another record-run `PATH`, which moves the wrapper's `PATH` in every
 ## unit's difference, every edge keeps its weak fingerprint.
 ##
+## THE THIRD CASE, through the Rust convention's Mode A path. A workspace
+## whose members declare no feature and depend on crates.io crates
+## (`writeRegistryWorkspace`: a registry crate with features and a registry
+## dependency of its own), emitted by the production Rust convention with the
+## registry lift switched on (`REPRO_CARGO_MODE_A_REGISTRY=on`), which runs
+## the fetch wave and the record run itself. Every action of the fragment is
+## a rustc edge of the plan, and each, as the fragment declares it (argv,
+## working directory, environment), mapped back, must equal what the logging
+## wrapper saw in a real `cargo build --release --workspace` (the selection
+## the convention plans), with the registry crates' remap as the one
+## difference and the toolchain's `PATH` as the one variable beyond cargo's.
+## Built through the engine and monitor, the binaries print what cargo's
+## print.
+##
 ## KNOWN DIFFERENCE, compared explicitly: the plan gives every unit its own
 ## output directory, so cargo's one `-L dependency=<deps>` becomes one
 ## `-L dependency=` per unit of the closure (checked against the closure),
@@ -84,7 +98,10 @@
 ## argv check, and the embedded-path scan of its rlib and rmeta); keeping
 ## the cargo wrapper's variables in an edge's environment fails the second
 ## case's PATH, wrapper-variable and fingerprint checks; leaving the
-## toolchain's variables out of the launch fails its environment checks.
+## toolchain's variables out of the launch fails its environment checks;
+## dropping the registry crates' remap from the convention's edges (passing
+## `cargoArgv` instead of the edge's argv) fails the third case's argv
+## check.
 ##
 ## NO MOCKS: real cargo and rustc, the real wrapper, the real engine and
 ## monitor. The logging wrapper runs the real compiler with the arguments it
@@ -96,9 +113,12 @@ import std/[algorithm, os, osproc, sequtils, sets, strutils, tables,
 import repro_build_engine
 import repro_build_engine/embedded_root_scan
 import repro_cargo_edge/[cargo_plan, plan_run, plan_units, record_mode]
+import repro_project_dsl
 import repro_test_support
+import repro_standard_provider/conventions/rust_plan_mode
 
 import ./rqe_cg5_plan_fixture
+import ./rqe_cg5_mode_a_support
 
 const
   ShellVariables = ["_", "SHLVL", "PWD", "OLDPWD"]
@@ -355,7 +375,8 @@ proc compareToOracle(argv: seq[string]; cwd: string;
     else:
       planEnv[name] = mp.mapBack(value)
   let depsDirs = toHashSet([oracle.target / "debug" / "deps",
-    oracle.target / "debug"])
+    oracle.target / "debug", oracle.target / "release" / "deps",
+    oracle.target / "release"])
   var realEnv = initTable[string, string]()
   for name, value in o.env:
     if name in ShellVariables or name in CargoProcessVariables: continue
@@ -634,3 +655,90 @@ suite "the plan of a record run":
       checkpoint "edges: " & ours & "cargo: " & theirs
       check ours == theirs
       check "fast extra leaf5 0.1.0" in ours
+
+  test "test_rqe_cg5_plan_completes_to_cargos_argv: the Rust convention's " &
+      "Mode A edges for a crates.io workspace run cargo's argv and link " &
+      "what cargo links":
+    let t = findTools()
+    let work = createTempDir("cg5-plan-convention-", "")
+    defer: removeTestTree(work)
+    let ws = work / "ws"
+    writeRegistryWorkspace(ws)
+    let reg = setupRegistry(work, smReal, withRegmid = true)
+    lockWorkspace(ws, work, reg)
+    let env = prepareModeAEnv(work, "cg5-plan-convention")
+    putEnv("REPRO_STORE_ROOT", reg.store)
+    putEnv(ModeARegistrySwitch, "on")
+    defer: delEnv(ModeARegistrySwitch)
+    let fragment = emitWorkspace(ws)
+    let defs = actionDefs(fragment)
+    checkpoint "actions: " & defs.mapIt(it.id).join(" ")
+    check defs.len == 5
+    let plan = readCargoPlan(ws / PlanFileRel)
+    check plan.runs.len == 0
+    check plan.units.len == defs.len
+    let devEnv = @[("PATH", storeOnlyPath()),
+      ("TMPDIR", getEnv("TMPDIR", work))]
+    let oracle = oracleBuild(t, ws, reg, devEnv, work, @PlanCargoArgs)
+    check oracle.units.len == plan.units.len
+    let matched = matchUnits(plan, oracle)
+    let outRoot = ws / UnitsOutRel
+    let mp = mapper(plan, oracle, reg, ws, outRoot = outRoot,
+      storeRoot = reg.store)
+    for def in defs:
+      checkpoint "edge " & def.id
+      var unit: PlanUnit
+      var found = false
+      for u in plan.units:
+        if planUnitEdgeId(u) == def.id:
+          unit = u
+          found = true
+      require found
+      check def.isolateHostEnvironment
+      let argv = inlineArgvOf(def)
+      let registry = unit.cwd.startsWith("${store}/")
+      var cargoArgv = argv
+      if registry:
+        # The one difference from cargo's command line: the remap that keeps
+        # the store path out of the crate's outputs.
+        check argv.len > 0 and argv[^1].startsWith("--remap-path-prefix=" &
+          reg.store & "/prefixes/" & unit.package & "/") and
+          argv[^1].endsWith("=" & unit.package & "-" & unit.version)
+        cargoArgv = argv[0 ..< ^1]
+      else:
+        check not argv.anyIt(it.startsWith("--remap-path-prefix="))
+      # The environment: cargo's variables, and the toolchain's PATH as the
+      # only PATH.
+      var cargoEnv: seq[(string, string)]
+      var paths = 0
+      for (name, value) in def.env:
+        if name == "PATH": inc paths
+        else: cargoEnv.add (name, value)
+      check paths == 1
+      var closureDirs: seq[string]
+      for c in unit.closure: closureDirs.add outRoot / c
+      closureDirs.sort()
+      compareToOracle(cargoArgv, def.callArg("cwd"), cargoEnv, closureDirs,
+        false, matched[unit.id], oracle, mp, edge = true)
+
+    let run = buildFragment(env, fragment, ws, work / "engine-cache")
+    for r in run.results:
+      checkpoint r.id & ": " & $r.status & " " & r.reason &
+        (if r.stderr.len > 0: "\nstderr: " & r.stderr else: "")
+      check r.status == asSucceeded
+    for crate in ["app", "util"]:
+      var built = ""
+      for def in defs:
+        if "bin" in inlineArgvOf(def) and
+            ("cargo.rustc/" & crate & "@") in def.id:
+          for o in def.outputs:
+            if extractFilename(o).startsWith(crate & "-") and
+                not o.endsWith(".rlib"):
+              built = o
+      checkpoint crate & ": " & built
+      require built.len > 0
+      let ours = execProcess(built, options = {})
+      let theirs = execProcess(oracle.target / "release" / crate,
+        options = {})
+      checkpoint "edges: " & ours & "cargo: " & theirs
+      check ours == theirs

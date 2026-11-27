@@ -283,3 +283,32 @@ whole build, never ones derived from the manifests or `cargo metadata`.
   (`PlanUnitsRefusal`, naming each unit and why). Every check, a registry
   crate's included, is made before anything is written, so a refused plan
   makes no edge and no directory: such a workspace is built by cargo.
+
+## Building a crates.io workspace from its plan (opt-in)
+
+The Rust convention builds a workspace with crates.io dependencies from
+cargo's plan when `REPRO_CARGO_MODE_A_REGISTRY=on` is set (only that exact
+value; the default is off). With it off, such a workspace is built by cargo
+through the delegated edge, as before. The convention reads the variable
+when it decides the workspace's mode and records it as an evaluation input
+of the graph it emits, so changing it re-decides the workspace.
+
+With it on, and when the workspace's members have no build script, no
+proc-macro, no feature or optional dependency, and every dependency that is
+not a member comes from crates.io, graph production runs, in order:
+
+1. the fetch wave over the lock's crates.io rows (each crate's store prefix;
+   receipts under `.repro/build/cargo-fetch`);
+2. the record run (`--cargo-plan`, planning `cargo build --release
+   --workspace`) under the io monitor, in `.repro/build/cargo-plan`; what it
+   read, outside its own scratch directory, keys the emitted graph;
+3. `planUnitEdges`, with the outputs under `.repro/build/cargo-units` and,
+   as the one toolchain variable, a `PATH` of the directories of `cc` and
+   `rustc`.
+
+The graph then holds one rustc edge per unit and nothing that runs cargo;
+each edge is launched from its declared environment alone. The record wrapper
+is found beside the provider, or at `REPRO_RUSTC_WRAPPER_PATH`. If any step
+cannot be taken (a git or alternate-registry source, a crate that cannot be
+fetched, a plan holding a unit these edges do not build), the whole workspace
+is built by cargo. The graph has no `test` target in this mode yet.

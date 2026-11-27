@@ -551,6 +551,12 @@ proc isProviderModePath(path: string): bool =
     # Runs the Rust convention's emitter (``rustConvention().emitFragment``),
     # whose fallback path reaches ``buildPackageFragment``.
     "tests/integration/t_rust_mode_a_depfile_is_read_not_cached.nim",
+    # Run the Rust convention's emitter over a crates.io workspace, whose
+    # Mode A path (cargo's plan) and Mode B fallback both reach
+    # ``buildPackageFragment``.
+    "tests/integration/t_rqe_cg5_no_mixed_rlibs.nim",
+    "tests/integration/t_rqe_cg5_plan_completes_to_cargos_argv.nim",
+    "tests/integration/t_rqe_cg5_registry_lift_is_gated.nim",
     "tests/unit/t_from_source_cabal_recognition.nim",
     "tests/unit/t_from_source_cargo_recognition.nim",
     "tests/unit/t_from_source_go_recognition.nim",

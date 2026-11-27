@@ -179,6 +179,12 @@ import repro_standard_provider/conventions/emit_cache
 import repro_standard_provider/crude
 import repro_cargo_edge/edge_cli
 import repro_standard_provider/conventions/cargo_workspace_toml
+import repro_standard_provider/conventions/observed_reads
+import repro_standard_provider/conventions/rust_plan_mode
+import repro_core/cargo_lock
+import repro_cargo_edge/plan_units
+
+export rust_plan_mode.ModeARegistrySwitch
 
 const
   ScratchDirName* = ".repro/build"
@@ -301,7 +307,15 @@ type
       ## a dependency and could pass no ``--extern`` for it. Used by the
       ## routing in ``rustEmitFragment`` to fall through to the Mode B
       ## crude fallback rather than emit a graph whose ``rustc`` fails to
-      ## resolve the crate.
+      ## resolve the crate. A crates.io dependency is not counted here: it
+      ## is ``hasRegistryDeps``.
+    hasRegistryDeps: bool
+      ## True when this package depends, with any kind, on a crates.io
+      ## crate (``source`` one of the crates.io spellings,
+      ## ``cargo_lock.isRegistrySource``). Mode A's own emission has no unit
+      ## for it, so such a workspace is built from cargo's plan when the
+      ## registry lift is on (``rust_plan_mode``) and by cargo otherwise
+      ## (Rust.md §"Recognition" item 6).
     hasFeatures: bool
       ## True when the package declares a feature (``features`` in
       ## ``cargo metadata`` is non-empty) or an optional dependency.
@@ -341,7 +355,8 @@ type
     isWorkspace: bool
     hasExternalDeps: bool
       ## M23: true when any package in the project depends on a
-      ## crates.io / git source, or on a path package that is not a
+      ## git or alternate-registry source (a crates.io source is
+      ## ``hasRegistryDeps``), or on a path package that is not a
       ## workspace member (``RustPackage.hasExternalDeps``). Routes the
       ## entire project through the
       ## Mode B crude fallback. See the M23 "Crates.io / git deps"
@@ -351,6 +366,9 @@ type
       ## --message-format=json`` run, but the simpler "delegate to
       ## cargo" route lands in M23 and a full ``--extern``-threading
       ## implementation is deferred).
+    hasRegistryDeps: bool
+      ## True when any package depends on a crates.io crate
+      ## (``RustPackage.hasRegistryDeps``).
     hasFeatures: bool
       ## True when any package declares a feature or an optional
       ## dependency. Routes the entire project through Mode B: the
@@ -690,6 +708,17 @@ proc scanHarnessSettings(cargoTomlPath: string): HarnessSettings =
 
 proc rustcExecutable(): string =
   findExe("rustc")
+
+proc planToolchainPath(rustc: string): string =
+  ## The ``PATH`` every rustc edge taken from cargo's plan is given: the
+  ## directories of the C driver rustc links with (``cc``, resolved as this
+  ## convention resolves ``rustc`` and ``cargo``) and of rustc. Nothing else
+  ## from the host's ``PATH`` reaches a compile.
+  var dirs: seq[string]
+  for exe in [findExe("cc"), rustc]:
+    if exe.len > 0 and parentDir(exe) notin dirs:
+      dirs.add parentDir(exe)
+  dirs.join($PathSep)
 
 proc cargoExecutable(): string =
   findExe("cargo")
@@ -1670,6 +1699,7 @@ proc loadProject(projectRoot: string;
     var workspaceDeps: seq[string] = @[]
     var devWorkspaceDeps: seq[string] = @[]
     var hasExternalDeps = false
+    var hasRegistryDeps = false
     if "dependencies" in pkgNode and pkgNode["dependencies"].kind == JArray:
       for dep in pkgNode["dependencies"]:
         if dep.kind != JObject:
@@ -1689,7 +1719,14 @@ proc loadProject(projectRoot: string;
         # issues/2026-11-17-rust-mode-a-tolerates-registry-dev-dependencies-that-its-test-compile-cannot-resolve.md).
         let hasSource = "source" in dep and dep["source"].kind != JNull
         if hasSource:
-          hasExternalDeps = true
+          # A crates.io crate is item 6's registry condition, which the
+          # plan lifts (``hasRegistryDeps``); a git or alternate-registry
+          # source stays outside: the plan serves crates.io crates only.
+          if dep["source"].kind == JString and
+              isRegistrySource(dep["source"].getStr()):
+            hasRegistryDeps = true
+          else:
+            hasExternalDeps = true
           continue
         # ``kind`` is ``null`` for a normal dependency, ``"dev"`` or
         # ``"build"`` otherwise.
@@ -1732,6 +1769,8 @@ proc loadProject(projectRoot: string;
           hasExternalDeps = true
     if hasExternalDeps:
       result.hasExternalDeps = true
+    if hasRegistryDeps:
+      result.hasRegistryDeps = true
     let hasFeatures = packageDeclaresFeatures(pkgNode)
     if hasFeatures:
       result.hasFeatures = true
@@ -1766,6 +1805,7 @@ proc loadProject(projectRoot: string;
         workspaceDeps: workspaceDeps,
         devWorkspaceDeps: devWorkspaceDeps,
         hasExternalDeps: hasExternalDeps,
+        hasRegistryDeps: hasRegistryDeps,
         hasFeatures: hasFeatures,
         hasBuildScript: hasBuildScript,
         hasProcMacro: hasProcMacro,
@@ -1780,6 +1820,7 @@ proc loadProject(projectRoot: string;
       workspaceDeps: workspaceDeps,
       devWorkspaceDeps: devWorkspaceDeps,
       hasExternalDeps: hasExternalDeps,
+      hasRegistryDeps: hasRegistryDeps,
       hasFeatures: hasFeatures,
       hasBuildScript: hasBuildScript,
       hasProcMacro: hasProcMacro,
@@ -2919,6 +2960,166 @@ proc rustCrudeFallback(projectRoot: string;
       testArgv = testArgv,
       testStampPath = testStampFile)
 
+const RustPlanUnobservedIdentity = "rust.cargo-plan"
+  ## Names the record run in an evaluation input that stands for reads
+  ## that were not observed.
+
+type
+  RustModeKind* = enum
+    rmkModeA
+      ## Mode A's own emission: workspace members only, from
+      ## ``cargo metadata``.
+    rmkPlan
+      ## Built from cargo's plan: every library and binary unit, members and
+      ## crates.io crates, as an edge (item 6's registry lift).
+    rmkModeB
+      ## Built by cargo as a whole, through the delegated edge.
+
+  RustModeDecision* = object
+    ## Which mode the Rust convention builds a workspace in, and why.
+    kind*: RustModeKind
+    reason*: string
+      ## The condition of Rust.md § Recognition that keeps the workspace in
+      ## Mode B ("" otherwise).
+    readSwitch*: bool
+      ## Whether the registry lift's switch took part in the decision; the
+      ## fragment then records it as an evaluation input.
+
+proc decideRustMode(project: RustProject): RustModeDecision =
+  ## The static conditions of Rust.md § Recognition items 5 and 6, in the
+  ## order the emitter applied them before the registry lift, then item 6's
+  ## registry condition, which the lift's switch decides. Each condition
+  ## sends the whole workspace to Mode B; none is lifted here but the
+  ## registry condition, for crates.io crates only.
+  ##
+  ## * A dependency on a package that is neither a workspace member nor a
+  ##   crates.io crate (a git or alternate-registry source, a path outside
+  ##   the workspace): Mode A has no unit to pass ``--extern`` for, and the
+  ##   plan serves crates.io crates only.
+  ## * Item 5: a build script (``rustRecognize``'s root ``build.rs`` is
+  ##   checked by the caller) or a proc-macro on any member.
+  ## * Item 6's other conditions: a feature or optional dependency on a
+  ##   member, a ``harness = false`` Mode A cannot attribute, a workspace
+  ##   dependency under another name.
+  ## * Item 6's registry condition: a crates.io dependency. With the switch
+  ##   on (``modeARegistryLiftOn``) the workspace is built from cargo's plan;
+  ##   with it off it stays in Mode B, as before the lift.
+  ##
+  ## The plan's own refusals (a registry crate with a build script, a
+  ## proc-macro or ``links``; a unit the plan's edges do not build) are
+  ## made by graph production (``rust_plan_mode.planWorkspace``).
+  template modeB(why: string) =
+    return RustModeDecision(kind: rmkModeB, reason: why)
+  if project.hasExternalDeps:
+    modeB("Rust.md § Recognition item 6: a package depends on a package " &
+      "that is neither a workspace member nor a crates.io crate (a git or " &
+      "alternate-registry source, or a path outside the workspace)")
+  if project.hasBuildScript:
+    modeB("Rust.md § Recognition item 5: a package has a build script")
+  if project.hasProcMacro:
+    modeB("Rust.md § Recognition item 5: a package is a proc-macro")
+  if project.hasFeatures:
+    modeB("Rust.md § Recognition item 6: a package declares a feature or " &
+      "an optional dependency")
+  if project.harnessUnattributed:
+    modeB("Rust.md § Recognition item 6: a package may set harness = " &
+      "false on a target Mode A cannot name")
+  if project.hasRenamedDeps:
+    modeB("Rust.md § Recognition item 6: a workspace dependency is " &
+      "declared under another name")
+  if project.hasRegistryDeps:
+    var dependents: seq[string]
+    for pkg in project.packages:
+      if pkg.hasRegistryDeps: dependents.add pkg.packageName
+    if modeARegistryLiftOn():
+      return RustModeDecision(kind: rmkPlan, readSwitch: true)
+    return RustModeDecision(kind: rmkModeB, readSwitch: true,
+      reason: "Rust.md § Recognition item 6, the registry condition: " &
+        dependents.join(", ") & " depend" &
+        (if dependents.len == 1: "s" else: "") & " on a crates.io crate, " &
+        "and the registry lift is off (" & ModeARegistrySwitch & " is not `" &
+        ModeARegistrySwitchOn & "`)")
+  RustModeDecision(kind: rmkModeA)
+
+proc rustModeDecision*(projectRoot: string): RustModeDecision =
+  ## The mode ``rustEmitFragment`` builds the workspace at ``projectRoot``
+  ## in, from its static conditions (``decideRustMode``), without running
+  ## graph production. Raises what the emitter raises for a workspace it
+  ## cannot read.
+  if hasBuildRs(projectRoot):
+    return RustModeDecision(kind: rmkModeB,
+      reason: "Rust.md § Recognition item 5: the root package has a " &
+        "build script")
+  let cargoExe = cargoExecutable()
+  if cargoExe.len == 0:
+    raise newException(ValueError,
+      "rust convention: 'cargo' executable not on PATH")
+  decideRustMode(loadProject(projectRoot,
+    runCargoMetadata(projectRoot, cargoExe)))
+
+proc withEvaluationInputs(fragment: GraphFragment;
+                          inputs: openArray[GraphEvaluationInput]):
+    GraphFragment =
+  ## ``fragment`` with ``inputs`` added to its evaluation inputs, and its
+  ## digest (which covers them) recomputed.
+  result = fragment
+  for input in inputs:
+    result.evaluationInputs.add input
+  if result.fragmentDigest.len > 0:
+    result.fragmentDigest = computeGraphFragmentDigest(result)
+
+proc rustPlanFragment(projectRoot: string; request: ProviderGraphRequest;
+                      project: RustProject; graph: PlanGraph): GraphFragment =
+  ## The fragment of a workspace built from cargo's plan: one rustc edge per
+  ## unit (``plan_units.planUnitEdges``), registry crates and members alike,
+  ## each declared as the engine action the emitter built: its argv, working
+  ## directory, ordering, outputs and scratch directories, content-checked
+  ## (``hybrid``), gathered by the automatic monitor, and launched from its
+  ## declared environment alone (the variables cargo set for the unit and
+  ## the toolchain's ``PATH``). The default target holds every edge; each
+  ## member binary is also a target of its crate's name. The record run's
+  ## reads and the registry lift's switch are the fragment's evaluation
+  ## inputs.
+  ##
+  ## There is no ``test`` target: test targets and doctests are not taken
+  ## from the plan yet, and building them with cargo
+  ## beside these edges would not be one builder for the workspace.
+  let pkgDef = syntheticPackage(projectRoot, project)
+  let registerAll = proc() =
+    discard buildPool("compile", 8'u32)
+    registerObservedReads(graph.observed, RustPlanUnobservedIdentity,
+      graph.reusable, graph.stamps)
+    providerEnvironmentInput(ModeARegistrySwitch)
+    var all: seq[BuildActionDef] = @[]
+    var named = initHashSet[string]()
+    for e in graph.edges:
+      let a = e.action
+      var env: seq[(string, string)] = @[]
+      for entry in a.env:
+        let eq = entry.find('=')
+        env.add((entry[0 ..< eq], entry[eq + 1 .. ^1]))
+      let def = buildAction(
+        id = a.id,
+        call = inlineExecCall(a.argv, a.cwd),
+        deps = a.deps,
+        inputs = a.inputs,
+        outputs = a.outputs,
+        pool = a.pool,
+        cacheable = true,
+        commandStatsId = a.commandStatsId,
+        dependencyPolicy = automaticMonitorPolicy(),
+        actionCachePolicy = acfpHybrid,
+        env = env,
+        scratchDirs = a.scratchDirs,
+        isolateHostEnvironment = true)
+      all.add(def)
+      if not e.registry and "bin" in crateTypes(e.cargoArgv) and
+          e.unit.crateName notin named:
+        named.incl e.unit.crateName
+        discard target(e.unit.crateName, @[def])
+    defaultTarget(target("default", all))
+  buildPackageFragment(pkgDef, request, registerAll, includeDefault = false)
+
 proc rustEmitFragment(projectRoot: string;
                       request: ProviderGraphRequest):
                         GraphFragment {.gcsafe.} =
@@ -2934,18 +3135,15 @@ proc rustEmitFragment(projectRoot: string;
   ## catches every workspace member's ``build.rs`` and, from ``cargo
   ## metadata``, a script named by the ``build`` key.
   ##
-  ## **M23 routing**: when a project pulls in a crates.io / git
-  ## dependency (``source != null`` for a normal/build dep in cargo
-  ## metadata's ``dependencies[]`` array), the convention routes to the
-  ## Mode B crude fallback. The full Mode A path would need to either
-  ## (a) eagerly run ``cargo fetch`` + extract per-dep ``--extern``
-  ## paths from a separate ``cargo build --release --offline
-  ## --message-format=json`` run, or (b) consult ``Cargo.lock`` +
-  ## ``CARGO_HOME``'s on-disk layout. Both are non-trivial and out of
-  ## scope for M23's "honest scope" cut — see the spec's
-  ## "Crates.io / git deps" section for the trade-off. The Mode B
-  ## fallback still gives users a working build; future milestones can
-  ## graduate them to Mode A's per-rustc-action graph.
+  ## **Registry routing** (``decideRustMode``): a dependency that is
+  ## neither a workspace member nor a crates.io crate (git, an alternate
+  ## registry, a path outside the workspace) routes to the Mode B crude
+  ## fallback. A crates.io dependency is Rust.md §"Recognition" item 6's
+  ## registry condition: with ``REPRO_CARGO_MODE_A_REGISTRY=on`` the
+  ## workspace is built from cargo's plan (``rust_plan_mode``,
+  ## ``rustPlanFragment``), every library and binary unit as an edge; with
+  ## the switch off (the default) it stays in Mode B. A plan these edges
+  ## cannot build as a whole sends the workspace to Mode B too.
   ##
   ## **M13 workspace shape**:
   ##   1. ``cargo metadata`` lists every workspace member's package node.
@@ -2986,48 +3184,38 @@ proc rustEmitFragment(projectRoot: string;
     if project.packages.len == 0:
       raise newException(ValueError,
         "rust convention: no compilable packages found in " & projectRoot)
-    # M23: route external-dep projects through Mode B. Done AFTER
-    # loadProject so the project view (and the per-package
-    # hasExternalDeps flag) is populated; doing this earlier would
-    # require duplicating the dep-walk logic. The Mode B fallback
-    # invokes cargo itself which handles registry/git resolution
-    # natively.
-    if project.hasExternalDeps:
-      return rustCrudeFallback(projectRoot, request)
-    # Rust.md §"Recognition" item 5: Mode A runs no build script, so a
-    # package that has one would compile without the ``--cfg`` flags,
-    # environment variables, link arguments and ``OUT_DIR`` sources its
-    # script provides: a failed compile, or code other than cargo's. A
-    # build script on any package sends the whole workspace to Mode B.
-    if project.hasBuildScript:
-      return rustCrudeFallback(projectRoot, request)
-    # Rust.md §"Recognition" item 5: a proc-macro is compiled for the host
-    # and loaded by the ``rustc`` of each crate that depends on it. Mode A
-    # builds neither, so a dependent's ``rustc`` would fail on an
-    # unresolved crate. No allow list exists yet: any proc-macro member
-    # sends the whole workspace to Mode B.
-    if project.hasProcMacro:
-      return rustCrudeFallback(projectRoot, request)
-    # Rust.md §"Recognition" item 6: Mode A passes no ``--cfg feature``
-    # because it does no feature resolution, so a crate with default
-    # features would compile with them off. Any feature or optional
-    # dependency anywhere sends the whole workspace to Mode B, where
-    # cargo resolves them.
-    if project.hasFeatures:
-      return rustCrudeFallback(projectRoot, request)
-    # Rust.md §"Recognition" item 6 and §"Test commands": a target with
-    # ``harness = false`` is tested by running its own ``main``. Mode A
-    # builds a ``[[test]]`` it can name that way without ``--test``
-    # (``RustTarget.noHarness``); a setting it cannot attribute would leave
-    # some target compiled with ``--test``, whose libtest runner reports
-    # "running 0 tests" and passes whatever the body does, so cargo builds
-    # that workspace (Mode B).
-    if project.harnessUnattributed:
-      return rustCrudeFallback(projectRoot, request)
-    # Rust.md §"Recognition" item 6: a workspace dependency under another
-    # name needs ``--extern <rename>=``, which Mode A does not emit.
-    if project.hasRenamedDeps:
-      return rustCrudeFallback(projectRoot, request)
+    # The workspace's mode (``decideRustMode``): Mode A's own emission,
+    # cargo's plan (item 6's registry lift, behind its switch), or Mode B.
+    let decision = decideRustMode(project)
+    case decision.kind
+    of rmkModeB:
+      result = rustCrudeFallback(projectRoot, request)
+      if decision.readSwitch:
+        # The switch decided this workspace too: turning it on re-decides.
+        result = withEvaluationInputs(result, [modeARegistrySwitchInput()])
+      return
+    of rmkPlan:
+      let graph = planWorkspace(projectRoot, cargoExe, rustcExe,
+        planToolchainPath(rustcExe))
+      if graph.ok:
+        return rustPlanFragment(projectRoot, request, project, graph)
+      # A workspace the plan's edges cannot build as a whole is built by
+      # cargo as a whole: never partly by each. What
+      # graph production read keys this decision as it would key the
+      # plan's fragment; when the record run did not run at all (no
+      # wrapper, no monitor, a crate that could not be fetched), nothing
+      # recorded stands for the decision and it is taken again next time.
+      var inputs = @[modeARegistrySwitchInput()]
+      inputs.add observedEvaluationInputs(graph.observed, graph.stamps,
+        graph.reusable or graph.observed.files.len == 0,
+        RustPlanUnobservedIdentity)
+      if graph.observed.files.len == 0:
+        inputs.add unobservedEvaluationInput(RustPlanUnobservedIdentity &
+          ": " & graph.reason)
+      return withEvaluationInputs(rustCrudeFallback(projectRoot, request),
+        inputs)
+    of rmkModeA:
+      discard
     # Verify every declared source path actually exists; cargo metadata
     # can sometimes report stale entries if the user edits Cargo.toml
     # without saving the source file.

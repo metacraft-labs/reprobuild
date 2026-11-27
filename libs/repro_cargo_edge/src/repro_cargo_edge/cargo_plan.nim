@@ -84,7 +84,9 @@
 ## `CARGO_MAKEFLAGS`, and a `MAKEFLAGS`/`MFLAGS` that carries jobserver
 ## descriptors), and the variables cargo's own process sets for itself and
 ## its children inherit (`CargoProcessVariables`: the certificate locations
-## its TLS library probes for when the environment names none).
+## its TLS library probes for when the environment names none), and the io
+## monitor's own `REPRO_MONITOR_*` variables, which a monitored record run's
+## processes carry.
 ##
 ## THE FORMAT. A fixed-schema binary record: a length-prefixed magic
 ## (`CargoPlanMagic`), a `u16` schema version, a `u32` payload length, and the
@@ -200,6 +202,13 @@ const
     "rustc-link-search-outside-out-dir"]
     ## The only slots a build-script run can carry: a build-dependency's
     ## link-search paths on its dynamic-library path.
+  MonitorVariablePrefix* = "REPRO_MONITOR_"
+    ## The io monitor's own variables. When the record run is itself
+    ## monitored (as graph production runs it), the monitor sets them in
+    ## every process it starts, with values that change from one exec to the
+    ## next (`REPRO_MONITOR_EXEC_GEN`), so they would enter each unit's
+    ## difference. They are never cargo's, and the engine's monitor sets its
+    ## own for the unit's edge.
   CargoProcessVariables* = ["SSL_CERT_FILE", "SSL_CERT_DIR"]
     ## Variables cargo's own process sets when the environment lacks them
     ## (its TLS library's probe for the system's certificate locations), so
@@ -475,7 +484,8 @@ proc recordRunVariable(name, value: string; wrapper: string): bool =
   of "CARGO_MAKEFLAGS": true
   of "MAKEFLAGS", "MFLAGS": "jobserver" in value
   of "RUSTC_WRAPPER": value == wrapper
-  else: name in CargoProcessVariables
+  else:
+    name in CargoProcessVariables or name.startsWith(MonitorVariablePrefix)
 
 proc cargoSetsVariable*(name: string; isRun: bool): bool =
   ## Whether cargo documents setting `name` for a crate's compile (`isRun`
