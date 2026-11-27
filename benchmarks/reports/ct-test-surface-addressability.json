@@ -50,16 +50,16 @@
   "counts": {
     "catalogs": 5,
     "itemsByKind": {
-      "case": 21952,
-      "suite": 5173
+      "case": 21961,
+      "suite": 5175
     },
     "itemsByProvider": {
       "assembly-fallback": 3,
-      "nim-unittest": 26162,
+      "nim-unittest": 26173,
       "python-pytest": 7,
       "python-unittest": 953
     },
-    "itemsTotal": 27125,
+    "itemsTotal": 27136,
     "responseDiagnostics": {
       "info": 1,
       "warning": 33
@@ -349,28 +349,28 @@
   ],
   "reconciliation": {
     "caseCoveragePercent": 98.03,
-    "caseItemsInCatalog": 21952,
-    "casesAddressableThroughTheSurface": 20693,
+    "caseItemsInCatalog": 21961,
+    "casesAddressableThroughTheSurface": 20702,
     "collidingIdentities": 18,
-    "distinctCaseIdentities": 21932,
+    "distinctCaseIdentities": 21941,
     "groundTruth": "benchmarks/reports/reprobuild-suite-m0-inventory-sources.json",
     "perSourceCaseCountAgreement": {
-      "agree": 3325,
-      "compared": 3334,
+      "agree": 3326,
+      "compared": 3335,
       "disagree": 9
     },
     "sourceCoveragePercent": 99.76,
-    "sourcesAddressableThroughTheSurface": 3334,
+    "sourcesAddressableThroughTheSurface": 3335,
     "sourcesNotAddressable": 8,
-    "trackedNimSuiteSources": 3342,
-    "trackedStaticCaseCount": 21108
+    "trackedNimSuiteSources": 3343,
+    "trackedStaticCaseCount": 21117
   },
   "schemaVersion": 2,
   "surface": {
     "binary": "ct-test",
-    "provenance": "ctTestTools from the reprobuild flake's CodeTracer pin, codetracer a7cddd8bce554f5d73a7636e2bad15605b71963c (metacraft-github-actions 9916d9ff9e pins/codetracer.json)",
-    "resolvedBy": "environment",
-    "sha256": "d989d0480cee9446da2b715b205ea4f19f4bae64dbc02a63f7d167a8745c277a"
+    "provenance": "",
+    "resolvedBy": "PATH:ct-test",
+    "sha256": "87b4cfdbd1b02862bb5e88d8748fd025fcecc9f1a64682b8fd36a3aec8ffd7ec"
   },
   "title": "Reprobuild case addressability through the canonical `ct test` surface",
   "trackedNimSources": [
@@ -3128,6 +3128,7 @@
     "tests/integration/t_rqe_m15_action_exports_its_lease.nim",
     "tests/integration/t_rqe_m15_nim_edge_bounded.nim",
     "tests/integration/t_rqe_m15_recorder_cargo_edge_bounded.nim",
+    "tests/integration/t_rqm_reprobuild_memory_cap.nim",
     "tests/integration/t_run_consumes_opaque_out_of_tree.nim",
     "tests/integration/t_run_consumes_session_store_out_of_tree.nim",
     "tests/integration/t_run_edge_session_resolver_auto.nim",

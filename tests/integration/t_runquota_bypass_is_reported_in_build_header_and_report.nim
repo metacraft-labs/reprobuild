@@ -28,16 +28,20 @@
 ##  5. ENFORCEMENT GAPS — the header line built from RunQuota's capability
 ##     record (``runQuotaEnforcementHeaderLine``) names every mechanism the
 ##     record does not enforce, with why, and says Reprobuild's own actions
-##     are admission-only; for the macOS and Windows records (from RunQuota's
+##     are admission-only for CPU and states their memory cap apart; for
+##     the macOS and Windows records (from RunQuota's
 ##     builder: this host cannot be another OS) it names each gap (macOS has
-##     no hard CPU cap; Windows enforces the CPU cap and lacks the
-##     per-group priority); the run report carries the record. Mutation: the
-##     line printing only the levels and not the gaps.
+##     no hard CPU cap; Windows enforces the CPU cap and holds the per-group
+##     priority only with its `job-priority` switch on); the run report
+##     carries the record. Mutation: the line printing only the levels and
+##     not the gaps.
 
 import std/[algorithm, json, os, strutils, tempfiles, unittest]
 
 import repro_build_engine
 import repro_cli_support
+import repro_runquota
+import runquota_process/cgroup_placement
 import runquota_process/enforcement
 
 import repro_test_support
@@ -113,20 +117,30 @@ suite "RA-13 runquota bypass surfaced in build header + report":
   test "the enforcement line names each gap, on every OS's record":
     for os in ["macos", "windows"]:
       let line = runQuotaEnforcementHeaderLine(enforcementRecordFor(os))
-      check "Reprobuild's actions are bounded by admission only" in line
+      check "Reprobuild's actions are bounded by admission only for CPU" in
+        line
+      # The memory cap of the actions is stated on its own (off here: the
+      # zero policy), not folded into "not placed".
+      check "their memory cap: off " in line
       check "not enforced:" in line
       check "priority: " in line
-      check "reclaimed: " in line
       check "memory-cap: " in line
     let mac = runQuotaEnforcementHeaderLine(enforcementRecordFor("macos"))
     check "width-cap: macOS has no hard CPU cap" in mac
+    check "reclaimed: " in mac
+    # Windows enforces the width cap and the reclaimed tree's lower class
+    # (a Job Object limit), and holds a group's priority only with the
+    # `job-priority` switch on, which is off by default.
     let win = runQuotaEnforcementHeaderLine(enforcementRecordFor("windows"))
     check "width-cap=enforced" in win
     check "width-cap: " notin win
-    check "Job Object priority classes per group are not implemented yet" in
-      win
+    check "reclaimed=enforced" in win
+    check "priority: job priority off" in win
     let report = runQuotaReportJson(bypassed = false)
     check report["reprobuildActionsPlaced"].getBool == false
+    check runQuotaReportJson(bypassed = false, memoryCapReportJson(
+      memoryCapPolicy(mcmOff, "", false, CgroupRoot(state: crsOff)), ""))[
+      "reprobuildActionsMemoryCap"]["mode"].getStr == "off"
     check report["enforcement"]["mechanisms"].len == 4
 
   test "build header line does not claim bypass when runquota is active":

@@ -7491,6 +7491,7 @@ proc actionResultJson(item: ActionResult): JsonNode =
     "runQuotaBackend": item.runQuotaBackend,
     "runQuotaSocket": item.runQuotaSocket,
     "leaseId": item.leaseId,
+    "memoryCapWarning": item.memoryCapWarning,
     "stdout": item.stdout,
     "stderr": item.stderr,
     "evidence": evidenceJson(item.evidence)
@@ -7544,17 +7545,102 @@ proc runQuotaEnforcementRecord*(): EnforcementRecord =
     else: false
   hostEnforcementRecord(currentCgroupRoot(switchOn))
 
-proc runQuotaEnforcementHeaderLine*(record: EnforcementRecord): string =
+proc buildMemoryCapPolicyOf*(buildResult: BuildRunResult):
+    ReproMemoryCapPolicy =
+  ## The memory-cap policy a build's actions ran under: the one the engine
+  ## resolved at its first process launch. A build that launched nothing
+  ## has it resolved once by `ensureMemoryCapResolved` right after the
+  ## engine returns; only a result that never went through that (a
+  ## caller outside `repro build`) is resolved here.
+  if buildResult.memoryCap.resolved: buildResult.memoryCap
+  else: currentReproMemoryCapPolicy()
+
+proc ensureMemoryCapResolved*(buildResult: var BuildRunResult) =
+  ## Resolve the build's memory-cap policy once, for a build whose engine
+  ## launched no process and so never did: the build header and both run
+  ## reports then read the stored policy, never the host file again.
+  if not buildResult.memoryCap.resolved:
+    buildResult.memoryCap = currentReproMemoryCapPolicy()
+
+proc runQuotaEnforcementHeaderLine*(record: EnforcementRecord;
+    memoryCap = ReproMemoryCapPolicy(); memoryCapNotEnforced = "";
+    memoryCapApplied = false; bypassed = false): string =
   ## The build-header line stating what is enforced below admission, so a
   ## gap is visible in the build's output rather than silent. Reprobuild
-  ## does not place its own actions in cgroups, so for them only admission
-  ## applies, whatever the host enforces for RunQuota's launchers
-  ## (`runquota run`, `runquota jobserver`) that actions may call.
+  ## places none of its own actions for CPU, so for CPU only admission
+  ## applies to them, whatever the host enforces for RunQuota's launchers
+  ## (`runquota run`, `runquota jobserver`) that actions may call. Their
+  ## MEMORY CAP is Reprobuild's own to apply (each capped action in a leaf,
+  ## job or walk of its own), so the line states it separately: off,
+  ## lifted, advisory or kill, enforced or not and why
+  ## (`memoryCapStateText`).
   "runQuota enforcement: Reprobuild's actions are bounded by admission " &
-    "only (not placed in cgroups); for RunQuota's launchers here, " &
-    record.summaryLine
+    "only for CPU (not placed for CPU); their memory cap: " &
+    memoryCapStateText(memoryCap, memoryCapNotEnforced, memoryCapApplied,
+      bypassed) &
+    "; for RunQuota's launchers here, " & record.summaryLine
 
-proc runQuotaReportJson*(bypassed: bool): JsonNode =
+proc memoryCapReportJson*(memoryCap: ReproMemoryCapPolicy;
+                          notEnforced: string;
+                          warnings: openArray[JsonNode] = [];
+                          applied = false; bypassed = false): JsonNode =
+  ## The memory cap of Reprobuild's actions, for the run report's
+  ## `runQuota` object: the mode and where it came from, whether it is
+  ## enforced (and the note that says why not), and the advisory /
+  ## cap-reached warnings of actions that otherwise succeeded.
+  let mode =
+    if bypassed or not memoryCap.active: "off"
+    elif memoryCap.envValue in ["advisory", "kill"]: memoryCap.envValue
+    elif memoryCap.envValue == "off":
+      # Lifted where the host file has it on (the tree is still measured);
+      # where the host file has it off there is nothing to lift: off.
+      (if memoryCap.hostMode == mcmOff: "off" else: "lifted")
+    elif memoryCap.envValue.len > 0:
+      (if memoryCap.hostMode == mcmOff: "kill" else: $memoryCap.hostMode)
+    else: $memoryCap.hostMode
+  result = %*{
+    "mode": mode,
+    "source":
+      if memoryCap.envValue.len > 0: MemoryCapEnvVar else: "host-file",
+    "runValue": memoryCap.envValue,
+    "nested": memoryCap.nested,
+    "enforced": not bypassed and memoryCapEnforced(memoryCap, notEnforced),
+    "bypassed": bypassed,
+    "notEnforced": notEnforced,
+    "applied": applied,
+    "state": memoryCapStateText(memoryCap, notEnforced, applied, bypassed),
+    "warnings": newJArray()
+  }
+  for warning in warnings:
+    result["warnings"].add(warning)
+
+proc memoryCapWarningsJson*(buildResult: BuildRunResult): seq[JsonNode] =
+  ## One entry per action whose memory cap was reached or passed without
+  ## failing it.
+  for item in buildResult.results:
+    if item.memoryCapWarning.len > 0:
+      result.add(%*{"id": item.id, "report": item.memoryCapWarning})
+
+proc memoryCapWarningLines*(buildResult: BuildRunResult): seq[string] =
+  ## The build output's memory-cap warnings: one per action whose cap was
+  ## reached or passed without failing it, and AT MOST ONE for a cap that
+  ## applies but is not enforced -- every action of the build shares that
+  ## reason, so it is said once per build, never once per action.
+  for item in buildResult.results:
+    if item.memoryCapWarning.len > 0:
+      result.add("repro build: WARNING " &
+        item.memoryCapWarning.strip(leading = false))
+  if buildResult.memoryCapNotEnforced.len > 0:
+    # A lifted run's note says the tree is "not measured" (there is no cap
+    # to run without); a cap's says it is "not enforced".
+    let note = buildResult.memoryCapNotEnforced
+    result.add("repro build: WARNING " & note &
+      (if note.startsWith("memory cap not enforced"):
+        "; Reprobuild's actions run without it"
+       else: "; no peak is recorded for the actions of this build"))
+
+proc runQuotaReportJson*(bypassed: bool;
+    memoryCap = newJNull()): JsonNode =
   ## RA-13: machine-readable resource-authority status for the run report.
   ## ``bypassed`` is true when this build launched at least one action with no
   ## RunQuota lease (explicit ``--no-runquota`` / ``REPROBUILD_NO_RUNQUOTA`` or
@@ -7570,8 +7656,11 @@ proc runQuotaReportJson*(bypassed: bool): JsonNode =
       if bypassed: "local-engine-pool-gate-only" else: "runquota",
     "concurrentInvocationsSafe": not bypassed,
     # What is enforced below admission (RunQuota's capability record), and
-    # that Reprobuild's own actions are not placed in cgroups.
+    # that Reprobuild's own actions are not placed for CPU (a memory-capped
+    # action gets a cgroup leaf of its own for the cap alone; see
+    # `reprobuildActionsMemoryCap`).
     "reprobuildActionsPlaced": false,
+    "reprobuildActionsMemoryCap": memoryCap,
     "enforcement": parseJson(runQuotaEnforcementRecord().toJson())
   }
 
@@ -8090,7 +8179,10 @@ proc emitBuildReport(sink: var BuildReportSink;
   sink.member("targetResolutionObserved", %targetResolutions.isSome)
   # RA-13: machine-readable resource-authority status (see
   # ``runQuotaReportJson``).
-  sink.member("runQuota", runQuotaReportJson(buildResult.runQuotaBypassed))
+  sink.member("runQuota", runQuotaReportJson(buildResult.runQuotaBypassed,
+    memoryCapReportJson(buildMemoryCapPolicyOf(buildResult),
+      buildResult.memoryCapNotEnforced, memoryCapWarningsJson(buildResult),
+      buildResult.memoryCapApplied, buildResult.runQuotaBypassed)))
   sink.member("stats", statsJson(buildResult.stats))
 
 proc buildReportJson*(context: BuildReportProviderContext;
@@ -8283,7 +8375,10 @@ proc writeBuildFailureReport*(path: string; buildResult: BuildRunResult;
             "blockedBy": item.blockedBy,
             "reason": item.reason
           })
-    sink.member("runQuota", runQuotaReportJson(buildResult.runQuotaBypassed))
+    sink.member("runQuota", runQuotaReportJson(buildResult.runQuotaBypassed,
+      memoryCapReportJson(buildMemoryCapPolicyOf(buildResult),
+        buildResult.memoryCapNotEnforced, memoryCapWarningsJson(buildResult),
+        buildResult.memoryCapApplied, buildResult.runQuotaBypassed)))
     commitStreamedReport(sink)
   finally:
     abandonStreamedReport(sink)
@@ -14011,7 +14106,14 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       return
     loggedRunQuotaAuthority = true
     logSummary(runQuotaAuthorityHeaderLine(runResult.runQuotaBypassed))
-    logSummary(runQuotaEnforcementHeaderLine(runQuotaEnforcementRecord()))
+    logSummary(runQuotaEnforcementHeaderLine(runQuotaEnforcementRecord(),
+      buildMemoryCapPolicyOf(runResult), runResult.memoryCapNotEnforced,
+      runResult.memoryCapApplied, runResult.runQuotaBypassed))
+    # The memory cap's warnings: an action whose cap was reached or passed
+    # without failing it, and once per build a cap that applies but is not
+    # enforced.
+    for line in memoryCapWarningLines(runResult):
+      logSummary(line)
     # STAGE 2: report the undeclared-environment population beside the
     # resource-authority line, for the same reason — a state the build
     # is in that nobody can see is a state nobody can decide about.
@@ -14402,6 +14504,9 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     warnRunQuotaBypassIfUsed(buildResult,
       enabled = fallbackToRunQuotaBypass)
     warnRestoreOverwrites(buildResult)
+    # Resolved once here when the engine launched nothing (and so never
+    # did); the header and the run reports below read what is stored.
+    buildResult.ensureMemoryCapResolved()
     logRunQuotaAuthority(buildResult)
     finishStat(buildStats, statsEnabled, "repro build total", buildTotalStart)
     buildResult.stats = buildStats
@@ -16259,6 +16364,9 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     warnRunQuotaBypassIfUsed(buildResult,
       enabled = fallbackToRunQuotaBypass)
     warnRestoreOverwrites(buildResult)
+    # Resolved once here when the engine launched nothing (and so never
+    # did); the header and the run reports below read what is stored.
+    buildResult.ensureMemoryCapResolved()
     logRunQuotaAuthority(buildResult)
     finishStat(buildStats, statsEnabled, "repro build total", buildTotalStart)
     buildResult.stats = buildStats

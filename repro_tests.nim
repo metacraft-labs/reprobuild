@@ -33145,6 +33145,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_tests_integration_g14",
     singleReason: ""),
   TestSpec(
+    source: "tests/integration/t_rqm_reprobuild_memory_cap.nim",
+    binary: "build/test-bin/t_rqm_reprobuild_memory_cap",
+    defines: @[],
+    requiresReproBinary: true,
+    requiresMonitorShim: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "",
+    singleReason: "self-spawn marker isMainModule"),
+  TestSpec(
     source: "tests/integration/t_run_consumes_opaque_out_of_tree.nim",
     binary: "build/test-bin/t_run_consumes_opaque_out_of_tree",
     defines: @[],

@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 36,
-    "nimTestBinaries": 3342,
+    "nimTestBinaries": 3343,
     "pureUnitConsolidationGroups": 97,
     "pureUnitTests": 861,
     "staticallyDetectedRuntimeCompilerFlowTests": 165,
-    "testEntries": 3403
+    "testEntries": 3404
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1875,7 +1875,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 30,
-      "integration": 1901,
+      "integration": 1902,
       "platform/destructive": 207,
       "pure unit": 861,
       "unclassified": 404
@@ -2098,9 +2098,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 3342,
+    "nimTestBinaryCount": 3343,
     "pythonTestFileCount": 61,
-    "testEntryCount": 3403
+    "testEntryCount": 3404
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -59993,6 +59993,28 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_rqm_reprobuild_memory_cap",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_build_engine",
+        "repro_cli_support",
+        "repro_core",
+        "repro_depfile",
+        "repro_runquota",
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_rqm_reprobuild_memory_cap.nim",
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 9,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_run_consumes_opaque_out_of_tree",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -60174,6 +60196,7 @@
       "localDependencyShape": [
         "repro_build_engine",
         "repro_cli_support",
+        "repro_runquota",
         "repro_test_support"
       ],
       "owner": "tests/integration",

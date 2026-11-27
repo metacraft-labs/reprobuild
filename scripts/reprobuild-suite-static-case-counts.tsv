@@ -2769,6 +2769,7 @@ tests/integration/t_rqe_cg5_registry_lift_is_gated.nim	nim	1
 tests/integration/t_rqe_m15_action_exports_its_lease.nim	nim	1
 tests/integration/t_rqe_m15_nim_edge_bounded.nim	nim	1
 tests/integration/t_rqe_m15_recorder_cargo_edge_bounded.nim	nim	1
+tests/integration/t_rqm_reprobuild_memory_cap.nim	nim	9
 tests/integration/t_run_consumes_opaque_out_of_tree.nim	nim	1
 tests/integration/t_run_consumes_session_store_out_of_tree.nim	nim	1
 tests/integration/t_run_edge_session_resolver_auto.nim	nim	2
