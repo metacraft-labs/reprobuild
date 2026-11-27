@@ -3529,6 +3529,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "",
     singleReason: "no other source shares its compile options"),
   TestSpec(
+    source: "libs/repro_cargo_edge/tests/t_build_script_edges.nim",
+    binary: "build/test-bin/t_build_script_edges",
+    defines: @[],
+    requiresReproBinary: false,
+    requiresMonitorShim: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_libs_repro_cargo_edge_tests_g01",
+    singleReason: ""),
+  TestSpec(
     source: "libs/repro_cargo_edge/tests/t_build_script_output.nim",
     binary: "build/test-bin/t_build_script_output",
     defines: @[],

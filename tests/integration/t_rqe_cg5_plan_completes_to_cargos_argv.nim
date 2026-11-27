@@ -873,13 +873,24 @@ suite "the plan of a record run":
     # from the interpreted files (the test's stand-in for the launcher).
     var byRun = initTable[string, int]()
     for i, e in edges: byRun[e.run.id] = i
+    let planRootsHere = planRoots(cfg.units)
+    proc expandPlan(text: string): string = expandRecorded(planRootsHere, text)
     proc values(runId, kind: string): seq[string] =
-      ## The run's values of `kind`, `${OUT_DIR}` written as the plan
-      ## names that run's OUT_DIR.
+      ## The run's values of `kind`, expanded on this host as the launcher
+      ## expands them: `${OUT_DIR}` as that run's OUT_DIR, every other token
+      ## as its root.
       let e = edges[byRun[runId]]
+      let roots = parseRecordRoots(OutDirRootLabel & "=" & e.outDir) &
+        planRootsHere
       for v in readDirectiveRecord(directivePath(e.directivesDir,
           kind)).values:
-        result.add v.replace("${" & OutDirRootLabel & "}", e.run.outDir)
+        result.add expandRecorded(roots, v)
+    proc searchPath(v: string): string =
+      ## A `rustc-link-search` value's path, without its `KIND=`.
+      let eq = v.find('=')
+      if eq > 0 and v[0 ..< eq] in ["dependency", "crate", "native",
+          "framework", "all"]: v[eq + 1 .. ^1]
+      else: v
     proc slotOf(token: string): (string, string, string) =
       let parts = token["${slot:".len ..< token.len - 1].split(':')
       (parts[0], parts[1], (if parts.len > 2: parts[2] else: ""))
@@ -895,7 +906,7 @@ suite "the plan of a record run":
       var argv: seq[string]
       for a in u.argv:
         if not a.startsWith("${slot:"):
-          argv.add a
+          argv.add expandPlan(a)
           continue
         let (kind, runId, bin) = slotOf(a)
         for v in values(runId, kind):
@@ -903,22 +914,37 @@ suite "the plan of a record run":
           of "rustc-cfg": argv.add ["--cfg", v]
           of "rustc-check-cfg": argv.add ["--check-cfg", v]
           of "rustc-link-lib": argv.add ["-l", v]
-          of "rustc-link-search-in-out-dir",
-             "rustc-link-search-outside-out-dir": argv.add ["-L", v]
+          of "rustc-link-search-in-out-dir": argv.add ["-L", v]
+          of "rustc-link-search-outside-out-dir": argv.add ["-L", v]
           of "rustc-link-arg-bin":
             let eq = v.find('=')
             if v[0 ..< eq] == bin: argv.add ["-C", "link-arg=" & v[eq + 1 .. ^1]]
           else: argv.add ["-C", "link-arg=" & v]
-      var env = u.env
+      var env: seq[(string, string)]
+      for (name, value) in u.env:
+        if SlotTokenPrefix notin value:
+          env.add (name, expandPlan(value))
+          continue
+        # A path list with slots: only a search path inside an OUT_DIR is on
+        # a dynamic-library path; the other kind never is.
+        var parts: seq[string]
+        for entry in value.split(':'):
+          if not entry.startsWith("${slot:"):
+            parts.add expandPlan(entry)
+            continue
+          let (kind, runId, _) = slotOf(entry)
+          check kind == "rustc-link-search-in-out-dir"
+          for v in values(runId, kind): parts.add searchPath(v)
+        env.add (name, parts.join(":"))
       for s in u.envSlots:
         for v in values(s.run, "rustc-env"):
           let eq = v.find('=')
           env.add (v[0 ..< eq], v[eq + 1 .. ^1])
       env.sort(proc (a, b: (string, string)): int = cmp(a[0], b[0]))
       var closureDirs: seq[string]
-      for c in u.closure: closureDirs.add "${out}/" & c
+      for c in u.closure: closureDirs.add outRoot / c
       closureDirs.sort()
-      compareToOracle(argv, u.cwd, env, closureDirs, false, matched[u.id],
-        oracle, mapper(plan, oracle, reg, ws))
+      compareToOracle(argv, expandPlan(u.cwd), env, closureDirs, false,
+        matched[u.id], oracle, mp)
     completed.sort()
     check completed == @["bdep", "regbs", "sysdep"]

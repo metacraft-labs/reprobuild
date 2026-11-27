@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 36,
-    "nimTestBinaries": 3340,
+    "nimTestBinaries": 3341,
     "pureUnitConsolidationGroups": 97,
-    "pureUnitTests": 860,
+    "pureUnitTests": 861,
     "staticallyDetectedRuntimeCompilerFlowTests": 165,
-    "testEntries": 3401
+    "testEntries": 3402
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -156,13 +156,14 @@
       "targetOs": "soAny"
     },
     {
-      "count": 2,
+      "count": 3,
       "defines": [],
       "dependencyShape": [
         "repro_cargo_edge"
       ],
       "owner": "libs/repro_cargo_edge",
       "sources": [
+        "libs/repro_cargo_edge/tests/t_build_script_edges.nim",
         "libs/repro_cargo_edge/tests/t_record_mode.nim",
         "libs/repro_cargo_edge/tests/t_rqe_cg3_cargo_edge.nim"
       ],
@@ -1876,7 +1877,7 @@
       "graph-fixture": 30,
       "integration": 1901,
       "platform/destructive": 207,
-      "pure unit": 860,
+      "pure unit": 861,
       "unclassified": 403
     },
     "graphOwnedTestArtifacts": [
@@ -2097,9 +2098,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 3340,
+    "nimTestBinaryCount": 3341,
     "pythonTestFileCount": 61,
-    "testEntryCount": 3401
+    "testEntryCount": 3402
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -15082,6 +15083,23 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_build_script_edges",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_cargo_edge"
+      ],
+      "owner": "libs/repro_cargo_edge",
+      "requiresReproBinary": false,
+      "source": "libs/repro_cargo_edge/tests/t_build_script_edges.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_build_script_output",
       "class": "unclassified",
       "classificationReason": "mutates the process environment",
@@ -15094,7 +15112,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_cargo_edge/tests/t_build_script_output.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 8,
+      "staticCaseCount": 13,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -59729,7 +59747,7 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_rqe_cg5_build_script_cfg_and_links.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 1,
+      "staticCaseCount": 2,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

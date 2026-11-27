@@ -38,15 +38,33 @@
 ## - `CC`, `CXX` and `AR` name the C toolchain (`CToolchain`): the store-root
 ##   C toolchain's driver on Linux x86_64, the dev environment's compiler
 ##   elsewhere, which on macOS must be a wrapped Nix clang, never a system
-##   compiler under `/usr/bin` (a platform binary the monitor cannot inject
-##   into); its directory goes first on `PATH`, so a script that runs `cc`
-##   finds the same driver;
+##   compiler under `/usr/bin` or `/bin`, followed through symbolic links (a
+##   platform binary the monitor cannot inject into); its directory goes
+##   first on `PATH`, so a script that runs `cc` finds the same driver. The
+##   variables that would choose another compiler ahead of `CC` are removed
+##   (`isToolchainSelector`): the `cc` crate reads `CC_<target>` (with the
+##   target's `-` or `_`), `TARGET_CC` and `HOST_CC` before `CC`, and the
+##   same for `CXX`, `AR` and `RANLIB`, and cargo reads
+##   `CARGO_TARGET_<TRIPLE>_LINKER`
+##   (https://docs.rs/cc/latest/cc/#external-configuration-via-environment-variables,
+##   https://doc.rust-lang.org/cargo/reference/config.html#targettriplelinker);
 ## - `NUM_JOBS` is 1, the edge's one slot, and `CARGO_MAKEFLAGS`, `MAKEFLAGS`
-##   and `MFLAGS` are not set: the edge serves no jobserver.
+##   and `MFLAGS` are not set: the edge serves no jobserver;
+## - the variables a shell sets for itself (`PWD`, `OLDPWD`, `SHLVL`, `_`)
+##   are taken from neither the dev environment nor the recorded run, and
+##   the recorded `PATH`, which the dev shell's cargo wrapper changes for
+##   itself, gives way to the dev environment's: a dev-shell bump that
+##   changes only those changes no run edge's key, as for the compile edges.
+##   (The engine still sets `PWD` and its own launch variables at launch,
+##   outside the key.)
 ##
 ## WHAT THE RUN EDGE WRITES. Its `OUT_DIR`; the script's standard output,
-## normalised; and one normalised directive file per kind
-## (`build_script_output.DirectiveKinds`), which the units the run feeds read.
+## normalised; one normalised directive file per kind
+## (`build_script_output.DirectiveKinds`), which the units the run feeds
+## read; and the outcome record (`build_script_output.OutcomeFileName`),
+## from which, and not from the exit status, a reader tells a refusal from
+## a build error. The interpreter has a scratch directory of its own besides
+## the script's `TMPDIR`.
 ## It reads the executable and the interpreter (whose code turns the script's
 ## output into those files, so it is a declared, content-checked input), and
 ## whatever the monitor records the script reading, with the
@@ -97,6 +115,11 @@ const
   RunDirectivesDir* = "directives"
   RunStdoutFile* = "stdout"
   RunTmpDir* = "tmp"
+  RunWorkDir* = "interpreter-tmp"
+  ShellVariables = ["PWD", "OLDPWD", "SHLVL", "_"]
+    ## `plan_units.CargoWrapperVariables` without `PATH`, which the dev
+    ## environment gives a run edge.
+  SelectableTools = ["CC", "CXX", "AR", "RANLIB"]
   JobserverVariables = ["CARGO_MAKEFLAGS", "MAKEFLAGS", "MFLAGS"]
   SystemCompilerDirs = ["/usr/bin", "/bin", "/usr/sbin", "/sbin"]
 
@@ -138,7 +161,7 @@ type
       ## what the compile edge adds: the remap of a registry crate
     compileEnv*: seq[string]  ## the variables cargo set for the compile
     executable*: string
-    runDir*, outDir*, directivesDir*, stdoutFile*, tmpDir*: string
+    runDir*, outDir*, directivesDir*, stdoutFile*, tmpDir*, workDir*: string
     runArgv*: seq[string]
       ## the script and its arguments, as the interpreter runs them
     runCwd*: string
@@ -155,6 +178,34 @@ proc buildScriptRunEdgeId*(r: PlanRun): string =
 
 proc directivePath*(directivesDir, kind: string): string =
   directivesDir / directiveFileName(kind)
+
+proc isSystemCompiler*(path: string): bool =
+  ## Whether ``path``, followed through symbolic links, is a system binary
+  ## under `/usr/bin`, `/bin`, `/usr/sbin` or `/sbin`: on macOS a platform
+  ## binary the monitor cannot inject into.
+  var real = path
+  try:
+    real = expandFilename(path)
+  except OSError:
+    discard
+  for p in [path, real]:
+    for dir in SystemCompilerDirs:
+      if p.startsWith(dir & "/") or p == dir: return true
+
+proc isToolchainSelector*(name, target, host: string): bool =
+  ## Whether ``name`` chooses a C toolchain or linker ahead of `CC`, `CXX`,
+  ## `AR` and cargo's own linker setting, for a run whose `TARGET` and `HOST`
+  ## are ``target`` and ``host`` (see the module docstring).
+  for tool in SelectableTools:
+    if name in ["TARGET_" & tool, "HOST_" & tool]: return true
+    for triple in [target, host]:
+      if triple.len == 0: continue
+      if name in [tool & "_" & triple, tool & "_" & triple.replace('-', '_')]:
+        return true
+  for triple in [target, host]:
+    if triple.len > 0 and name == "CARGO_TARGET_" &
+        triple.toUpperAscii.replace('-', '_').replace('.', '_') & "_LINKER":
+      return true
 
 proc checkConfig(cfg: BuildScriptEdgesConfig) =
   ## Raises `ValueError` for a configuration the edges cannot be built from.
@@ -173,11 +224,10 @@ proc checkConfig(cfg: BuildScriptEdgesConfig) =
   when defined(macosx):
     for path in [cfg.cToolchain.cc, cfg.cToolchain.cxx, cfg.cToolchain.ar,
                  bin / "cc"]:
-      for dir in SystemCompilerDirs:
-        if path.startsWith(dir & "/") or path == dir:
-          raise newException(ValueError, "the C toolchain of a run edge " &
-            "on macOS must be a wrapped Nix clang, not the system's " &
-            path & ": the monitor cannot inject into a platform binary")
+      if isSystemCompiler(path):
+        raise newException(ValueError, "the C toolchain of a run edge " &
+          "on macOS must be a wrapped Nix clang, not the system's " &
+          path & ": the monitor cannot inject into a platform binary")
   for entry in cfg.devEnv:
     if entry.find('=') <= 0:
       raise newException(ValueError, "a development-environment variable " &
@@ -219,7 +269,8 @@ type Prepared = object
   compileUnit: PlanUnit
   registry: bool
   compileCargoArgv, compileArgvDifference, compileEnv: seq[string]
-  executable, runDir, outDir, directivesDir, stdoutFile, tmpDir: string
+  executable, runDir, outDir, directivesDir, stdoutFile, tmpDir,
+    workDir: string
   runArgv: seq[string]
   runCwd: string
   runEnv: seq[string]
@@ -347,6 +398,7 @@ proc prepare(r: PlanRun; cfg: BuildScriptEdgesConfig;
   p.directivesDir = p.runDir / RunDirectivesDir
   p.stdoutFile = p.runDir / RunStdoutFile
   p.tmpDir = p.runDir / RunTmpDir
+  p.workDir = p.runDir / RunWorkDir
   p.runCwd = expandIn(roots, r.cwd, rwhere)
   if r.argv.len == 0 or r.argv[0] != u.executable:
     refused.add (r.id, "does not run its compile unit's executable")
@@ -356,11 +408,20 @@ proc prepare(r: PlanRun; cfg: BuildScriptEdgesConfig;
   var env: seq[(string, string)]
   for entry in cfg.devEnv:
     let eq = entry.find('=')
+    if entry[0 ..< eq] in ShellVariables: continue
     env.setVar(entry[0 ..< eq], entry[eq + 1 .. ^1])
+  var target, host: string
   for (name, value) in r.env:
+    if name in CargoWrapperVariables: continue
+    if name == "TARGET": target = value
+    if name == "HOST": host = value
     env.setVar(name, expandIn(roots, value, rwhere & " (" & name & ")"))
   for name in r.envRemoved: env.delVar(name)
   for name in JobserverVariables: env.delVar(name)
+  var selectors: seq[string]
+  for (name, _) in env:
+    if isToolchainSelector(name, target, host): selectors.add name
+  for name in selectors: env.delVar(name)
   env.setVar("OUT_DIR", p.outDir)
   env.setVar("RUSTC", cfg.rustc)
   env.setVar("TMPDIR", p.tmpDir)
@@ -385,7 +446,7 @@ proc interpreterArgv(p: Prepared; cfg: BuildScriptEdgesConfig): seq[string] =
     "--package", p.run.package & "@" & p.run.version,
     "--run", p.run.id,
     "--out-dir", p.outDir, "--directives", p.directivesDir,
-    "--stdout", p.stdoutFile, "--tmp", p.tmpDir]
+    "--stdout", p.stdoutFile, "--tmp", p.tmpDir, "--work", p.workDir]
   for root in planRoots(cfg.units):
     result.add ["--root", root.label & "=" & root.path]
   result.add "--"
@@ -402,8 +463,8 @@ proc build(p: Prepared; cfg: BuildScriptEdgesConfig): BuildScriptEdge =
     commandStatsId = BuildScriptCompileStatsId,
     isolateHostEnvironment = true, scratchDirs = p.compileScratch)
   var outputs = @[p.outDir, p.stdoutFile]
-  for kind in DirectiveKinds:
-    outputs.add directivePath(p.directivesDir, kind)
+  for name in outputFileNames():
+    outputs.add p.directivesDir / name
   var run = action(buildScriptRunEdgeId(p.run),
     interpreterArgv(p, cfg),
     cwd = p.runCwd,
@@ -423,13 +484,14 @@ proc build(p: Prepared; cfg: BuildScriptEdgesConfig): BuildScriptEdge =
   # script downloads nothing).
   run.networkMode = netDenied
   run.removeBeforeRun = @[p.outDir]
-  run.scratchDirs = @[p.tmpDir]
+  run.scratchDirs = @[p.tmpDir, p.workDir]
   BuildScriptEdge(run: p.run, compileUnit: p.compileUnit,
     registry: p.registry, compileCargoArgv: p.compileCargoArgv,
     compileArgvDifference: p.compileArgvDifference,
     compileEnv: p.compileEnv, executable: p.executable, runDir: p.runDir,
     outDir: p.outDir, directivesDir: p.directivesDir,
-    stdoutFile: p.stdoutFile, tmpDir: p.tmpDir, runArgv: p.runArgv,
+    stdoutFile: p.stdoutFile, tmpDir: p.tmpDir, workDir: p.workDir,
+    runArgv: p.runArgv,
     runCwd: p.runCwd, runEnv: p.runEnv, compile: compile, runAction: run)
 
 proc refusalMessage(refused: seq[(string, string)]): string =
