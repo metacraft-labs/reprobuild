@@ -1707,6 +1707,12 @@ proc evidenceShipPathUnit*(): string =
   # there starts the shipping unit, whose privileged first step moves it
   # into the outbox.
   "DirectoryNotEmpty=" & EgressDropDir & "\n" &
+  # And the outbox from before §13 decision 181: the engine units that keep
+  # the bootstrap engine on a migrated host (store-verify, secrets, the apt
+  # hook) write their records there for the host's life, and the harvest
+  # moves them (A11 round 27). Without this they would wait for the timer.
+  (when mutated("path-unit-ignores-legacy-outbox"): "" else:
+     "DirectoryNotEmpty=" & LegacyOutboxPath & "\n") &
   # No trigger limit either: a path unit that hits one fails and stays
   # failed (A11 audit F2).
   (when mutated("evidence-path-rate-limited"): "" else:

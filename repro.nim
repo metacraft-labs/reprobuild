@@ -1864,6 +1864,7 @@ package reprobuild:
       let hookScopeTest = source == "tests/unit/test_dev_shell_hook_scope.py"
       let nixCacheTest = source == "tests/integration/test_nix_daemon_cache.py"
       let sourceRevisionTest = source == "tests/unit/test_source_revision.py"
+      let buildAppsWidthTest = source == "tests/unit/test_build_apps_width.py"
       let bumpVersionTest = source == "tests/unit/test_bump_version.py"
       let ciLockCredentialsTest =
         source == "tests/unit/test_ci_reconcile_lock_credentials.py"
@@ -1897,6 +1898,10 @@ package reprobuild:
           # The script under test, and the two callers whose sources the
           # single-derivation cases read.
           @["scripts/source_revision.sh", "scripts/build_apps.sh", "repro.nim"]
+        elif buildAppsWidthTest:
+          # The width resolver it sources, and the script whose wiring of the
+          # resolved width its source cases read.
+          @["scripts/lib/build_width.sh", "scripts/build_apps.sh"]
         elif ciLockCredentialsTest:
           # The script under test, and the workflow whose reconcile step the
           # contract cases read.
@@ -1968,6 +1973,10 @@ package reprobuild:
       if sourceRevisionTest:
         appendRegisteredActionToolIdentityRefs(pyExecute.id,
           ["bash", "git", "mkdir"])
+      # Real bash sources the resolver; with its inputs pinned it runs no
+      # other tool.
+      if buildAppsWidthTest:
+        appendRegisteredActionToolIdentityRefs(pyExecute.id, ["bash"])
       # Real git throughout: `git config --get-urlmatch` for the scope cases,
       # and `git clone` plus `git http-backend` (shipped in git's exec-path)
       # for the loopback-forge cases.

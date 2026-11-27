@@ -28,8 +28,19 @@
 ## compares a single property. Generation 0's own units are not judged by
 ## that comparison at all: the effective check covers the floored units.
 ##
+## And (third suite, A9 review round 25; §13 decision 196) what a recovery
+## starts again: never the units that run only at boot (the boot-hold
+## unit, which ``sysinit.target`` requires, and the boot-confirm unit),
+## never the re-assert unit or a target, never a unit a revert holds; and a
+## start systemd skipped on a condition is reported as skipped; and (§13
+## decision 197) a run-once unit -- ``Type=oneshot`` without
+## ``RemainAfterExit=`` -- that already succeeded this boot is not run
+## again, while one that failed or never ran is.
+##
 ## Falsifying builds, red here: ``revert-hold-staging-not-synced`` (the
-## first test), ``revert-hold-not-synced`` (the second).
+## first test), ``revert-hold-not-synced`` (the second),
+## ``recovery-starts-boot-only-units`` (the third suite's first test),
+## ``recovery-reruns-run-once-units`` (its second).
 ##
 ## *Mocking.* None: the real file system, the real system calls, as the
 ## kernel reports them. ``strace`` is the dev shell's (flake.nix), resolved
@@ -42,6 +53,9 @@ import repro_infra/errors
 import repro_infra/service_floor
 import repro_addon/addon_apply
 import repro_addon/effective_floor
+import repro_addon/generation0
+import repro_addon/ledger
+import repro_addon/reassert
 
 if paramCount() == 3 and paramStr(1) == "--place-hold":
   discard placeRevertHold(paramStr(2), "a9r23.service", paramStr(3))
@@ -174,3 +188,39 @@ suite "A9 review round 23: widening egress or ProcSubset= by a drop-in":
     checkpoint p
     check ("the drop-in " & planted & " is not one the add-on installed") in p
     check "[rule:foreign-drop-in key:DropInPaths]" in p
+
+suite "A9 review round 25: what a recovery starts again":
+  proc unitEntry(u: string): LedgerEntry =
+    LedgerEntry(class: lcUnit, path: "/etc/systemd/system/" & u, unit: u,
+                enabled: true, started: true)
+  let entries = @[unitEntry(BootHoldUnit), unitEntry(BootConfirmUnit),
+    unitEntry(ReassertUnit), unitEntry("repro-addon.target"),
+    unitEntry("a.service"), unitEntry("t@1.service"), unitEntry("once.service"),
+    LedgerEntry(class: lcRevertHold, unit: "t@.service",
+                path: "/etc/systemd/system/t@.service.d/" & RevertHoldName)]
+  test "the boot-only units are left alone, held units kept down, the rest started":
+    let c = committedStarts(entries, proc (p: string): bool = true,
+                            proc (u: string): bool = false)
+    check c.start == @["a.service", "once.service"]
+    check c.skipped == @[BootHoldUnit, BootConfirmUnit]
+    check c.kept == @["t@1.service"]
+  test "a run-once unit that already succeeded this boot is not run again":
+    let c = committedStarts(entries, proc (p: string): bool = true,
+                            proc (u: string): bool = u == "once.service")
+    check c.start == @["a.service"]
+    check c.alreadyRan == @["once.service"]
+  test "a run-once unit is judged from systemd's properties":
+    let ran = "Type=oneshot\nRemainAfterExit=no\nResult=success\n" &
+              "ExecMainExitTimestampMonotonic=8123456\n"
+    check ranOnceThisBootOf(ran)
+    # Not run since the boot, failed, kept active, or not a oneshot: started.
+    check not ranOnceThisBootOf(ran.replace("=8123456", "=0"))
+    check not ranOnceThisBootOf(ran.replace("Result=success", "Result=exit-code"))
+    check not ranOnceThisBootOf(ran.replace("RemainAfterExit=no", "RemainAfterExit=yes"))
+    check not ranOnceThisBootOf(ran.replace("Type=oneshot", "Type=simple"))
+  test "a start skipped on a condition is reported as skipped":
+    check startedLine("a.service", false, 0, "", "no\n").startsWith("skipped a.service")
+    check startedLine("a.service", false, 0, "", "yes\n") == "started a.service"
+    check startedLine("a.service", true, 0, "", "") == "started a.service (queued)"
+    check "failed: boom" in startedLine("a.service", false, 1, "boom\n", "")
+

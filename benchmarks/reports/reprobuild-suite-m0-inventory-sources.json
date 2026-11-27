@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 36,
-    "nimTestBinaries": 3319,
+    "nimTestBinaries": 3320,
     "pureUnitConsolidationGroups": 97,
     "pureUnitTests": 857,
     "staticallyDetectedRuntimeCompilerFlowTests": 165,
-    "testEntries": 3379
+    "testEntries": 3381
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1876,7 +1876,7 @@
       "integration": 1887,
       "platform/destructive": 206,
       "pure unit": 857,
-      "unclassified": 399
+      "unclassified": 401
     },
     "graphOwnedTestArtifacts": [
       {
@@ -2096,9 +2096,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 3319,
-    "pythonTestFileCount": 60,
-    "testEntryCount": 3379
+    "nimTestBinaryCount": 3320,
+    "pythonTestFileCount": 61,
+    "testEntryCount": 3381
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -10906,8 +10906,8 @@
       "owner": "libs/repro_addon",
       "requiresReproBinary": false,
       "source": "libs/repro_addon/tests/t_addon_floor_round23.nim",
-      "sourceSuiteCount": 2,
-      "staticCaseCount": 4,
+      "sourceSuiteCount": 3,
+      "staticCaseCount": 8,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -11227,6 +11227,24 @@
       "source": "libs/repro_addon/tests/t_addon_legacy_apt_closure_adoption.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 9,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_addon_legacy_move_round27",
+      "class": "unclassified",
+      "classificationReason": "imports `posix`, which grants out-of-process reach",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_addon",
+        "repro_core"
+      ],
+      "owner": "libs/repro_addon",
+      "requiresReproBinary": false,
+      "source": "libs/repro_addon/tests/t_addon_legacy_move_round27.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 8,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -70048,6 +70066,21 @@
       "source": "tests/unit/test_bootstrap_dry_run_outputs.py",
       "sourceSuiteCount": 1,
       "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "",
+      "class": "unclassified",
+      "classificationReason": "imports `subprocess`, which this scan does not recognize; refusing to call it pure rather than assuming it is",
+      "defines": [],
+      "language": "python",
+      "localDependencyShape": [],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/test_build_apps_width.py",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 20,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

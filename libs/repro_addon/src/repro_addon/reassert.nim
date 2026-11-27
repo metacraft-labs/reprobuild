@@ -35,7 +35,7 @@
 ## ``<state dir>/addon/reassert-report``. In ``--boot`` mode nothing here
 ## raises and the exit status is 0, whatever happened.
 
-import std/[os, posix, strutils, times]
+import std/[os, posix, strutils, tables, times]
 
 import repro_core/file_lock
 import repro_core/host_apply_lock
@@ -443,40 +443,127 @@ proc recoverPendingSwitch*(stateDir: string; atBoot: bool;
   afterRecovery(recoverMarker(stateDir, atBoot, driver, bootConfirm), stateDir,
                 atBoot = atBoot and not bootConfirm)
 
-proc startCommittedUnits*(stateDir: string; noBlock: bool): seq[string] =
-  ## After a recovery: every unit the current generation started is
-  ## started if it is not active (a boot may have tried it from the
-  ## interrupted state and given up). ``--no-block`` at boot, where the
-  ## boot transaction owns the order.
-  let lp = ledgerCopyPath(stateDir)
-  if not fileExists(lp): return
-  let entries = readLedger(lp).entries
-  # A unit a revert holds (§13 decision 133) is not started: its hold
-  # fails the start, and a queued one (``--no-block``) would be reported
-  # as started although it never ran. Its hold names it, or its template.
+const BootOnlyUnits* = [BootHoldUnit, BootConfirmUnit]
+  ## The add-on's units that run only at boot and are never started at run
+  ## time (§13 decision 196): the boot-hold unit, which ``sysinit.target``
+  ## requires and which re-arms a pending switch's holds before any trigger
+  ## starts, and the boot-confirm unit, a boot run of the replay with the
+  ## boot's confirm cap. Both are conditioned on the pending marker and
+  ## inactive once they have run, so "the generation started it and it is
+  ## not active" says nothing about them.
+
+type CommittedStarts* = object
+  ## What a recovery starts again (``committedStarts``).
+  start*: seq[string]  ## units to start, in ledger order
+  kept*: seq[string]   ## units a revert holds, kept down
+  skipped*: seq[string] ## units that run only at boot, never started here
+  alreadyRan*: seq[string]
+    ## run-once units (``Type=oneshot`` without ``RemainAfterExit=``) that
+    ## already succeeded this boot, left alone (§13 decision 197)
+
+proc committedStarts*(entries: openArray[LedgerEntry];
+                      holdPresent: proc (path: string): bool;
+                      ranOnceThisBoot: proc (unit: string): bool): CommittedStarts =
+  ## The units of the current ledger a recovery starts again (§7.7): every
+  ## unit the generation left started, but targets (they follow their
+  ## units), the re-assert unit (it is the one running), the units that run
+  ## only at boot (``BootOnlyUnits``) and the units a revert holds (§13
+  ## decision 133: its hold fails the start, and a queued one would be
+  ## reported as started although it never ran). A hold names its unit or
+  ## its template; ``holdPresent`` tells whether the hold file the ledger
+  ## records is still there. A run-once unit that already succeeded this
+  ## boot (``ranOnceThisBoot``, §13 decision 197) is left alone: it is
+  ## inactive because it ran, not because the dead switch kept it from
+  ## running. One that failed this boot, or never ran, is started.
   var held: seq[string]
   when not mutated("recovery-starts-held-units"):
     for e in entries:
-      if e.class == lcRevertHold and e.unit.len > 0 and fileExists(e.path):
+      if e.class == lcRevertHold and e.unit.len > 0 and holdPresent(e.path):
         held.add(e.unit)
   for e in entries:
-    # Targets follow their units, and this unit is the one running.
     if e.class != lcUnit or not e.started or e.unit.len == 0 or
         e.unit.endsWith(".target") or e.unit == ReassertUnit:
       continue
+    when not mutated("recovery-starts-boot-only-units"):
+      if e.unit in BootOnlyUnits:
+        result.skipped.add(e.unit)
+        continue
     let tmpl = templateOf(e.unit)
     if e.unit in held or (tmpl.len > 0 and tmpl in held):
-      result.add("kept " & e.unit & " down: a revert holds it (its floor " &
-                 "check refused it; an apply whose check passes releases it)")
+      result.kept.add(e.unit)
       continue
+    when not mutated("recovery-reruns-run-once-units"):
+      if ranOnceThisBoot(e.unit):
+        result.alreadyRan.add(e.unit)
+        continue
+    result.start.add(e.unit)
+
+proc startedLine*(unit: string; noBlock: bool; exitCode: int;
+                  output, conditionResult: string): string =
+  ## The report line for one start. A queued start (``--no-block``) is not
+  ## waited for, so only that it was queued is known. A start systemd
+  ## skipped because a condition of the unit does not hold
+  ## (``ConditionResult=no``, systemd.unit(5) "Conditions and Asserts")
+  ## ran nothing and is reported as skipped, not as started.
+  if exitCode != 0:
+    return "started " & unit & " (failed: " & output.strip() & ")"
+  if noBlock:
+    return "started " & unit & " (queued)"
+  if conditionResult.strip() == "no":
+    return "skipped " & unit & " (its condition does not hold, so " &
+      "systemd ran nothing)"
+  "started " & unit
+
+proc ranOnceThisBootOf*(show: string): bool =
+  ## Whether ``systemctl show`` output of one unit (``Type``,
+  ## ``RemainAfterExit``, ``Result``, ``ExecMainExitTimestampMonotonic``)
+  ## is a run-once unit that has succeeded since this boot began: a
+  ## ``Type=oneshot`` unit without ``RemainAfterExit=yes`` whose main
+  ## process exited this boot (the monotonic clock starts at the boot, and
+  ## systemd reports 0 for a unit that has not run since;
+  ## systemd.exec(5), org.freedesktop.systemd1(5)) with ``Result=success``.
+  var kv: Table[string, string]
+  for l in show.splitLines():
+    let i = l.find('=')
+    if i > 0: kv[l[0 ..< i]] = l[i + 1 .. ^1].strip()
+  var exited = 0'i64
+  try: exited = parseBiggestInt(kv.getOrDefault("ExecMainExitTimestampMonotonic", "0"))
+  except ValueError: exited = 0
+  kv.getOrDefault("Type") == "oneshot" and
+    kv.getOrDefault("RemainAfterExit") != "yes" and
+    kv.getOrDefault("Result") == "success" and exited > 0
+
+proc startCommittedUnits*(stateDir: string; noBlock: bool): seq[string] =
+  ## After a recovery: every unit the current generation started is
+  ## started if it is not active (a boot may have tried it from the
+  ## interrupted state and given up), as ``committedStarts`` selects them.
+  ## ``--no-block`` at boot, where the boot transaction owns the order.
+  let lp = ledgerCopyPath(stateDir)
+  if not fileExists(lp): return
+  let c = committedStarts(readLedger(lp).entries,
+    proc (p: string): bool = fileExists(p),
+    proc (u: string): bool = ranOnceThisBootOf(runSystemctl(@["show", "-p",
+      "Type,RemainAfterExit,Result,ExecMainExitTimestampMonotonic", "--",
+      u]).output))
+  for u in c.skipped:
+    result.add("left " & u & " alone: it runs only at boot")
+  for u in c.alreadyRan:
+    result.add("left " & u & " alone: it already ran this boot")
+  for u in c.kept:
+    result.add("kept " & u & " down: a revert holds it (its floor " &
+               "check refused it; an apply whose check passes releases it)")
+  for u in c.start:
     # Never a second instance beside one that is still alive (an
     # exclusive unit whose stop could not be confirmed, §7.3).
-    if not unitIsActive(e.unit) and unitAliveness(e.unit) == uaEmpty:
-      let args = if noBlock: @["start", "--no-block", "--", e.unit]
-                 else: @["start", "--", e.unit]
+    if not unitIsActive(u) and unitAliveness(u) == uaEmpty:
+      let args = if noBlock: @["start", "--no-block", "--", u]
+                 else: @["start", "--", u]
       let r = runSystemctl(args)
-      result.add("started " & e.unit & (if r.exitCode == 0: "" else:
-        " (failed: " & r.output.strip() & ")"))
+      var cond = ""
+      if r.exitCode == 0 and not noBlock:
+        cond = runSystemctl(@["show", "-p", "ConditionResult", "--value",
+                              "--", u]).output
+      result.add(startedLine(u, noBlock, r.exitCode, r.output, cond))
 
 proc checkCurrent*(stateDir: string; r: var ReassertReport) =
   ## Step 2 of the module header, adding to ``r``.

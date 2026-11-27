@@ -15,6 +15,29 @@ covers the behavior you touched.
 - `just test` runs the local Nim test suite.
 - `just lint` runs repository requirement and Nim source checks.
 
+### How many C compilers `just build` runs
+
+Each `nim c` in `just build` runs at most N C compilers at once
+(`--parallelBuild:N`). `scripts/lib/build_width.sh` chooses N. It takes the
+first of these that applies:
+
+1. `REPRO_BUILD_JOBS`, if you set it. A value that is not a positive integer
+   stops the build before anything compiles.
+2. `RUNQUOTA_RUN_WIDTH`, the width granted to a build that runs under a
+   RunQuota lease.
+3. `NIX_BUILD_CORES`, but only in a real Nix build. The `nix develop` shell
+   (and direnv) overwrites `NIX_BUILD_CORES` with its own value, which is the
+   CPU count when Nix's `cores` setting is `0`. That value is not used.
+4. `min(cores / 2, GiB of available memory, 8)`, and at least 1.
+
+The first line of the build log names the width and where it came from. To
+change it, set the variable inside the shell, or export it before you enter
+the shell, which leaves it untouched:
+
+```sh
+REPRO_BUILD_JOBS=4 nix develop --command just build
+```
+
 ## Test-helper dependency lists, and hosts that deny ptrace
 
 Some tests run helper binaries from `build/bin` (the Evidence sink
