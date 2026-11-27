@@ -30,11 +30,12 @@
 ##    `.repro/build/cargo-fetch`.
 ## 3. The record run (`plan_run`, the process of the record-only edge,
 ##    `plan_edge.cargoPlanArgv`), run under the io monitor in the workspace
-##    root. What it read, outside its own scratch directory and plan, is
+##    root, from a closed environment (`closedRecordEnv`: the toolchain's
+##    `PATH` and a private `TMPDIR`), in a directory of its own. What it read, outside its own scratch directory and plan, is
 ##    reported as the fragment's evaluation inputs, so a change of a
-##    manifest, the lock, a prefix or a tool re-runs graph production. Its
-##    scratch directory is emptied before it runs, as the engine empties an
-##    edge's, and is never evidence.
+##    manifest, the lock, a prefix or a tool re-runs graph production, as
+##    does a change of the toolchain or the `PATH` it was resolved from
+##    (`toolchainEvaluationInputs`). Its directory is never evidence.
 ## 4. The plan's edges (`plan_units.planUnitEdges`). A plan with a unit these
 ##    edges do not build (a build script, a fed unit, a proc-macro, ...) is
 ##    refused as a whole, and the workspace goes to Mode B: it is built
@@ -44,7 +45,7 @@
 ## and profile of Mode B's delegated build, so the workspace builds the same
 ## units in either mode.
 
-import std/[os, strutils, tables, times]
+import std/[os, strutils, tables, tempfiles, times]
 
 import repro_provider_runtime
 import repro_cargo_fetch
@@ -60,10 +61,6 @@ const
   PlanDirRel* = ".repro/build/cargo-plan"
     ## The record run's directory under the workspace root.
   PlanFileRel* = PlanDirRel & "/plan.rbsz"
-  PlanScratchRel* = PlanDirRel & "/scratch"
-  PlanCaptureRel = PlanDirRel & "/capture"
-    ## Where the monitor's capture files are written (outside the scratch
-    ## directory, which the record run requires to be empty).
   UnitsOutRel* = ".repro/build/cargo-units"
     ## `${out}`: the root of the plan's per-unit output directories.
   FetchStateRel* = ".repro/build/cargo-fetch"
@@ -121,12 +118,58 @@ proc emptyDir(path: string) =
     except OSError: discard
   removeDir(path)
 
-proc planWorkspace*(projectRoot, cargo, rustc, toolchainPath: string):
-    PlanGraph =
+type
+  PlanToolchain* = object
+    ## The tools graph production runs and the edges are given, resolved by
+    ## the caller and keyed by it (`toolchainEvaluationInputs`).
+    cargo*, rustc*: string
+    cc*: string
+      ## The C driver rustc links with ("" when there is none).
+
+proc toolchainPath*(t: PlanToolchain): string =
+  ## The `PATH` of the record run's closed environment and of every unit
+  ## edge: the directories of cargo, rustc and the C driver, nothing else.
+  var dirs: seq[string]
+  for exe in [t.cargo, t.rustc, t.cc]:
+    if exe.len > 0 and parentDir(exe) notin dirs:
+      dirs.add parentDir(exe)
+  dirs.join($PathSep)
+
+proc toolchainEvaluationInputs*(t: PlanToolchain): seq[GraphEvaluationInput] =
+  ## What the toolchain was resolved from and what it is: the `PATH` it was
+  ## found on, and the content of each tool. A change of either re-runs
+  ## graph production.
+  result.add environmentInput("PATH")
+  for exe in [t.cargo, t.rustc, t.cc]:
+    if exe.len > 0: result.add fileReadInput(exe)
+
+proc closedRecordEnv*(t: PlanToolchain; tmp: string): seq[string] =
+  ## The record run's closed environment (`plan_run --env`): the
+  ## toolchain's `PATH` and a private `TMPDIR`. The run adds the edge-private
+  ## `CARGO_HOME` and `HOME`; nothing of the provider's environment reaches
+  ## cargo, so no variable cargo reads (`RUSTFLAGS`, `CARGO_PROFILE_*`,
+  ## `CARGO_BUILD_*`, `CARGO_TARGET_<triple>_*`, ...) shapes the plan.
+  @["PATH=" & toolchainPath(t), "TMPDIR=" & tmp]
+
+proc publishPlan(runPlan, planFile: string) =
+  ## Copy the run's plan to `planFile`, the workspace's last plan, for
+  ## inspection; replaced in one rename, so a concurrent reader sees a whole
+  ## plan.
+  createDir(parentDir(planFile))
+  let staged = runPlan & ".publish"
+  copyFile(runPlan, staged)
+  moveFile(staged, planFile)
+
+proc planWorkspace*(projectRoot: string; tools: PlanToolchain): PlanGraph =
   ## Graph production for the workspace at `projectRoot` (the module
-  ## docstring). `toolchainPath` is the `PATH` every unit edge is given, the
-  ## only toolchain variable: what finds the C driver rustc links with. Never raises for a workspace it cannot build from the plan:
+  ## docstring). Never raises for a workspace it cannot build from the plan:
   ## it returns `ok = false` with the reason.
+  ##
+  ## Each record run has a directory of its own under `PlanDirRel`
+  ## (`run-*`), holding its scratch directory, the monitor's capture files,
+  ## its temporary directory and its plan, and removed when the run is done:
+  ## two evaluations of one workspace at once never empty each other's
+  ## state. The plan is then copied to `PlanFileRel`.
   let root = absolutePath(projectRoot)
   result.planFile = root / PlanFileRel
   when not defined(posix):
@@ -174,32 +217,35 @@ proc planWorkspace*(projectRoot, cargo, rustc, toolchainPath: string):
   except CatchableError as err:
     result.reason = "the fetch wave failed: " & err.msg
     return
-  # 3. The record run.
-  let scratch = root / PlanScratchRel
-  let capture = root / PlanCaptureRel
+  # 3. The record run, in a directory of its own.
+  var runDir = ""
   try:
-    emptyDir(scratch)
-    emptyDir(capture)
-    if fileExists(result.planFile): removeFile(result.planFile)
+    createDir(root / PlanDirRel)
+    runDir = createTempDir("run-", "", root / PlanDirRel)
+    createDir(runDir / "tmp")
   except OSError as err:
-    result.reason = "the record run's directories cannot be emptied: " &
-      err.msg
+    result.reason = "the record run's directory cannot be made: " & err.msg
     return
+  defer:
+    try: emptyDir(runDir)
+    except OSError: discard
+  let runPlan = runDir / "plan.rbsz"
   let argv = cargoPlanArgv(CargoPlanEdgeConfig(name: "workspace",
-    projectRoot: root, planFile: PlanFileRel, scratchDir: PlanScratchRel,
-    wrapper: wrapper, cargo: cargo, rustc: rustc, storeRoot: store,
-    cargoArgs: @PlanCargoArgs, crates: crates))
+    projectRoot: root, planFile: relativePath(runPlan, root),
+    scratchDir: relativePath(runDir / "scratch", root),
+    wrapper: wrapper, cargo: tools.cargo, rustc: tools.rustc,
+    storeRoot: store, cargoArgs: @PlanCargoArgs, crates: crates,
+    closedEnv: closedRecordEnv(tools, runDir / "tmp")))
   var observed: ObservedReads
   let started = getTime()
   var run: MonitoredRun
   try:
-    run = runMonitoredTool(argv, root, capture, "record", "cargo plan",
-      observed)
+    run = runMonitoredTool(argv, root, runDir / "capture", "record",
+      "cargo plan", observed)
   except MonitorUnavailableError as err:
     result.reason = err.msg
     return
-  result.observed = observed.withoutOwnPaths(
-    [scratch, capture, result.planFile])
+  result.observed = observed.withoutOwnPaths([runDir, result.planFile])
   result.stamps = observedStamps(result.observed)
   result.reusable = result.observed.incomplete.len == 0 and
     unstableObservedReads(result.observed, initTable[string, string](),
@@ -210,11 +256,12 @@ proc planWorkspace*(projectRoot, cargo, rustc, toolchainPath: string):
     return
   # 4. The plan's edges.
   try:
-    let plan = readCargoPlan(result.planFile)
+    let plan = readCargoPlan(runPlan)
+    publishPlan(runPlan, result.planFile)
     result.edges = planUnitEdges(plan, PlanUnitsConfig(projectRoot: root,
       storeRoot: store, outRoot: root / UnitsOutRel,
       registryCrates: locked.rows,
-      toolchainEnv: @["PATH=" & toolchainPath]))
+      toolchainEnv: @["PATH=" & toolchainPath(tools)]))
   except PlanUnitsRefusal as err:
     result.reason = err.msg
     return

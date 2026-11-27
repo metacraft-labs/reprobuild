@@ -3742,6 +3742,17 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
         # Fingerprinting" keeps recipe body hashes out of action keys.
         relocated.recipeRevisionFingerprint = ""
         actionPayload(relocated)
+      elif payload.isolateHostEnvironment:
+        # An isolated edge (a rustc edge taken from cargo's plan) is the same
+        # computation in every project that has it: its argv, working
+        # directory and complete environment are declared. The recipe's
+        # revision and the names of the targets that hold it are not part
+        # of what it computes, so they stay out of its key, as for a
+        # relocatable edge above.
+        var isolated = payload
+        isolated.recipeRevisionFingerprint = ""
+        isolated.targetNames = @[]
+        actionPayload(isolated)
       else:
         node.payload
     let fingerprintText = [
@@ -3826,6 +3837,9 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
       commandStatsId = commandStatsId,
       env = inlineEnv,
       envPassthrough = inlineEnvPassthrough,
+      # Passed to the constructor, not only stamped afterwards, so the weak
+      # fingerprint is keyed on the isolation (``keyedOnEnvironmentIsolation``).
+      isolateHostEnvironment = payload.isolateHostEnvironment,
       requiresElevation = payload.requiresElevation)
     lowered.expandsArgFiles = expandsArgFiles
     return lowered
@@ -7180,6 +7194,17 @@ proc readBuildAction(bytes: openArray[byte]; pos: var int): BuildAction =
     raiseEnvelopeError(eeMalformed,
       "invalid lowered action isolate-host-environment sentinel")
   result.isolateHostEnvironment = isolateByte == 1'u8
+
+proc encodeLoweredAction*(action: BuildAction): seq[byte] =
+  ## One lowered action as the lowered-graph cache stores it.
+  result.writeBuildAction(action)
+
+proc decodeLoweredAction*(bytes: openArray[byte]): BuildAction =
+  ## The inverse of ``encodeLoweredAction``; raises on trailing bytes.
+  var pos = 0
+  result = readBuildAction(bytes, pos)
+  if pos != bytes.len:
+    raiseEnvelopeError(eeMalformed, "trailing lowered action bytes")
 
 proc encodeLoweredGraphCache(record: LoweredGraphCacheRecord): seq[byte] =
   result.writeString(LoweredGraphCacheMagic)

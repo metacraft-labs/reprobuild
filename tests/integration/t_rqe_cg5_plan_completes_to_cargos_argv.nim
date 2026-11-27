@@ -671,7 +671,7 @@ suite "the plan of a record run":
     putEnv(ModeARegistrySwitch, "on")
     defer: delEnv(ModeARegistrySwitch)
     let fragment = emitWorkspace(ws)
-    let defs = actionDefs(fragment)
+    let defs = actionDefs(fragment).filterIt(it.isPlanEdge)
     checkpoint "actions: " & defs.mapIt(it.id).join(" ")
     check defs.len == 5
     let plan = readCargoPlan(ws / PlanFileRel)

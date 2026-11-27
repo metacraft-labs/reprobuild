@@ -41,8 +41,19 @@
 ##    record run's scratch holds only empty placeholders; there is no
 ##    `target` directory.
 ##
+## Case 3 runs in a process that exports `RUSTFLAGS`, `CARGO_BUILD_RUSTFLAGS`,
+## `CARGO_ENCODED_RUSTFLAGS`, `CARGO_PROFILE_RELEASE_OPT_LEVEL` and
+## `CARGO_TARGET_DIR`: the record run's environment is closed, so none of
+## them reaches a unit's command line, and the toolchain the plan was made
+## with is keyed (the `PATH` it was resolved on and each tool's content).
+## The fragment's `test` target is Mode B's (`cargo test`), outside the
+## default target.
+##
 ## Falsifying mutations (applied, observed to fail, reverted; see the
 ## change's report): accepting any non-empty switch value fails case 2;
+## launching the record run without its closed environment fails case 3's
+## steering check; leaving the toolchain out of the evaluation inputs fails
+## case 3's keying check;
 ## dropping the switch from a Mode B fragment's evaluation inputs fails
 ## cases 1 and 2; dropping the registry condition (routing the workspace to
 ## the plan whatever the switch) fails case 1; dropping
@@ -105,13 +116,15 @@ suite "the registry lift's gate":
     check wrongDigest == hostFactDigest(switchId)
     check wrongDigest notin [offDigest, "<absent>"]
 
-    # 3. On.
+    # 3. On, in a process that exports variables which would steer cargo.
     putEnv(ModeARegistrySwitch, "on")
+    exportCargoSteering()
     let on = rustModeDecision(ws)
     check on.kind == rmkPlan
     check on.reason.len == 0
     let onFragment = emitWorkspace(ws)
-    let onDefs = actionDefs(onFragment)
+    let allDefs = actionDefs(onFragment)
+    let onDefs = allDefs.filterIt(it.isPlanEdge)
     var ids = onDefs.mapIt(it.id)
     checkpoint "actions: " & ids.join(" ")
     check ids.len == 5
@@ -120,6 +133,24 @@ suite "the registry lift's gate":
                  "regmid@0.1.0-"]:
       check ids.anyIt(("cargo.rustc/" & name) in it)
     check not onDefs.anyIt(it.runsCargo)
+    # The `test` target stays Mode B's: cargo runs the tests, outside the
+    # default target.
+    let others = allDefs.filterIt(not it.isPlanEdge)
+    checkpoint "other actions: " & others.mapIt(it.id).join(" ")
+    check others.len == 2
+    check others.anyIt(it.runsCargo and "test" in inlineArgvOf(it))
+    # Nothing the host exported reached a unit: the record run's environment
+    # is closed.
+    let steered = steeredUnits(onDefs.mapIt(inlineArgvOf(it)))
+    checkpoint "steered: " & steered.join(" | ")
+    check steered.len == 0
+    # The toolchain the plan was made with is keyed: the PATH it was
+    # resolved on and each tool's content.
+    let keyed = onFragment.evaluationInputs.mapIt(it.identity)
+    check (EnvironmentHostFactPrefix & "PATH") in keyed
+    for tool in ["cargo", "rustc"]:
+      checkpoint tool
+      check keyed.anyIt(it.isAbsolute and extractFilename(it) == tool)
     for def in onDefs:
       checkpoint def.id
       check def.isolateHostEnvironment

@@ -25,9 +25,10 @@
 ##    every rlib each binary edge is given (its `--extern` files and the
 ##    rlibs in its `-L dependency=` directories) and every rlib in the
 ##    workspace is the declared output of one of those edges, each of which
-##    ran in this build; the record run's scratch directory holds only the
-##    empty placeholders it writes in place of compiling; and there is no
-##    cargo `target` directory.
+##    ran in this build; no record run's directory is left with a compiled
+##    rlib; and there is no cargo `target` directory. (The fragment's `test`
+##    target is Mode B's `cargo test`, outside the default target built
+##    here.)
 ##
 ## Falsifying mutation (applied, observed to fail, reverted; see the
 ## change's report): adding Mode B's delegated cargo edge to the plan's
@@ -69,7 +70,7 @@ suite "no mixed rlibs":
     defer: delEnv(ModeARegistrySwitch)
 
     let fragment = emitWorkspace(ws)
-    let defs = actionDefs(fragment)
+    let defs = actionDefs(fragment).filterIt(it.isPlanEdge)
     checkpoint "actions: " & defs.mapIt(it.id).join(" ")
     check defs.len == 5
     check defs.allIt(it.id.startsWith("cargo.rustc/"))

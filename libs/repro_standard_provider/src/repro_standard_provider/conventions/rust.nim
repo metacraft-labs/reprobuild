@@ -709,16 +709,13 @@ proc scanHarnessSettings(cargoTomlPath: string): HarnessSettings =
 proc rustcExecutable(): string =
   findExe("rustc")
 
-proc planToolchainPath(rustc: string): string =
-  ## The ``PATH`` every rustc edge taken from cargo's plan is given: the
-  ## directories of the C driver rustc links with (``cc``, resolved as this
-  ## convention resolves ``rustc`` and ``cargo``) and of rustc. Nothing else
-  ## from the host's ``PATH`` reaches a compile.
-  var dirs: seq[string]
-  for exe in [findExe("cc"), rustc]:
-    if exe.len > 0 and parentDir(exe) notin dirs:
-      dirs.add parentDir(exe)
-  dirs.join($PathSep)
+proc planToolchain(cargo, rustc: string): PlanToolchain =
+  ## The tools a workspace built from cargo's plan uses: the ``cargo`` and
+  ## ``rustc`` this convention resolves, and the C driver rustc links with
+  ## (``cc``), resolved the same way. The resolution is keyed: the fragment
+  ## records the ``PATH`` it was made on and each tool's content
+  ## (``toolchainEvaluationInputs``).
+  PlanToolchain(cargo: cargo, rustc: rustc, cc: findExe("cc"))
 
 proc cargoExecutable(): string =
   findExe("cargo")
@@ -2866,6 +2863,24 @@ proc libraryTargetName(pkg: RustPackage; lib: RustTarget): string =
       return lib.crateName & "-lib"
   lib.crateName
 
+proc rustModeBTestArgv(cargoExe: string): seq[string] =
+  ## Mode B's ``test`` command: ``cargo test`` over every member, through
+  ## the thin cargo edge. ``edgeCommand`` always names a products file; the
+  ## test run has none, so its argv is spelled out (the same ``-j 0`` the
+  ## engine fills in).
+  @[getAppFilename(), EdgeHelperFlag, "-j", "0", "--",
+    cargoExe,
+    "test",
+    "--release",
+    "--locked",
+    "--offline",
+    "--workspace",
+    "--no-fail-fast",
+  ]
+
+proc rustModeBTestStamp(projectRoot, packageName: string): string =
+  projectRoot / ".repro" / "build" / "cargo" / (packageName & ".test.stamp")
+
 proc rustCrudeFallback(projectRoot: string;
                        request: ProviderGraphRequest):
                          GraphFragment {.gcsafe.} =
@@ -2937,17 +2952,8 @@ proc rustCrudeFallback(projectRoot: string;
     # 2026-11-18-rust-mode-b-emits-no-test-target-so-cargo-test-never-runs).
     # ``edgeCommand`` always names a products file; the test run has none,
     # so its argv is spelled out (the same ``-j 0`` the engine fills in).
-    let testArgv = @[getAppFilename(), EdgeHelperFlag, "-j", "0", "--",
-      cargoExe,
-      "test",
-      "--release",
-      "--locked",
-      "--offline",
-      "--workspace",
-      "--no-fail-fast",
-    ]
-    let testStampFile = projectRoot / ".repro" / "build" / "cargo" /
-      (packageName & ".test.stamp")
+    let testArgv = rustModeBTestArgv(cargoExe)
+    let testStampFile = rustModeBTestStamp(projectRoot, packageName)
     result = emitCrudeFragment(
       projectRoot = projectRoot,
       request = request,
@@ -3069,34 +3075,40 @@ proc withEvaluationInputs(fragment: GraphFragment;
     result.fragmentDigest = computeGraphFragmentDigest(result)
 
 proc rustPlanFragment(projectRoot: string; request: ProviderGraphRequest;
-                      project: RustProject; graph: PlanGraph): GraphFragment =
+                      project: RustProject; graph: PlanGraph;
+                      tools: PlanToolchain): GraphFragment =
   ## The fragment of a workspace built from cargo's plan: one rustc edge per
   ## unit (``plan_units.planUnitEdges``), registry crates and members alike,
   ## each declared as the engine action the emitter built: its argv, working
   ## directory, ordering, outputs and scratch directories, content-checked
   ## (``hybrid``), gathered by the automatic monitor, and launched from its
   ## declared environment alone (the variables cargo set for the unit and
-  ## the toolchain's ``PATH``). The default target holds every edge; each
-  ## member binary is also a target of its crate's name. The record run's
+  ## the toolchain's ``PATH``). The default target holds every edge. The
+  ## record run's
   ## reads and the registry lift's switch are the fragment's evaluation
   ## inputs.
   ##
-  ## There is no ``test`` target: test targets and doctests are not taken
-  ## from the plan yet, and building them with cargo
-  ## beside these edges would not be one builder for the workspace.
+  ## The ``test`` target is Mode B's (``registerCrudeTestTarget``): test
+  ## targets and doctests are not taken from the plan yet, so cargo builds
+  ## and runs them, as it does with the lift off.
   let pkgDef = syntheticPackage(projectRoot, project)
   let registerAll = proc() =
     discard buildPool("compile", 8'u32)
     registerObservedReads(graph.observed, RustPlanUnobservedIdentity,
       graph.reusable, graph.stamps)
     providerEnvironmentInput(ModeARegistrySwitch)
+    providerEnvironmentInput("PATH")
+    for exe in [tools.cargo, tools.rustc, tools.cc]:
+      if exe.len > 0: providerFileInput(exe)
     var all: seq[BuildActionDef] = @[]
-    var named = initHashSet[string]()
     for e in graph.edges:
       let a = e.action
       var env: seq[(string, string)] = @[]
       for entry in a.env:
         let eq = entry.find('=')
+        if eq <= 0:
+          raise newException(ValueError, "rust convention: the plan edge " &
+            a.id & " declares a malformed variable " & entry.escape())
         env.add((entry[0 ..< eq], entry[eq + 1 .. ^1]))
       let def = buildAction(
         id = a.id,
@@ -3112,12 +3124,19 @@ proc rustPlanFragment(projectRoot: string; request: ProviderGraphRequest;
         env = env,
         scratchDirs = a.scratchDirs,
         isolateHostEnvironment = true)
+      # No target of its own per binary: a one-action target renames its
+      # edge when the graph is lowered, and these edges keep the ids the
+      # plan gives them (``cargo.rustc/<package>@<version>-<hash>``).
       all.add(def)
-      if not e.registry and "bin" in crateTypes(e.cargoArgv) and
-          e.unit.crateName notin named:
-        named.incl e.unit.crateName
-        discard target(e.unit.crateName, @[def])
     defaultTarget(target("default", all))
+    # The ``test`` target stays Mode B's: cargo builds and runs the tests,
+    # as it does with the lift off. Test targets and doctests are not taken
+    # from the plan yet; cargo's test build links only rlibs it built itself,
+    # never these edges' outputs, and it is not part of the default target.
+    registerCrudeTestTarget(project.packages[0].packageName, projectRoot,
+      rustModeBTestArgv(tools.cargo),
+      rustModeBTestStamp(projectRoot, project.packages[0].packageName),
+      collectCrudeInputs(projectRoot, ["target"], ["**/*"]), "-j")
   buildPackageFragment(pkgDef, request, registerAll, includeDefault = false)
 
 proc rustEmitFragment(projectRoot: string;
@@ -3195,10 +3214,10 @@ proc rustEmitFragment(projectRoot: string;
         result = withEvaluationInputs(result, [modeARegistrySwitchInput()])
       return
     of rmkPlan:
-      let graph = planWorkspace(projectRoot, cargoExe, rustcExe,
-        planToolchainPath(rustcExe))
+      let tools = planToolchain(cargoExe, rustcExe)
+      let graph = planWorkspace(projectRoot, tools)
       if graph.ok:
-        return rustPlanFragment(projectRoot, request, project, graph)
+        return rustPlanFragment(projectRoot, request, project, graph, tools)
       # A workspace the plan's edges cannot build as a whole is built by
       # cargo as a whole: never partly by each. What
       # graph production read keys this decision as it would key the
@@ -3206,6 +3225,7 @@ proc rustEmitFragment(projectRoot: string;
       # wrapper, no monitor, a crate that could not be fetched), nothing
       # recorded stands for the decision and it is taken again next time.
       var inputs = @[modeARegistrySwitchInput()]
+      inputs.add toolchainEvaluationInputs(tools)
       inputs.add observedEvaluationInputs(graph.observed, graph.stamps,
         graph.reusable or graph.observed.files.len == 0,
         RustPlanUnobservedIdentity)

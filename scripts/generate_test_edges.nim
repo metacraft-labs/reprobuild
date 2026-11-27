@@ -556,6 +556,8 @@ proc isProviderModePath(path: string): bool =
     # ``buildPackageFragment``.
     "tests/integration/t_rqe_cg5_no_mixed_rlibs.nim",
     "tests/integration/t_rqe_cg5_plan_completes_to_cargos_argv.nim",
+    "tests/integration/t_rqe_cg5_plan_edges_lower_isolated.nim",
+    "tests/integration/t_rqe_cg5_registry_lift_graph_production.nim",
     "tests/integration/t_rqe_cg5_registry_lift_is_gated.nim",
     "tests/unit/t_from_source_cabal_recognition.nim",
     "tests/unit/t_from_source_cargo_recognition.nim",

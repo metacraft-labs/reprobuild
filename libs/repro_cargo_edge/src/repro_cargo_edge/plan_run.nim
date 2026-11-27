@@ -3,7 +3,15 @@
 ##
 ##   repro-rustc-wrapper --cargo-plan --plan FILE --scratch DIR
 ##       --cargo CARGO --rustc RUSTC [--store-root DIR]
-##       [--crate NAME@VERSION=PREFIX]... -- [CARGO ARGS...]
+##       [--crate NAME@VERSION=PREFIX]... [--env NAME=VALUE]...
+##       -- [CARGO ARGS...]
+##
+## With one or more `--env`, the run closes its environment first
+## (`closeEnvironment`): it, cargo and everything cargo starts see exactly the
+## declared variables, the io monitor's injection variables and the
+## edge-private `CARGO_HOME` and `HOME`. Without `--env` it runs in the
+## environment it was launched with, as the engine's isolated edge launches
+## it.
 ##
 ## It runs in the workspace root (the edge's working directory) and does, in
 ## order:
@@ -110,7 +118,8 @@ const
     ## wrapper with a rustc path there, never with this flag.
   PlanRunUsage* = "usage: repro-rustc-wrapper " & PlanRunFlag &
     " --plan FILE --scratch DIR --cargo CARGO --rustc RUSTC " &
-    "[--store-root DIR] -- [CARGO ARGS...]\n"
+    "[--store-root DIR] [--crate NAME@VERSION=PREFIX]... " &
+    "[--env NAME=VALUE]... -- [CARGO ARGS...]\n"
   RecordSubdir* = "record"
   TargetSubdir* = "target"
   CargoHomeSubdir* = "cargo-home"
@@ -139,6 +148,9 @@ type
     storeRoot*: string
     crates*: seq[CratePrefix]
     cargoArgs*: seq[string]
+    closedEnv*: bool
+      ## Run from `env` alone (`--env`), not from the inherited environment.
+    env*: seq[(string, string)]
 
   PlanRunError* = object of CatchableError
 
@@ -162,6 +174,12 @@ proc parsePlanRunArgs*(args: openArray[string]): PlanRunOptions =
     of "--cargo": result.cargo = value
     of "--rustc": result.rustc = value
     of "--store-root": result.storeRoot = value
+    of "--env":
+      let eq = value.find('=')
+      if eq <= 0:
+        fail("--env takes NAME=VALUE, not " & value)
+      result.closedEnv = true
+      result.env.add (value[0 ..< eq], value[eq + 1 .. ^1])
     of "--crate":
       let at = value.find('@')
       let eq = value.find('=')
@@ -204,6 +222,29 @@ proc validateCargoArgs*(args: openArray[string]): string =
       return "the cargo argument " & a.escape() & " is outside the build " &
         "selection the record run passes through"
   ""
+
+const MonitorInjectionVariables* = ["LD_PRELOAD", "DYLD_INSERT_LIBRARIES",
+    "CT_SANDBOX_TOOLS_DIR"]
+  ## The io monitor's injection variables (with every `REPRO_MONITOR_*`),
+  ## kept when the record run closes its environment: they are how a
+  ## monitored run's children stay monitored, and the engine adds them to an
+  ## isolated edge's environment in the same way.
+
+proc isMonitorInjection(name: string): bool =
+  name in MonitorInjectionVariables or name.startsWith("REPRO_MONITOR_")
+
+proc closeEnvironment*(declared: openArray[(string, string)]) =
+  ## Replace this process's environment with `declared`, keeping only the io
+  ## monitor's injection variables: what the record run, cargo and every
+  ## process cargo starts see. Cargo reads `RUSTFLAGS`, `CARGO_PROFILE_*`,
+  ## `CARGO_BUILD_*`, `CARGO_TARGET_<triple>_*` and the like from its
+  ## environment, so an inherited one would shape the plan through variables
+  ## nothing keys.
+  var names: seq[string]
+  for name, _ in envPairs():
+    if not isMonitorInjection(name): names.add name
+  for name in names: delEnv(name)
+  for (name, value) in declared: putEnv(name, value)
 
 proc crateArg*(c: CratePrefix): string =
   ## The `--crate` argument naming `c`.
@@ -468,6 +509,8 @@ proc runCargoPlan*(opts: PlanRunOptions): int =
   when not defined(posix):
     fail("the record run is not supported on this platform")
   else:
+    if opts.closedEnv:
+      closeEnvironment(opts.env)
     let project = getCurrentDir()
     let scratch = absolutePath(opts.scratch)
     if project == scratch or project.startsWith(scratch & "/"):

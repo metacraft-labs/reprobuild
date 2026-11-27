@@ -83,6 +83,10 @@ type
       ## The crates.io crates of the lock with the store prefixes their
       ## fetch edges made. The record run serves cargo each one from its
       ## prefix (`plan_run`, step 3).
+    closedEnv*: seq[string]
+      ## `NAME=value` variables the record run closes its environment to
+      ## (`plan_run --env`), for a caller that does not launch it through the
+      ## engine's isolation. Empty: none.
 
 proc cargoPlanEdgeId*(name: string): string = CargoPlanEdgePrefix & name
 
@@ -93,6 +97,8 @@ proc cargoPlanArgv*(cfg: CargoPlanEdgeConfig): seq[string] =
     result.add ["--store-root", cfg.storeRoot]
   for c in cfg.crates:
     result.add ["--crate", crateArg(c)]
+  for entry in cfg.closedEnv:
+    result.add ["--env", entry]
   result.add "--"
   result.add cfg.cargoArgs
 

@@ -103,9 +103,11 @@ proc prepareModeAEnv*(work, tag: string): ModeAEnv =
   ## Make this process an environment the convention can plan in, and in
   ## which nothing reaches cargo but what the case sets: the record wrapper
   ## named by `REPRO_RUSTC_WRAPPER_PATH`, the monitor shim, a `PATH` of Nix
-  ## store directories only (a plan refuses a host path under no logical
-  ## root), no variable through which a shell steers cargo or rustc, no
-  ## dynamic-library path, and an empty `CARGO_HOME`.
+  ## store directories only (the convention resolves its tools there), no
+  ## dynamic-library path, and an empty `CARGO_HOME`. The variables through
+  ## which a shell steers cargo (`RUSTFLAGS`, `CARGO_BUILD_*`, ...) are NOT
+  ## cleared: the record run's closed environment is what keeps them out,
+  ## and `exportCargoSteering` sets them on purpose.
   let repoRoot = currentSourcePath().parentDir.parentDir.parentDir
   result.wrapper = requireBinary(
     reproBinaryPath(repoRoot, "repro-rustc-wrapper"),
@@ -114,18 +116,33 @@ proc prepareModeAEnv*(work, tag: string): ModeAEnv =
   result.tools = prepareMonitorTools(repoRoot, work / "monitor", tag)
   putEnv("REPRO_MONITOR_SHIM_LIB", result.tools.shim)
   putEnv("PATH", storeOnlyPath())
-  for name in ["CARGO_TARGET_DIR", "CARGO_BUILD_TARGET_DIR",
-               "CARGO_BUILD_TARGET", "RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS",
-               "CARGO_BUILD_RUSTFLAGS", "RUSTC", "CARGO_BUILD_RUSTC",
-               "RUSTC_WRAPPER", "CARGO_BUILD_RUSTC_WRAPPER",
-               "RUSTC_WORKSPACE_WRAPPER",
-               "CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER"]:
-    delEnv(name)
   # Cargo extends the dynamic-library path it is given; the real build the
   # cases compare with is given none, and neither is the record run.
   delEnv("LD_LIBRARY_PATH")
   createDir(work / "cargo-home")
   putEnv("CARGO_HOME", work / "cargo-home")
+
+const SteeringMarker* = "steered_by_the_host"
+
+proc exportCargoSteering*() =
+  ## Export, in this process, variables through which a shell would steer
+  ## cargo's plan if it reached cargo: extra rustc flags naming
+  ## `SteeringMarker`, another release opt-level, a target directory and a
+  ## rustc wrapper. None of them may shape a unit.
+  putEnv("RUSTFLAGS", "--cfg " & SteeringMarker)
+  putEnv("CARGO_ENCODED_RUSTFLAGS", "--cfg\x1f" & SteeringMarker)
+  putEnv("CARGO_BUILD_RUSTFLAGS", "--cfg " & SteeringMarker)
+  putEnv("CARGO_PROFILE_RELEASE_OPT_LEVEL", "1")
+  putEnv("CARGO_TARGET_DIR", "/nonexistent/steered-target")
+
+proc steeredUnits*(argvs: openArray[seq[string]]): seq[string] =
+  ## The command lines that show a steering variable: the marker, or
+  ## `opt-level=1` (cargo's release profile passes `opt-level=3`).
+  for argv in argvs:
+    for a in argv:
+      if SteeringMarker in a or a == "opt-level=1":
+        result.add argv.join(" ")
+        break
 
 proc lockWorkspace*(ws, work: string; reg: RegistrySetup) =
   ## Write the workspace's `Cargo.lock` against the registry's crates.
@@ -146,10 +163,15 @@ proc engineConfig*(env: ModeAEnv; cacheRoot: string): BuildEngineConfig =
     stderrLimit: 1024 * 1024,
     bypassRunQuota: true)
 
+proc isPlanEdge*(def: BuildActionDef): bool = def.id.startsWith("cargo.rustc/")
+
 proc buildFragment*(env: ModeAEnv; fragment: GraphFragment;
                     projectRoot, cacheRoot: string): BuildRunResult =
+  ## Build the fragment's default target: its plan edges (the `test`
+  ## target, Mode B's, is not run).
   var actions: seq[BuildAction]
-  for def in actionDefs(fragment): actions.add toEngineAction(def, projectRoot)
+  for def in actionDefs(fragment):
+    if def.isPlanEdge: actions.add toEngineAction(def, projectRoot)
   runBuild(graph(actions), engineConfig(env, cacheRoot))
 
 proc switchInputDigest*(fragment: GraphFragment): string =
@@ -178,7 +200,8 @@ type RlibProvenance* = object
     ## rlibs linked, or lying in the workspace outside the record run's
     ## scratch directory, that no Reprobuild rustc edge declares
   cargoEdges*: seq[string]
-    ## the fragment's actions that run cargo
+    ## the fragment's actions that run cargo, other than its `test` target
+    ## (Mode B's `cargo test`, which links only what cargo builds itself)
   scratchCompiled*: seq[string]
     ## non-empty rlibs in the record run's scratch directory (its
     ## placeholders are empty: nothing is compiled there)
@@ -186,7 +209,8 @@ type RlibProvenance* = object
 proc rlibProvenance*(fragment: GraphFragment; ws: string): RlibProvenance =
   let defs = actionDefs(fragment)
   for def in defs:
-    if def.runsCargo: result.cargoEdges.add def.id
+    if def.runsCargo and not def.id.startsWith("crude-test"):
+      result.cargoEdges.add def.id
     if def.id.startsWith("cargo.rustc/"):
       for o in def.outputs:
         if o.endsWith(".rlib"): result.edgeOutputs.add o
@@ -205,7 +229,7 @@ proc rlibProvenance*(fragment: GraphFragment; ws: string): RlibProvenance =
         if dirExists(dir):
           for path in rlibsUnder(dir):
             if path notin result.linked: result.linked.add path
-  let scratch = ws / PlanScratchRel
+  let scratch = ws / PlanDirRel
   for path in rlibsUnder(ws):
     if path.startsWith(scratch & "/"):
       if getFileSize(path) > 0: result.scratchCompiled.add path

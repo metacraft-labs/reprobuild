@@ -300,15 +300,22 @@ not a member comes from crates.io, graph production runs, in order:
 1. the fetch wave over the lock's crates.io rows (each crate's store prefix;
    receipts under `.repro/build/cargo-fetch`);
 2. the record run (`--cargo-plan`, planning `cargo build --release
-   --workspace`) under the io monitor, in `.repro/build/cargo-plan`; what it
-   read, outside its own scratch directory, keys the emitted graph;
+   --workspace`) under the io monitor, in a directory of its own under
+   `.repro/build/cargo-plan` (so two evaluations at once do not share
+   state), from a closed environment: the toolchain's `PATH` (the
+   directories of `cargo`, `rustc` and `cc`) and a private `TMPDIR`, given
+   with `--env`, so no variable of the caller's environment (`RUSTFLAGS`,
+   `CARGO_PROFILE_*`, `CARGO_BUILD_*`, ...) shapes the plan. What it read,
+   outside its own directory, keys the emitted graph, and so do the `PATH`
+   the toolchain was resolved on and each tool's content;
 3. `planUnitEdges`, with the outputs under `.repro/build/cargo-units` and,
-   as the one toolchain variable, a `PATH` of the directories of `cc` and
-   `rustc`.
+   as the one toolchain variable, that same `PATH`.
 
 The graph then holds one rustc edge per unit and nothing that runs cargo;
 each edge is launched from its declared environment alone. The record wrapper
 is found beside the provider, or at `REPRO_RUSTC_WRAPPER_PATH`. If any step
 cannot be taken (a git or alternate-registry source, a crate that cannot be
 fetched, a plan holding a unit these edges do not build), the whole workspace
-is built by cargo. The graph has no `test` target in this mode yet.
+is built by cargo. The `test` target stays the delegated one (`cargo
+test`), outside the default target: test targets are not taken from the plan
+yet. A fallback to cargo is not reported yet.

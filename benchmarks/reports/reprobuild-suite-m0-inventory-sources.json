@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 36,
-    "nimTestBinaries": 3325,
+    "nimTestBinaries": 3328,
     "pureUnitConsolidationGroups": 97,
-    "pureUnitTests": 856,
+    "pureUnitTests": 857,
     "staticallyDetectedRuntimeCompilerFlowTests": 165,
-    "testEntries": 3386
+    "testEntries": 3389
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -899,7 +899,7 @@
       "targetOs": "soAny"
     },
     {
-      "count": 48,
+      "count": 49,
       "defines": [],
       "dependencyShape": [
         "repro_project_dsl"
@@ -945,6 +945,7 @@
         "libs/repro_project_dsl/tests/t_env_passthrough_codec.nim",
         "libs/repro_project_dsl/tests/t_explicit_contract_import_precedence.nim",
         "libs/repro_project_dsl/tests/t_fetch_token_path_independent.nim",
+        "libs/repro_project_dsl/tests/t_isolate_host_environment_codec.nim",
         "libs/repro_project_dsl/tests/t_m6_non_determinism_codec.nim",
         "libs/repro_project_dsl/tests/t_m9r74_action_cwd_kind_codec.nim",
         "libs/repro_project_dsl/tests/t_m9r75_declared_outputs_codec.nim",
@@ -1872,9 +1873,9 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 30,
-      "integration": 1892,
+      "integration": 1894,
       "platform/destructive": 206,
-      "pure unit": 856,
+      "pure unit": 857,
       "unclassified": 402
     },
     "graphOwnedTestArtifacts": [
@@ -2095,9 +2096,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 3325,
+    "nimTestBinaryCount": 3328,
     "pythonTestFileCount": 61,
-    "testEntryCount": 3386
+    "testEntryCount": 3389
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -30713,6 +30714,23 @@
       "source": "libs/repro_project_dsl/tests/t_install_mirror_target_root.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 5,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_isolate_host_environment_codec",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_project_dsl"
+      ],
+      "owner": "libs/repro_project_dsl",
+      "requiresReproBinary": false,
+      "source": "libs/repro_project_dsl/tests/t_isolate_host_environment_codec.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 2,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -59591,6 +59609,30 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_rqe_cg5_plan_edges_lower_isolated",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [
+        "reproProviderMode"
+      ],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_build_engine",
+        "repro_cli_support",
+        "repro_project_dsl",
+        "repro_provider_runtime",
+        "repro_standard_provider",
+        "repro_tool_profiles"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_rqe_cg5_plan_edges_lower_isolated.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_rqe_cg5_record_mode_compiles_nothing",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -59642,6 +59684,27 @@
       "source": "tests/integration/t_rqe_cg5_record_run_refusals.nim",
       "sourceSuiteCount": 2,
       "staticCaseCount": 6,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_rqe_cg5_registry_lift_graph_production",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [
+        "reproProviderMode"
+      ],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_project_dsl",
+        "repro_provider_runtime",
+        "repro_standard_provider"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_rqe_cg5_registry_lift_graph_production.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 4,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
