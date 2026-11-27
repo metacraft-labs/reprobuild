@@ -295,7 +295,11 @@ when defined(reproProviderMode):
 const
   BuildActionPayloadMagic = [byte(ord('R')), byte(ord('B')), byte(ord('A')),
     byte(ord('P'))]
-  BuildActionPayloadVersion* = 39'u16
+  BuildActionPayloadVersion* = 40'u16
+    ## v40: ``isolateHostEnvironment`` -- one strict sentinel byte appended
+    ## after ``packageToolIdentityRefKinds``. v39-and-earlier payloads
+    ## decode as not isolated, which is how every action was launched
+    ## before it.
     ## v39: ``packageToolIdentityRefs`` and its parallel
     ## ``packageToolIdentityRefKinds`` -- the tool references a ``shell``
     ## edge takes from its package's declaration, a string list and one
@@ -2341,7 +2345,8 @@ proc buildAction*(id: string; call: PublicCliCall;
                   sizedBy = "";
                   contentKeyedToolCaches: openArray[string] = [];
                   canonicalWorkKey = "";
-                  relocatable = false):
+                  relocatable = false;
+                  isolateHostEnvironment = false):
     BuildActionDef {.dynOrStatic.} =
   ## ``sizedBy``: the width flag of a command that is not a typed call but
   ## runs a parallel tool (``sized_tools.sizedWidthByFlag``). The edge then
@@ -2399,6 +2404,9 @@ proc buildAction*(id: string; call: PublicCliCall;
   ## at a path that names neither the checkout nor the user, and hands to
   ## the action as ``REPRO_CANONICAL_WORK_DIR``. Derive it with
   ## ``canonicalWorkKeyFor``; see the field in ``types.nim``.
+  ##
+  ## ``isolateHostEnvironment``: launch the action from its declared
+  ## environment alone; see the field in ``types.nim``.
   if canonicalWorkKey.len > 0 and not isValidCanonicalWorkKeyText(
       canonicalWorkKey):
     raise newException(ValueError, "action " & id & " declares an invalid " &
@@ -2426,6 +2434,13 @@ proc buildAction*(id: string; call: PublicCliCall;
       if entry[0] != "OUT_MIRROR":
         kept.add(entry)
     packageActionEnv = kept
+  if isolateHostEnvironment:
+    # An isolated action is launched from what its caller declared and
+    # nothing else (the rustc edges taken from cargo's plan, whose variables
+    # are the ones cargo set for the unit). The package defaults are for the
+    # package's own shell edges: ``OUT_MIRROR`` would name this checkout in
+    # the edge's key, and none of them is the caller's.
+    packageActionEnv = @[]
   let actionEnv = mergePackageActionEnv(packageActionEnv, env)
   # An action that starts a parallel tool is sized: it asks RunQuota for a
   # width range and names the flag that takes the grant (``sized_tools``).
@@ -2475,7 +2490,8 @@ proc buildAction*(id: string; call: PublicCliCall;
     removeBeforeRun: @removeBeforeRun,
     contentKeyedToolCaches: @contentKeyedToolCaches,
     canonicalWorkKey: canonicalWorkKey,
-    relocatable: relocatable)
+    relocatable: relocatable,
+    isolateHostEnvironment: isolateHostEnvironment)
   buildActionRegistry.add(result)
 
 proc buildPool*(name: string; capacity: uint32): BuildPoolDef {.discardable, dynOrStatic.} =
@@ -4835,6 +4851,9 @@ proc encodeBuildActionPayloadAtVersion*(action: BuildActionDef;
     payload.writeU32Le(uint32(action.packageToolIdentityRefKinds.len))
     for kind in action.packageToolIdentityRefKinds:
       payload.writeByte(byte(ord(kind)))
+  # v40: the action is launched from its declared environment alone.
+  if version >= 40'u16:
+    payload.writeByte(if action.isolateHostEnvironment: 1'u8 else: 0'u8)
 
   result.add(BuildActionPayloadMagic)
   result.writeU16Le(version)
@@ -5163,6 +5182,13 @@ proc decodeBuildActionPayload*(bytes: openArray[byte]): BuildActionDef {.dynOrSt
     # everything it declared itself.
     result.packageToolIdentityRefs = @[]
     result.packageToolIdentityRefKinds = @[]
+  if version >= 40'u16:
+    let isolateByte = readByte(bytes, pos)
+    if isolateByte > 1'u8:
+      raisePayload("invalid build action isolate-host-environment sentinel")
+    result.isolateHostEnvironment = isolateByte == 1'u8
+  else:
+    result.isolateHostEnvironment = false
   if pos != bytes.len:
     raisePayload("trailing build action payload bytes")
 

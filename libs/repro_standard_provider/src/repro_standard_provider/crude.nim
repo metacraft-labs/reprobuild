@@ -192,7 +192,7 @@ proc inputGlobMatches(rel: string; patterns: openArray[string]): bool =
       return true
   false
 
-proc collectCrudeInputs(projectRoot: string;
+proc collectCrudeInputs*(projectRoot: string;
                        outputDirs, inputGlob: openArray[string]): seq[string] =
   ## Enumerate every file under ``projectRoot`` that survives the
   ## exclude filters and matches ``inputGlob``. Returns absolute paths
@@ -229,7 +229,7 @@ proc crudeActionIdFor(packageName: string): string =
     sanitized = "package"
   "crude-build-" & sanitized
 
-proc crudeTestActionIdFor(packageName: string): string =
+proc crudeTestActionIdFor*(packageName: string): string =
   ## Action id of the crude fallback's test run: the build action's id
   ## with ``crude-test-`` in place of ``crude-build-``.
   "crude-test-" & crudeActionIdFor(packageName)["crude-build-".len .. ^1]
@@ -253,6 +253,38 @@ proc syntheticPackage(projectRoot, packageName: string): PackageDef =
     hasDevEnv: false,
     devEnvBodyHash: "",
     toolUses: @[])
+
+proc registerCrudeTestTarget*(packageName, projectRoot: string;
+                              testArgv: openArray[string];
+                              testStampPath: string;
+                              inputs: openArray[string];
+                              widthFlag = "";
+                              deps: openArray[string] = []) =
+  ## The delegated tool's test command as the non-default ``test`` target:
+  ## a run action (sized by ``widthFlag``, monitored, failing the build when
+  ## the command fails) and a stamp action writing ``testStampPath``. Called
+  ## from inside a fragment's build proc: by ``emitCrudeFragment``, and by a
+  ## convention whose default target is not delegated but whose tests are.
+  let testAction = buildAction(
+    id = crudeTestActionIdFor(packageName),
+    call = inlineExecCall(testArgv, cwd = projectRoot),
+    deps = deps,
+    inputs = inputs,
+    outputs = @[],
+    pool = "compile",
+    cacheable = true,
+    dependencyPolicy = automaticMonitorPolicy(),
+    commandStatsId = "standard-provider.crude-test",
+    sizedBy = widthFlag)
+  createDir(extendedPath(parentDir(testStampPath)))
+  let stampAction = fs.stamp(
+    output = testStampPath,
+    title = "crude-test:" & packageName,
+    entries = @[packageName],
+    actionId = crudeTestStampActionIdFor(packageName),
+    deps = @[testAction.id],
+    commandStatsId = "standard-provider.crude-test-stamp")
+  discard target("test", @[testAction, stampAction])
 
 proc emitCrudeFragment*(projectRoot: string;
                        request: ProviderGraphRequest;
@@ -340,25 +372,7 @@ proc emitCrudeFragment*(projectRoot: string;
       # actions (run and stamp), neither of which ``default`` names.
       defaultTarget(target("default", action))
       if testArgvSeq.len > 0:
-        let testAction = buildAction(
-          id = crudeTestActionIdFor(packageName),
-          call = inlineExecCall(testArgvSeq, cwd = projectRoot),
-          deps = @[action.id],
-          inputs = inputs,
-          outputs = @[],
-          pool = "compile",
-          cacheable = true,
-          dependencyPolicy = automaticMonitorPolicy(),
-          commandStatsId = "standard-provider.crude-test",
-          sizedBy = widthFlag)
-        createDir(extendedPath(parentDir(testStampPath)))
-        let stampAction = fs.stamp(
-          output = testStampPath,
-          title = "crude-test:" & packageName,
-          entries = @[packageName],
-          actionId = crudeTestStampActionIdFor(packageName),
-          deps = @[testAction.id],
-          commandStatsId = "standard-provider.crude-test-stamp")
-        discard target("test", @[testAction, stampAction])
+        registerCrudeTestTarget(packageName, projectRoot, testArgvSeq,
+          testStampPath, inputs, widthFlag, deps = @[action.id])
     result = buildPackageFragment(pkg, request, registerAll,
       includeDefault = false)

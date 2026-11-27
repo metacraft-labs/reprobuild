@@ -2118,6 +2118,15 @@ type
       ## Fingerprinting", riders of 2026-11-16/17). Set by the CMake
       ## try_compile direct provider. Payload codec v38+; an older payload
       ## decodes as not relocatable.
+    isolateHostEnvironment*: bool
+      ## The action is launched from its declared environment alone (``env``,
+      ## and the ``PATH`` the lowering decides), never from the engine's own
+      ## environment. Lowered onto the engine's
+      ## ``BuildAction.isolateHostEnvironment``. Set by the Rust convention
+      ## for the rustc edges it takes from cargo's plan, which get the
+      ## variables cargo set for the unit and no development environment.
+      ## Payload codec v40+; an older payload decodes as not isolated, which
+      ## is how every action was launched before the field existed.
     sourceFile*: string
     sourceLine*: int
     extensions*: seq[ExtensionBox]

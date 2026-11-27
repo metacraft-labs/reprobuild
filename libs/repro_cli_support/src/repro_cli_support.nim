@@ -3603,6 +3603,13 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
     # "Canonical work trees"). Copied on every branch: a branch that dropped
     # it would run the edge in a checkout-specific tree again.
     result.canonicalWorkKey = payload.canonicalWorkKey
+    # An edge launched from its declared environment alone (the rustc edges
+    # the Rust convention takes from cargo's plan). Copied on every branch: a
+    # branch that dropped it would hand the edge the engine's environment.
+    # Only ever turned on here, never off: a branch may isolate an action of
+    # its own accord.
+    if payload.isolateHostEnvironment:
+      result.isolateHostEnvironment = true
   # Caching-Architecture D2: an edge that states no policy takes the one its
   # resolved tools declare, else the owner-decided default, timestamp.
   var policyFromTools = false
@@ -3735,6 +3742,17 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
         # Fingerprinting" keeps recipe body hashes out of action keys.
         relocated.recipeRevisionFingerprint = ""
         actionPayload(relocated)
+      elif payload.isolateHostEnvironment:
+        # An isolated edge (a rustc edge taken from cargo's plan) is the same
+        # computation in every project that has it: its argv, working
+        # directory and complete environment are declared. The recipe's
+        # revision and the names of the targets that hold it are not part
+        # of what it computes, so they stay out of its key, as for a
+        # relocatable edge above.
+        var isolated = payload
+        isolated.recipeRevisionFingerprint = ""
+        isolated.targetNames = @[]
+        actionPayload(isolated)
       else:
         node.payload
     let fingerprintText = [
@@ -3819,6 +3837,9 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
       commandStatsId = commandStatsId,
       env = inlineEnv,
       envPassthrough = inlineEnvPassthrough,
+      # Passed to the constructor, not only stamped afterwards, so the weak
+      # fingerprint is keyed on the isolation (``keyedOnEnvironmentIsolation``).
+      isolateHostEnvironment = payload.isolateHostEnvironment,
       requiresElevation = payload.requiresElevation)
     lowered.expandsArgFiles = expandsArgFiles
     return lowered
@@ -5605,7 +5626,10 @@ const
   # passthrough resolution and the stage-2 census both read this field,
   # and a census that answers differently cold and warm is not a
   # measurement.
-  LoweredGraphCacheVersion = 20'u16
+  LoweredGraphCacheVersion = 21'u16
+    # v21: ``BuildAction.isolateHostEnvironment`` (a byte) after
+    # ``relocationAnchors``. A v20 record decoded without it would launch an
+    # isolated edge with the engine's environment on the warm path only.
     # v20: ``BuildAction.relocatable`` (a byte) and ``relocationAnchors`` (a
     # string list) after ``canonicalWorkKey``. A v19 record decoded
     # without them would key a relocatable edge relocatably (its weak
@@ -7065,6 +7089,7 @@ proc writeBuildAction(outp: var seq[byte]; action: BuildAction) =
   outp.writeString(action.canonicalWorkKey)
   outp.add(if action.relocatable: 1'u8 else: 0'u8)
   outp.writeStringSeq(action.relocationAnchors)
+  outp.add(if action.isolateHostEnvironment: 1'u8 else: 0'u8)
 
 proc readBuildAction(bytes: openArray[byte]; pos: var int): BuildAction =
   result = BuildAction(
@@ -7164,6 +7189,22 @@ proc readBuildAction(bytes: openArray[byte]; pos: var int): BuildAction =
       "invalid lowered action relocatable sentinel")
   result.relocatable = relocatableByte == 1'u8
   result.relocationAnchors = readStringSeq(bytes, pos)
+  let isolateByte = readByteValue(bytes, pos)
+  if isolateByte > 1'u8:
+    raiseEnvelopeError(eeMalformed,
+      "invalid lowered action isolate-host-environment sentinel")
+  result.isolateHostEnvironment = isolateByte == 1'u8
+
+proc encodeLoweredAction*(action: BuildAction): seq[byte] =
+  ## One lowered action as the lowered-graph cache stores it.
+  result.writeBuildAction(action)
+
+proc decodeLoweredAction*(bytes: openArray[byte]): BuildAction =
+  ## The inverse of ``encodeLoweredAction``; raises on trailing bytes.
+  var pos = 0
+  result = readBuildAction(bytes, pos)
+  if pos != bytes.len:
+    raiseEnvelopeError(eeMalformed, "trailing lowered action bytes")
 
 proc encodeLoweredGraphCache(record: LoweredGraphCacheRecord): seq[byte] =
   result.writeString(LoweredGraphCacheMagic)
