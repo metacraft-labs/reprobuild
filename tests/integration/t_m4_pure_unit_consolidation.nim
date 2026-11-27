@@ -42,6 +42,25 @@
 ##     is that every selector a ledger recorded still resolves to a case that
 ##     exists — not that names never change.
 ##
+## A member can be RETIRED, and that is a third repair, not a looser alias.
+## When the subject a member tested leaves the tree — 84145f988 removed the
+## stdlib's duplicate ``claude-code`` package, so
+## ``t_catalog_claude_code.nim`` had nothing left to check — there is no
+## successor case to alias its selectors to, and restoring the member would
+## test a package that no longer exists. ``retiredMembers`` in a ledger
+## declares that deletion: keyed by the member source exactly as a bundle's
+## ``members`` records it, naming the commit that deleted it (``retiredBy``,
+## which must be an ancestor of the tree under test) and why (``reason``).
+## A retired member's recorded cases are excluded from the live loss
+## comparisons, and from nothing else: the dated batch arithmetic (member
+## counts, limits, binaries removed) still counts it, because the batch did
+## absorb it. What it is NOT is a per-case exemption. The entry is red while
+## the source file exists, while the generator still names it, while any
+## selector it recorded — raw or alias-resolved — still enumerates, or while
+## the bundle enumerates a case from that file; and a ``test`` block deleted
+## from a member that is still in the tree has no retirement to hide behind
+## — it is a rename (alias it) or a loss (restore it), and goes red here.
+##
 ## The two sides of "no case was lost"
 ## -----------------------------------
 ## One ledger per landed batch — `…-m4-consolidation-batch1.json`,
@@ -127,6 +146,85 @@ let ledgers = block:
     acc.add(readLedger(path))
   acc
 
+type
+  Retirement = object
+    ## One ``retiredMembers`` entry: a member deleted on purpose. See the
+    ## file header for what it does and does not excuse.
+    retiredBy: string   ## the commit that deleted the member's source
+    reason: string      ## why its subject no longer exists to be tested
+    successor: string   ## optional: the test that took over what remains
+
+# MEMBER SOURCE -> ITS DECLARED RETIREMENT, declared in the ledgers and
+# nowhere else, and asserted well-formed where it is read, like the alias
+# table below.
+let retiredMembers = block:
+  var recordedSources = initHashSet[string]()
+  for ledger in ledgers:
+    for bundle in ledger["bundles"]:
+      for member in bundle["members"]:
+        recordedSources.incl(member["source"].getStr())
+  var acc = initTable[string, Retirement]()
+  for ledger in ledgers:
+    if not ledger.hasKey("retiredMembers"):
+      continue
+    for source, entry in ledger["retiredMembers"]:
+      # A key that names no recorded member would retire nothing while
+      # reading as though it retired something.
+      doAssert source in recordedSources,
+        "retiredMembers names `" & source & "`, which no ledger records as " &
+        "a bundle member. A retirement is keyed by a member source exactly " &
+        "as a bundle's `members` block records it."
+      doAssert not acc.hasKey(source),
+        "retiredMembers declares `" & source & "` twice."
+      doAssert entry.kind == JObject,
+        "retiredMembers entry `" & source & "` is not an object."
+      let retiredBy = entry{"retiredBy"}.getStr()
+      let reason = entry{"reason"}.getStr()
+      doAssert retiredBy.len >= 9 and
+        retiredBy.allCharsInSet({'0'..'9', 'a'..'f'}),
+        "retiredMembers entry `" & source & "` has retiredBy `" & retiredBy &
+        "`, which is not a commit id. A retirement names the commit that " &
+        "deleted the member, so a reader can check the deletion was the " &
+        "point of that commit."
+      doAssert reason.strip().len > 0,
+        "retiredMembers entry `" & source & "` states no reason. A deletion " &
+        "without a reason is indistinguishable from a loss."
+      acc[source] = Retirement(retiredBy: retiredBy, reason: reason,
+        successor: entry{"successor"}.getStr())
+  acc
+
+proc isRetired(member: JsonNode): bool =
+  member["source"].getStr() in retiredMembers
+
+proc liveMembers(bundle: JsonNode): seq[JsonNode] =
+  ## The bundle's recorded members minus the retired ones: the members whose
+  ## cases must still be here.
+  result = @[]
+  for member in bundle["members"]:
+    if not member.isRetired:
+      result.add(member)
+
+proc retirementIsAncestor(retiredBy: string): tuple[known, ancestor: bool] =
+  ## Whether ``retiredBy`` is an ancestor of the checkout's HEAD. ``known``
+  ## is false only when the question cannot be asked here: no ``git`` on
+  ## PATH, a tree that is not a git checkout, or a shallow clone that does
+  ## not hold the commit. A commit that IS present and is not an ancestor is
+  ## a definite ``false`` — a retirement this tree does not contain.
+  if findExe("git").len == 0 or not dirExists(repoRoot / ".git") and
+      not fileExists(repoRoot / ".git"):
+    return (false, false)
+  let git = "git -C " & quoteShell(repoRoot)
+  let present = execCmdEx(git & " cat-file -e " &
+    quoteShell(retiredBy & "^{commit}"))
+  if present.exitCode != 0:
+    let shallow = execCmdEx(git & " rev-parse --is-shallow-repository")
+    if shallow.exitCode == 0 and shallow.output.strip() == "true":
+      return (false, false)
+    return (true, false)
+  let rc = execCmdEx(git & " merge-base --is-ancestor " &
+    quoteShell(retiredBy) & " HEAD").exitCode
+  (true, rc == 0)
+
 proc allBundles(): seq[JsonNode] =
   ## Every bundle any landed batch measured, in batch order.
   result = @[]
@@ -186,8 +284,10 @@ proc runOne(binary, caseName: string): int =
     " > " & quoteShell(if defined(windows): "NUL" else: "/dev/null") & " 2>&1")
 
 proc ledgerMemberNames(bundle: JsonNode): seq[string] =
+  ## The cases the ledger recorded for the bundle's LIVE members. A retired
+  ## member's cases are checked separately, for absence; see case 1.
   result = @[]
-  for member in bundle["members"]:
+  for member in bundle.liveMembers:
     for name in member["cases"]:
       result.add(name.getStr())
 
@@ -246,10 +346,10 @@ proc resolveSelector(historic: string): string =
 
 proc ledgerMemberSelectors(bundle: JsonNode):
     seq[tuple[historic, current: string]] =
-  ## Every selector this bundle's ledger entry recorded, paired with the one
-  ## it resolves to now.
+  ## Every selector this bundle's ledger entry recorded for a live member,
+  ## paired with the one it resolves to now.
   result = @[]
-  for member in bundle["members"]:
+  for member in bundle.liveMembers:
     for name in member["cases"]:
       let historic = name.getStr()
       result.add((historic: historic, current: resolveSelector(historic)))
@@ -287,6 +387,9 @@ suite "M4 pure-unit consolidation":
   test "test_consolidated_pure_unit_cases_list_individually":
     var checkedCases = 0
     var checkedBundles = 0
+    var retiredMemberCount = 0
+    var retiredSelectorCount = 0
+    let generatorText = readFile(repoRoot / GeneratorPath)
     for bundle in allBundles():
       let binary = bundleBinary(bundle)
       requireBuilt(binary)
@@ -317,6 +420,51 @@ suite "M4 pure-unit consolidation":
       # and is named as an alias: a redirection that points nowhere is as
       # broken as the stale selector it was written to fix.
       check missing.len == 0
+      # RETIRED MEMBERS, held to their entry's word. Their selectors are not
+      # in `expected` above, so this is the only place they are checked, and
+      # each arm is a way a retirement can be false.
+      let enumeratedSet = enumerated.toHashSet
+      for member in bundle["members"]:
+        if not member.isRetired:
+          continue
+        let source = member["source"].getStr()
+        let retirement = retiredMembers[source]
+        inc retiredMemberCount
+        # The deletion happened: the source is gone and the generator's
+        # bundle table no longer names it.
+        check not fileExists(repoRoot / source)
+        if fileExists(repoRoot / source):
+          checkpoint("retiredMembers declares `" & source & "` deleted, " &
+            "but the file is in the tree. Drop the entry, or delete the file.")
+        check not generatorText.contains("\"" & source & "\"")
+        if generatorText.contains("\"" & source & "\""):
+          checkpoint("retiredMembers declares `" & source & "` deleted, " &
+            "but " & GeneratorPath & " still names it.")
+        # The deletion is this tree's history, not a claim about some other
+        # branch.
+        let ancestry = retirementIsAncestor(retirement.retiredBy)
+        if ancestry.known:
+          check ancestry.ancestor
+          if not ancestry.ancestor:
+            checkpoint("retiredMembers entry `" & source & "` names " &
+              retirement.retiredBy & ", which is not an ancestor of HEAD.")
+        else:
+          checkpoint("could not check that " & retirement.retiredBy &
+            " (retiring `" & source & "`) is an ancestor of HEAD: no git " &
+            "history here holds it. Its form was checked at load time.")
+        # None of its cases survives under any name it was ever given: a
+        # retired selector that still enumerates means the member was not
+        # deleted at all, and its entry is hiding a live case from case 3.
+        for entry in member["cases"]:
+          let historic = entry.getStr()
+          inc retiredSelectorCount
+          for name in [historic, resolveSelector(historic)]:
+            check name notin enumeratedSet
+            if name in enumeratedSet:
+              checkpoint("`" & name & "` from retired member `" & source &
+                "` still enumerates in " & bundle["name"].getStr() &
+                ". A retirement declares the member's cases gone; this " &
+                "one is not, so it must be checked as recorded.")
       if missing.len > 0:
         var described: seq[string] = @[]
         for name in missing:
@@ -354,8 +502,12 @@ suite "M4 pure-unit consolidation":
       # entry lists as a member. A case added to a known member is the
       # repository working; a case arriving from a file no ledger names is the
       # defect, and it still goes red here.
+      #
+      # LIVE members only: a retired member's file is not a member any more,
+      # so a case still arriving from it is unattributed — the retirement is
+      # false, and this goes red.
       var memberFiles = initHashSet[string]()
-      for member in bundle["members"]:
+      for member in bundle.liveMembers:
         memberFiles.incl(extractFilename(member["source"].getStr()))
       let byName = catalogFiles(doc)
       var unattributed: seq[string] = @[]
@@ -387,7 +539,13 @@ suite "M4 pure-unit consolidation":
     # result, and a ledger that lost its `bundles` array would otherwise make
     # every loop above pass by never running.
     checkpoint("checked " & $checkedCases & " cases across " &
-      $checkedBundles & " bundles")
+      $checkedBundles & " bundles; " & $retiredMemberCount &
+      " retired member(s) checked absent, with " & $retiredSelectorCount &
+      " recorded selector(s)")
+    # Every declared retirement was reached by the loop above: the load-time
+    # assertion already ties each key to a recorded member, so a mismatch here
+    # would mean a member recorded outside `bundles`.
+    check retiredMemberCount == retiredMembers.len
     check checkedBundles >= 1
     check checkedCases >= 1
 
@@ -473,7 +631,19 @@ suite "M4 pure-unit consolidation":
             checkpoint(source & " is still its own test binary, so " & name &
               " compiles and counts it twice")
         check bundle["source"].getStr() in declaredSources
-        removedHere += members.len - 1
+        # The binaries THIS BATCH removed: the members it absorbed, folded
+        # into one. A row marked `addedAfterBatch` is a member a later commit
+        # put straight into the bundle; it never had a binary in this batch's
+        # `before` count, so counting it here would make the batch claim a
+        # removal it did not make and turn the suite arithmetic below red
+        # (c3ce21290 recorded t_catalog_launcher_toolchain.nim that way, and
+        # 19 against the ledger's 18 was the result). A retired member still
+        # counts: the batch did absorb it.
+        var absorbedByBatch = 0
+        for member in members:
+          if not member.hasKey("addedAfterBatch"):
+            inc absorbedByBatch
+        removedHere += absorbedByBatch - 1
 
         # NO CASE WAS LOST — measured live, then cross-checked against a
         # different producer.
@@ -518,7 +688,10 @@ suite "M4 pure-unit consolidation":
         let staticTotal = staticCounts.getOrDefault(bundle["source"].getStr())
         var staticFromMembers = 0
         var membersCarryStatic = true
-        for member in members:
+        # LIVE members: a retired member's dated static count names `test`
+        # blocks that were deleted on purpose, and its declared retirement is
+        # checked for exactly that in case 1.
+        for member in bundle.liveMembers:
           if not member.hasKey("staticCaseCountAtBase"):
             membersCarryStatic = false
             break
@@ -556,8 +729,13 @@ suite "M4 pure-unit consolidation":
 
         # FEWER BYTES, and measured on the live artifact rather than read back
         # out of the ledger.
+        #
+        # Against the LIVE members' standalone bytes: the bundle no longer
+        # links a retired member's code, so crediting the bundle with the
+        # bytes it replaced there would make the comparison easier to pass
+        # than what is actually in the binary justifies.
         var standaloneBytes = 0'i64
-        for member in members:
+        for member in bundle.liveMembers:
           standaloneBytes += member["standalone"]["binaryBytes"].getInt()
         let bundleBytes = getFileSize(bundleBinary(bundle))
         check bundleBytes < standaloneBytes
@@ -646,7 +824,10 @@ suite "M4 pure-unit consolidation":
       let doc = listJson(binary)
       let suites = catalogSuites(doc)
 
-      for member in bundle["members"]:
+      # LIVE members. A retired member's selectors were checked ABSENT in
+      # case 1; an alias that still redirects one of them is therefore
+      # followed by nothing here, and is reported dead below.
+      for member in bundle.liveMembers:
         for entry in member["cases"]:
           let historic = entry.getStr()
           let current = resolveSelector(historic)
@@ -699,7 +880,8 @@ suite "M4 pure-unit consolidation":
 
     check preserved >= 1
     checkpoint("preserved " & $preserved & " suite::test selectors (" &
-      $usedAliases.len & " of them through an explicit alias)")
+      $usedAliases.len & " of them through an explicit alias); " &
+      $retiredMembers.len & " retired member(s) not expected")
 
     # AN ALIAS THAT REDIRECTS NOTHING IS ITSELF STALE. Entries are keyed by
     # selectors the ledgers recorded, so an entry matching no recorded
@@ -715,8 +897,10 @@ suite "M4 pure-unit consolidation":
     check deadAliases.len == 0
     if deadAliases.len > 0:
       checkpoint($deadAliases.len & " `compatibilityAliases` entries match " &
-        "no selector any ledger records: " & deadAliases.join(", ") &
-        ". A redirection nothing follows is not a redirection.")
+        "no selector any ledger records for a live member: " &
+        deadAliases.join(", ") & ". A redirection nothing follows is not a " &
+        "redirection; an alias for a member in `retiredMembers` redirects " &
+        "a selector that is declared gone.")
 
     # The membership table is the human decision point; if it stops agreeing
     # with the ledger, the ledger is describing a batch that is no longer the
@@ -724,5 +908,7 @@ suite "M4 pure-unit consolidation":
     let generator = readFile(repoRoot / GeneratorPath)
     for bundle in allBundles():
       check generator.contains("name: \"" & bundle["name"].getStr() & "\"")
-      for member in bundle["members"]:
+      # A retired member is the exception, and the inverse is checked for
+      # it in case 1: the generator must NOT name it.
+      for member in bundle.liveMembers:
         check generator.contains("\"" & member["source"].getStr() & "\"")
