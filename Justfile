@@ -365,12 +365,27 @@ dev-shell-hooks:
 test-run-tests-runquota-endpoint:
     bash ./tests/test_run_tests_runquota_endpoint.sh
 
+# The `nim check` sweep in `just lint` leases each check from RunQuota, and
+# runs at most four at a time where no daemon answers, instead of one per
+# processor. Needs `runquota` and `runquotad`; see
+# tests/test_lint_nim_checks_are_admitted.sh.
+test-lint-nim-checks-are-admitted:
+    bash ./tests/test_lint_nim_checks_are_admitted.sh
+
 # The test phase of `just test` bounds every process's memory, so a runaway
 # case dies of its own failed allocation rather than the host's OOM killer.
 # Allocates up to 3 GiB in the control case; see
 # tests/test_run_tests_bounds_process_memory.sh.
 test-run-tests-bounds-process-memory:
     bash ./tests/test_run_tests_bounds_process_memory.sh
+
+# The lint's `nim check` sweep runs no more checks at once than the memory
+# available to it (a cgroup `memory.max`, or MemAvailable) holds, and names
+# a check that is killed. Runs the real sweep in transient user scopes with
+# `nim` replaced by a recorder; needs `systemd-run --user`. About a minute;
+# see tests/test_check_nim_sources_fan_out_fits_memory.sh.
+test-check-nim-sources-fan-out:
+    bash ./tests/test_check_nim_sources_fan_out_fits_memory.sh
 
 dev-env-full-regression:
     mkdir -p test-logs

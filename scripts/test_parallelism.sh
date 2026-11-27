@@ -94,19 +94,79 @@ reprobuild_is_ci() {
   [[ -n "${CI:-}" || -n "${GITHUB_ACTIONS:-}" ]]
 }
 
+# Headroom, in MiB, under the tightest cgroup v2 memory limit that binds this
+# process, or empty when no limit binds it or none can be read.
+#
+# A process is bound by `memory.max` of its own cgroup AND of every ancestor
+# (https://docs.kernel.org/admin-guide/cgroup-v2.html#memory-interface-files),
+# so the walk starts at the cgroup /proc/self/cgroup names (the `0::<path>`
+# line of the unified hierarchy) and goes up to the root of the cgroup2 mount.
+# Each limited level contributes `memory.max` minus what that subtree already
+# holds; the smallest wins. "Holds" is `memory.current` less the page cache on
+# the file LRU lists of `memory.stat` (`active_file` + `inactive_file`),
+# because the kernel reclaims those before it OOM-kills inside a cgroup -- the
+# cgroup analogue of MemAvailable. Not `file`: that also counts tmpfs and
+# shared memory (`shmem`), which live on the anon lists and, with no swap,
+# cannot be reclaimed at all.
+#
+# This is what a transient `systemd-run --user --scope -p MemoryMax=16G`
+# sets, and the fleet's build hosts require one around every Nim step; a
+# budget from MemAvailable alone sees the whole host and over-commits the
+# scope. Linux only: elsewhere there is no /proc/self/cgroup and the result is
+# empty.
+reprobuild_cgroup_memory_headroom_mb() {
+  [[ -r /proc/self/cgroup && -r /proc/self/mounts ]] || { printf '\n'; return 0; }
+  local rel root dir limit current file held headroom best=""
+  rel="$(sed -n 's/^0::\(.*\)$/\1/p' /proc/self/cgroup 2>/dev/null | head -n 1)"
+  root="$(awk '$3 == "cgroup2" { print $2; exit }' /proc/self/mounts 2>/dev/null || true)"
+  if [[ -z "${rel}" || -z "${root}" || ! -d "${root}" ]]; then
+    printf '\n'
+    return 0
+  fi
+  dir="${root}${rel%/}"
+  while :; do
+    limit="$(cat "${dir}/memory.max" 2>/dev/null || true)"
+    if [[ "${limit}" =~ ^[0-9]+$ ]]; then
+      current="$(cat "${dir}/memory.current" 2>/dev/null || true)"
+      [[ "${current}" =~ ^[0-9]+$ ]] || current=0
+      file="$(awk '$1 == "active_file" || $1 == "inactive_file" { n += $2; seen = 1 }
+        END { if (seen) print n }' "${dir}/memory.stat" 2>/dev/null || true)"
+      [[ "${file}" =~ ^[0-9]+$ ]] || file=0
+      held=$((current - file))
+      (( held >= 0 )) || held=0
+      headroom=$(((limit - held) / 1024 / 1024))
+      (( headroom >= 0 )) || headroom=0
+      if [[ -z "${best}" ]] || (( headroom < best )); then
+        best="${headroom}"
+      fi
+    fi
+    [[ "${dir}" == "${root}" || "${dir}" == / || -z "${dir}" ]] && break
+    dir="${dir%/*}"
+    [[ -n "${dir}" ]] || dir=/
+  done
+  printf '%s\n' "${best}"
+}
+
 # Available memory in MiB, or empty when it cannot be measured.
 #
 # "Available" rather than "free" on Linux: MemAvailable already discounts the
 # page cache the kernel would reclaim, which is the number a compiler fleet
-# actually gets. macOS has no equivalent, so hw.memsize (physical total) is
+# actually gets. Under a cgroup memory limit the headroom below that limit
+# (reprobuild_cgroup_memory_headroom_mb) is used when it is the smaller of
+# the two. macOS has no equivalent, so hw.memsize (physical total) is
 # used and the caller is on notice that it is an over-estimate; the core
 # fraction is the binding term on every Mac we build on.
 reprobuild_available_memory_mb() {
   if [[ -r /proc/meminfo ]]; then
-    local kb
+    local kb cg
     kb="$(awk '/^MemAvailable:/ { print $2; exit }' /proc/meminfo 2>/dev/null || true)"
     if [[ "${kb}" =~ ^[0-9]+$ ]] && (( kb > 0 )); then
-      printf '%s\n' "$((kb / 1024))"
+      local mb=$((kb / 1024))
+      cg="$(reprobuild_cgroup_memory_headroom_mb)"
+      if [[ "${cg}" =~ ^[0-9]+$ ]] && (( cg < mb )); then
+        mb="${cg}"
+      fi
+      printf '%s\n' "${mb}"
       return 0
     fi
   fi

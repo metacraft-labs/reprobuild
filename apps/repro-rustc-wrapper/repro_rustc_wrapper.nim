@@ -6,6 +6,10 @@
 ## contract (it never changes the command line, falls back to running rustc
 ## when it cannot report, and ends the way the compiler did).
 ##
+## In record mode (`REPRO_RUSTC_WRAPPER_RECORD`) it records each unit instead
+## of compiling it, and the same image, copied as a build script's
+## executable, runs as the recording stub (`repro_cargo_edge/record_mode`).
+##
 ## Its own binary, not a `repro` subcommand, because it runs once per rustc
 ## and its start-up is a cost every compile pays: it links the RunQuota
 ## client and nothing of the engine.

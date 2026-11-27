@@ -149,8 +149,12 @@ proc observeBuildsFromTwoShells(compileCall: string): ShellTempObservations =
     return
 
   # A short root: the compile's argv is in its action key, and a deep root
-  # makes the fixture needlessly fragile.
-  let tempRoot = "/tmp/rb-nimtemp-" & $getCurrentProcessId()
+  # makes the fixture needlessly fragile. Under the host's temp dir rather
+  # than a literal `/tmp`: this file runs on every OS, and on Windows `/tmp`
+  # is a drive-relative path that does not exist; the short name under
+  # `getTempDir()` keeps the root short, and honours the `TMPDIR` the test
+  # runner points at its per-checkout scratch.
+  let tempRoot = getTempDir() / ("rb-nimtemp-" & $getCurrentProcessId())
   removeDir(tempRoot)
   createDir(tempRoot)
   defer: removeDir(tempRoot)

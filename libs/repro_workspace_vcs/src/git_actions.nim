@@ -923,6 +923,10 @@ proc renderFetchReceipt(payload: GitVcsPayload; headSha, fetchOutput: string): s
   result.add("operation\tfetch\n")
   result.add("remote-name\t" & payload.remoteName & "\n")
   result.add("repo-path\t" & payload.repoPath & "\n")
+  # Only a branch-scoped fetch names its branch, so the receipt of an
+  # ordinary whole-remote fetch is byte-identical to what it always was.
+  if payload.branchName.len > 0:
+    result.add("branch\t" & payload.branchName & "\n")
   result.add("head-sha\t" & headSha & "\n")
   result.add("git-version\t" & payload.identityVersion & "\n")
   result.add("git-identity\t" & payload.identityDigestHex & "\n")
@@ -1373,6 +1377,22 @@ proc executeClone(payload: GitVcsPayload; cwd, receiptPath: string): ActionResul
     return partial
   succeeded()
 
+proc branchFetchRefspec*(remoteName, branchName: string): string =
+  ## The refspec that refreshes ``refs/remotes/<remoteName>/<branchName>``
+  ## from the remote's ``refs/heads/<branchName>`` and nothing else.
+  "+refs/heads/" & branchName & ":refs/remotes/" & remoteName & "/" &
+    branchName
+
+proc remoteLacksBranch(payload: GitVcsPayload;
+                       target, remoteName, branchName: string): bool =
+  ## Whether ``remoteName`` answered and has no ``refs/heads/<branchName>``.
+  ## False when it has the branch AND when the probe itself failed (exit 128:
+  ## unreachable, unknown remote), so a caller never reads a network failure
+  ## as an absent branch.
+  let probe = runGit(payload, ["-C", target, "ls-remote", "--exit-code",
+    "--heads", remoteName, "refs/heads/" & branchName])
+  probe.exitCode == 2
+
 proc executeFetch(payload: GitVcsPayload; cwd, receiptPath: string): ActionResult =
   let target = absoluteRepoPath(payload, cwd)
   if not hasGitEntry(target):
@@ -1395,6 +1415,19 @@ proc executeFetch(payload: GitVcsPayload; cwd, receiptPath: string): ActionResul
     fetchArgs.add("--depth")
     fetchArgs.add($payload.depth)
   fetchArgs.add(payload.remoteName)
+  # A branch-scoped fetch names the branch it refreshes as an explicit
+  # refspec. Without one, ``git fetch <remote>`` fetches whatever the
+  # checkout's ``remote.<remote>.fetch`` configuration says, and a narrow
+  # (``clone --single-branch``) refspec naming a branch the remote has since
+  # renamed or deleted fails the whole fetch with "couldn't find remote ref",
+  # even though the branch the caller asked for is there. The explicit refspec
+  # makes the result independent of that configuration and of the current
+  # branch's upstream. Leading ``+``: a remote-tracking ref follows the remote
+  # even across a force-push, as the default refspec does
+  # (https://git-scm.com/docs/git-fetch#_configured_remote_tracking_branches).
+  let branchScoped = payload.branchName.len > 0
+  if branchScoped:
+    fetchArgs.add(branchFetchRefspec(payload.remoteName, payload.branchName))
   withCheckoutVcsLock(target,
       (block: return failed("fetch-lock-failed", "could not lock checkout: " & target))):
     var res: tuple[exitCode: int; output: string]
@@ -1406,39 +1439,38 @@ proc executeFetch(payload: GitVcsPayload; cwd, receiptPath: string): ActionResul
         break
       sleep(25 * (attempt + 1))
     if res.exitCode != 0:
-      return failed("fetch-failed",
-        "git fetch exited " & $res.exitCode & ": " & res.output.trimmed)
+      # An explicit refspec whose source the remote does not have is a fetch
+      # error in git, but for a branch-scoped fetch it is an answer, not a
+      # failure: the branch is absent, and the caller decides what an absent
+      # branch means from the remote-tracking ref it reads next (a declared
+      # role refuses as ``no_role_ref`` / ``mainline_unresolved``,
+      # Workspace-Branch-Roles.md §2.2). ``ls-remote --exit-code`` tells the
+      # two apart without parsing git's message: it exits 2 exactly when the
+      # remote answered and no ref matched
+      # (https://git-scm.com/docs/git-ls-remote#Documentation/git-ls-remote.txt---exit-code),
+      # so an unreachable remote still fails the fetch below.
+      if not branchScoped or not remoteLacksBranch(payload, target,
+          payload.remoteName, payload.branchName):
+        return failed("fetch-failed",
+          "git fetch exited " & $res.exitCode & ": " & res.output.trimmed)
+      # The remote has no such branch, so a remote-tracking ref left by an
+      # earlier fetch names a branch that no longer exists. Remove it, as
+      # ``git fetch --prune`` would: otherwise the caller reads that stale
+      # tip and reconciles with, switches to or cuts from a deleted branch
+      # instead of refusing it (Workspace-Branch-Roles.md §2.2).
+      let staleRef = "refs/remotes/" & payload.remoteName & "/" &
+        payload.branchName
+      let stale = runGit(payload, ["-C", target, "update-ref", "-d", staleRef])
+      if stale.exitCode != 0:
+        return failed("fetch-prune-failed",
+          "git update-ref -d " & staleRef & " exited " & $stale.exitCode &
+          ": " & stale.output.trimmed)
     let headRes = resolveHeadSha(payload, target)
     if not headRes.ok:
       return failed("fetch-head-probe-failed", headRes.diagnostic)
     let receipt = renderFetchReceipt(payload, headRes.sha, res.output)  # git-merged-text: the receipt is content-addressed on fetch's report
     writeReceipt(receiptPath, receipt)
     return succeeded()
-
-proc executeSwitch(payload: GitVcsPayload; cwd, receiptPath: string): ActionResult =
-  let target = absoluteRepoPath(payload, cwd)
-  if not hasGitEntry(target):
-    return failed("switch-target-missing",
-      "switch target is not a git working tree: " & target)
-  # Refuse on a dirty tree BEFORE invoking git switch — the contract
-  # field is ``reason = "dirty"``, not a string match on git's output
-  # (M2 design rule 4).
-  let cleanRes = workingTreeIsClean(payload, target)
-  if not cleanRes.ok:
-    return failed("switch-status-probe-failed", cleanRes.diagnostic)
-  if not cleanRes.clean:
-    return failed("dirty",
-      "git switch refused: working tree is dirty at " & target)
-  let res = runGit(payload, ["-C", target, "switch", payload.branchName])
-  if res.exitCode != 0:
-    return failed("switch-failed",
-      "git switch exited " & $res.exitCode & ": " & res.output.trimmed)
-  let headRes = resolveHeadSha(payload, target)
-  if not headRes.ok:
-    return failed("switch-head-probe-failed", headRes.diagnostic)
-  let receipt = renderSwitchReceipt(payload, headRes.sha)
-  writeReceipt(receiptPath, receipt)
-  succeeded()
 
 proc resolveBranchSha(payload: GitVcsPayload; repoPath, branchName: string):
     tuple[exists: bool; sha: string; diagnostic: string] =
@@ -1467,6 +1499,63 @@ proc resolveBranchSha(payload: GitVcsPayload; repoPath, branchName: string):
   (exists: false, sha: "",
     diagnostic: "git rev-parse --verify failed (" & $res.exitCode & "): " &
       res.diagnostic)
+
+proc executeSwitch(payload: GitVcsPayload; cwd, receiptPath: string): ActionResult =
+  let target = absoluteRepoPath(payload, cwd)
+  if not hasGitEntry(target):
+    return failed("switch-target-missing",
+      "switch target is not a git working tree: " & target)
+  # Refuse on a dirty tree BEFORE invoking git switch — the contract
+  # field is ``reason = "dirty"``, not a string match on git's output
+  # (M2 design rule 4).
+  let cleanRes = workingTreeIsClean(payload, target)
+  if not cleanRes.ok:
+    return failed("switch-status-probe-failed", cleanRes.diagnostic)
+  if not cleanRes.clean:
+    return failed("dirty",
+      "git switch refused: working tree is dirty at " & target)
+  # A switch that names ``remoteName`` creates a missing local branch from
+  # ``refs/remotes/<remoteName>/<branch>`` explicitly and records its
+  # upstream itself. A bare ``git switch <branch>`` would guess that remote
+  # branch instead, and git's guess goes through the remote's CONFIGURED
+  # fetch refspecs: in a ``clone --single-branch`` checkout they map no
+  # other branch, so the guess fails with "invalid reference" although the
+  # remote-tracking ref the preceding fetch wrote is right there
+  # (https://git-scm.com/docs/git-switch#Documentation/git-switch.txt---guess).
+  let local = resolveBranchSha(payload, target, payload.branchName)
+  if local.diagnostic.len > 0:
+    return failed("switch-probe-failed", local.diagnostic)
+  if payload.remoteName.len > 0 and not local.exists:
+    let remoteRef = "refs/remotes/" & payload.remoteName & "/" &
+      payload.branchName
+    let create = runGit(payload, ["-C", target, "switch", "--no-track",
+      "-c", payload.branchName, remoteRef])
+    if create.exitCode != 0:
+      return failed("switch-failed",
+        "git switch -c " & payload.branchName & " " & remoteRef &
+        " exited " & $create.exitCode & ": " & create.output.trimmed)
+    # The upstream ``git switch --track`` would have written, written
+    # directly: ``--track`` validates the start point against the same
+    # configured refspecs (https://git-scm.com/docs/git-config#Documentation/git-config.txt-branchltnamegtremote).
+    for (key, value) in [("remote", payload.remoteName),
+                         ("merge", "refs/heads/" & payload.branchName)]:
+      let cfg = runGit(payload, ["-C", target, "config",
+        "branch." & payload.branchName & "." & key, value])
+      if cfg.exitCode != 0:
+        return failed("switch-track-failed",
+          "git config branch." & payload.branchName & "." & key &
+          " exited " & $cfg.exitCode & ": " & cfg.output.trimmed)
+  else:
+    let res = runGit(payload, ["-C", target, "switch", payload.branchName])
+    if res.exitCode != 0:
+      return failed("switch-failed",
+        "git switch exited " & $res.exitCode & ": " & res.output.trimmed)
+  let headRes = resolveHeadSha(payload, target)
+  if not headRes.ok:
+    return failed("switch-head-probe-failed", headRes.diagnostic)
+  let receipt = renderSwitchReceipt(payload, headRes.sha)
+  writeReceipt(receiptPath, receipt)
+  succeeded()
 
 proc executeBranchCreate(payload: GitVcsPayload;
                          cwd, receiptPath: string): ActionResult =
@@ -2308,17 +2397,28 @@ proc gitFetchAction*(id: string; identity: GitToolIdentity;
                      remoteName, repoPath, receiptPath: string;
                      cwd = ""; deps: openArray[string] = [];
                      cacheable = true;
-                     cloneFilter = ""; depth = 0): BuildAction =
+                     cloneFilter = ""; depth = 0;
+                     branchName = ""): BuildAction =
   ## Construct a cacheable fetch action. The fingerprint includes the
   ## ``repoPath`` because a fetch is a working-tree-local operation:
   ## two workspaces with the same remote name but different working
   ## trees must NOT share a cache entry.
   ##
+  ## ``branchName``, when set, scopes the fetch to that one branch: it fetches
+  ## ``+refs/heads/<branchName>:refs/remotes/<remoteName>/<branchName>``
+  ## explicitly instead of the checkout's configured refspecs, and a remote
+  ## that has no such branch is not a failure (the remote-tracking ref is
+  ## simply not refreshed). A caller that refreshes one known branch -- a
+  ## branch role's, or a switch target's -- passes it, so a narrow or stale
+  ## ``remote.<name>.fetch`` in the checkout cannot fail the refresh
+  ## (CLI/branch.md §"Fetching"). It is part of the fingerprint: a
+  ## branch-scoped fetch and a whole-remote fetch refresh different refs.
+  ##
   ## RA-14 — ``cloneFilter``/``depth`` carry the partial/shallow knobs
   ## onto the fetch (``--filter``/``--depth``) for develop-mode
   ## deepen-on-demand. They are excluded from the fingerprint (they do
   ## not change the resolved tree).
-  let payload = buildPayload(identity, gvoFetch, "", remoteName, "",
+  let payload = buildPayload(identity, gvoFetch, "", remoteName, branchName,
     "", repoPath, receiptPath, cloneFilter = cloneFilter, depth = depth)
   result = builtinAction(bakWorkspaceVcs, id, cwd = cwd,
     deps = deps, outputs = @[receiptPath], cacheable = cacheable,
@@ -2334,7 +2434,8 @@ proc gitFetchAction*(id: string; identity: GitToolIdentity;
 proc gitSwitchAction*(id: string; identity: GitToolIdentity;
                       branchName, repoPath, receiptPath: string;
                       cwd = ""; deps: openArray[string] = [];
-                      cacheable = false): BuildAction =
+                      cacheable = false;
+                      trackRemote = ""): BuildAction =
   ## Construct a switch action. The executor refuses on a dirty working
   ## tree and surfaces ``reason = "dirty"`` via the ``ActionResult`` (per
   ## M2 design rule 4).
@@ -2349,7 +2450,13 @@ proc gitSwitchAction*(id: string; identity: GitToolIdentity;
   ## would report ``switched`` while HEAD never moved. ``git switch`` is
   ## idempotent (already-on-branch is a safe no-op), so always executing is
   ## both correct and cheap.
-  let payload = buildPayload(identity, gvoSwitch, "", "", branchName,
+  ##
+  ## ``trackRemote``, when set, is the remote whose
+  ## ``refs/remotes/<trackRemote>/<branchName>`` a MISSING local branch is
+  ## created from, with that remote's branch recorded as its upstream. It is
+  ## explicit, so it does not depend on the checkout's configured fetch
+  ## refspecs the way ``git switch``'s own remote-branch guess does.
+  let payload = buildPayload(identity, gvoSwitch, "", trackRemote, branchName,
     "", repoPath, receiptPath)
   result = builtinAction(bakWorkspaceVcs, id, cwd = cwd,
     deps = deps, outputs = @[receiptPath], cacheable = cacheable,

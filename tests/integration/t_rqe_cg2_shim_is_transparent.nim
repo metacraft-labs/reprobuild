@@ -193,6 +193,38 @@ suite "the cargo shim changes nothing the caller can see":
     check nested.code == 0
     check liveSetFiles(rig.target).len == 1
 
+  test "test_rqe_cg2_shim_ignores_a_cargo_wrapper_in_front_of_it":
+    ## a repository's own wrapper (agent-harbor's dev-bin/cargo) sits first on
+    ## PATH and takes the first `cargo` that is not itself: the shim, when the
+    ## shim comes after it. The shim must then take the next one after ITSELF,
+    ## not the first on PATH, which is that wrapper again: the two would call
+    ## each other until the test's timeout. Wrapper -> shim -> real cargo.
+    let rig = newShimRig("wrapper")
+    defer: rig.cleanup()
+    let wrapperDir = rig.root / "wrapper-bin"
+    createDir(wrapperDir)
+    let wrapper = wrapperDir / "cargo"
+    writeFile(wrapper, "#!/bin/sh\n" &
+      "self=$(cd \"$(dirname \"$0\")\" && pwd)\n" &
+      "IFS=:\n" &
+      "for d in $PATH; do\n" &
+      "  [ \"$d\" = \"$self\" ] && continue\n" &
+      "  [ -x \"$d/cargo\" ] && exec \"$d/cargo\" \"$@\"\n" &
+      "done\n" &
+      "exit 127\n")
+    setFilePermissions(wrapper, {fpUserRead, fpUserWrite, fpUserExec,
+                                 fpGroupRead, fpGroupExec,
+                                 fpOthersRead, fpOthersExec})
+    let path = wrapperDir & ":" & rig.shimDir & ":" & rig.realCargo.parentDir &
+      ":" & getEnv("PATH")
+    let res = runShellSplit(shellCommand(@[wrapper] & arguments("check"),
+      [("PATH", path), ("CARGO_HOME", rig.cargoHome),
+       ("CARGO_TARGET_DIR", rig.target)]), rig.project, timeoutMs = 300_000)
+    checkpoint res.stderr
+    check res.code == 0
+    check res.stderr.contains("Finished")
+    check liveSetFiles(rig.target).len == 1 # the shim ran and recorded
+
   test "test_rqe_cg2_shim_is_byte_identical_on_a_terminal":
     ## with a terminal on both streams (colour on, as a person sees it) a
     ## recorded build or check prints what bare cargo prints

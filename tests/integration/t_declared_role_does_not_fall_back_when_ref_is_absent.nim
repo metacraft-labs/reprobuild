@@ -54,6 +54,11 @@ suite "declared_role_does_not_fall_back_when_ref_is_absent":
       let docsHead = ws.gitIn(ws.root / "docs", "rev-parse HEAD")
 
       # ---- 1. sync --unstable -----------------------------------------------
+      # A role sync refreshes only its role branch's remote-tracking ref
+      # (Workspace-Branch-Roles.md §4.6), so `origin/main` is fetched here:
+      # the moved `main` must be on disk, as a ref a faulty fallback could
+      # reconcile with, for "HEAD did not move" to mean anything.
+      discard ws.gitIn(ws.root / "core", "fetch -q origin")
       let sync = ws.runRepro(@["sync", rootArg, "--unstable", "--json"])
       checkpoint("sync --unstable exit=" & $sync.code & "\n" & sync.stdout &
         "\nstderr:\n" & sync.stderr)

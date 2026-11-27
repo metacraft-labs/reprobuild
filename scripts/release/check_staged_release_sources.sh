@@ -26,11 +26,11 @@
 # shell's `*_SRC` variables on Linux/macOS, `. .\env.ps1` and the sibling
 # checkouts on Windows (Git for Windows' bash) -- and `nim` on PATH.
 #
-# Keep TMPDIR OUTSIDE any workspace. The catalog half of the closure check
-# looks for reprobuild-packages beside the ancestors of its scratch directory,
-# so a scratch tree under a workspace finds the workspace's sibling first and
-# fails with "sqlite3 resolved from <workspace>/reprobuild-packages, not from
-# the archive's catalog" -- a property of where it ran, not of the archive.
+# TMPDIR may sit anywhere, including beside a workspace's reprobuild-packages
+# checkout. The catalog half of the closure check must compile from a scratch
+# directory the catalog lookup reaches no other catalog from, so it makes that
+# directory where none is reachable ($TMPDIR, else /tmp) and refuses, naming
+# what it found, only when neither qualifies (scripts/lib/catalog_free_scratch.sh).
 #
 #   bash scripts/release/check_staged_release_sources.sh
 #   just release-source-closure
