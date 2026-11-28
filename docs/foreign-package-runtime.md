@@ -2,12 +2,14 @@
 
 This document describes the runtime architecture for foreign-distro
 packages (apt/dnf/pacman) consumed via Reprobuild's content-addressed
-store. It complements:
+store. It builds on:
 
-* [Linux-Third-Party-Distro-Packages.md](../Linux-Third-Party-Distro-Packages.md)
-  (high-level design).
-* [Linux-Third-Party-Sandbox-MVP.milestones.org](../Linux-Third-Party-Sandbox-MVP.milestones.org)
-  (sandbox primitives, closed 2026-06-11).
+* the high-level design of foreign-distro packages: a package from a
+  third-party distribution's repository is fetched, unpacked into the
+  content-addressed store, and run with its own filesystem layout rather
+  than installed into the host's;
+* the sandbox primitives, completed on 2026-06-11: a user-namespace and
+  bind-mount launcher that gives such a package that layout;
 * `ReproOS-Generations-And-Foreign-Packages.milestones.org` Phase C
   (harvesting + realize-time integration).
 

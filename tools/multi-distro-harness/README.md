@@ -1,8 +1,9 @@
 # Multi-distro WSL test harness
 
-A disposable per-distro WSL2 test environment for the
-[Linux-Distro-Recipe-Validation](../../reprobuild-specs/Linux-Distro-Recipe-Validation.milestones.org)
-campaign. Provisions clean Arch / Debian / Ubuntu / Fedora / openSUSE / Alpine
+A disposable per-distro WSL2 test environment for the Linux distro recipe
+validation campaign, which checks that `repro` builds and that its recipe model
+works on each mainstream Linux distribution, not just on the one it is developed
+on. Provisions clean Arch / Debian / Ubuntu / Fedora / openSUSE / Alpine
 instances under WSL2 from official upstream rootfs tarballs, installs a
 minimum build-prereq set (gcc, make, git, curl), installs Nim from upstream
 (choosenim) where the apt/dnf/zypper/pacman/apk repos lag, and runs a

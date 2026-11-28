@@ -54,14 +54,14 @@ Rendered from `ct-test-surface-addressability.json` by the script that writes it
 | Command | `ct-test test discover --workspace <repo> --json` |
 | Ground truth | `benchmarks/reports/reprobuild-suite-m0-inventory-sources.json` (`staticCaseCount`) |
 | Catalogs returned | 5, from providers `assembly-fallback`, `nim-unittest`, `python-pytest`, `python-unittest` |
-| Items returned | 27,193 — 22,011 cases, 5,182 suites |
+| Items returned | 27,207 — 22,023 cases, 5,184 suites |
 | Response diagnostics | info: 1, warning: 33 (errors: 0) |
 | Tracked Nim suite sources | 3,347 |
 | …addressable through the surface | **3,339 (99.76%)** |
 | Tracked static case count | 21,138 |
 | …addressable through the surface | **20,723 (98.04%)** |
 | Per-source case-count agreement | 3,330 of 3,339 agree with the independent scanner |
-| Distinct case identities vs case items | 21,991 distinct for 22,011 items — **18** colliding identities |
+| Distinct case identities vs case items | 22,003 distinct for 22,023 items — **18** colliding identities |
 
 ### The 8 sources the surface cannot see, by recorded reason
 

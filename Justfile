@@ -843,6 +843,13 @@ lint:
     # public URL or state the fact in the document. Pure Python over tracked
     # Markdown, no build needed.
     python3 ./scripts/check_markdown_links_stay_in_repo.py 2>&1 | tee -a test-logs/lint.log
+    # Its in-repository half: every relative link that stays inside this
+    # repository must name a tracked path. Design documents copied here from
+    # beside their planning documents kept links to files this repository
+    # never held, dead for every reader. It shares the line above's Markdown
+    # parser, so the two agree on what a link is. Pure Python over tracked
+    # Markdown, no build needed.
+    python3 ./scripts/check_markdown_link_targets.py 2>&1 | tee -a test-logs/lint.log
     # Distributed-Execution M7 (deployment-security-architecture.md CONF-1,
     # CONF-3, CONF-4): the worker unit carries the confinement floor (every
     # omission argued in the unit), its syscall additions are the derived
