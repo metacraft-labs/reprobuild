@@ -5,7 +5,7 @@
     "pureUnitConsolidationGroups": 97,
     "pureUnitTests": 861,
     "staticallyDetectedRuntimeCompilerFlowTests": 165,
-    "testEntries": 3407
+    "testEntries": 3408
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1878,7 +1878,7 @@
       "integration": 1904,
       "platform/destructive": 207,
       "pure unit": 861,
-      "unclassified": 405
+      "unclassified": 406
     },
     "graphOwnedTestArtifacts": [
       {
@@ -2099,8 +2099,8 @@
       }
     ],
     "nimTestBinaryCount": 3345,
-    "pythonTestFileCount": 62,
-    "testEntryCount": 3407
+    "pythonTestFileCount": 63,
+    "testEntryCount": 3408
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -70600,6 +70600,21 @@
       "source": "tests/unit/test_bump_version.py",
       "sourceSuiteCount": 1,
       "staticCaseCount": 6,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "",
+      "class": "unclassified",
+      "classificationReason": "imports `pathlib`, which this scan does not recognize; refusing to call it pure rather than assuming it is",
+      "defines": [],
+      "language": "python",
+      "localDependencyShape": [],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/test_check_markdown_link_targets.py",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 12,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

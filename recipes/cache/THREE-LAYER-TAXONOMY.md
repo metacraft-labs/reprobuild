@@ -362,9 +362,9 @@ while preserving the signing identity.
   coarse-grained transport for whole package realizations with WAN
   semantics, signed manifests, mirror publication, eviction policy,
   in-flight sentinel for parallel publishers. The Peer-Cache spec
-  is explicit: "the peer cache complements (does not replace) the
-  central remote cache described in
-  [Binary-Caches.md](./Binary-Caches.md)".
+  is explicit that the peer cache complements, and does not
+  replace, the central remote cache: that central cache is
+  Layer 3.
 - **Reuse opportunities** (per A1 survey, consumed by A2/A2.5):
   - `libs/repro_peer_cache/src/repro_peer_cache/pki.nim` and
     `auth.nim` — layer-agnostic PKI + ECDSA-P256 primitives; A2's
