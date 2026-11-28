@@ -1,14 +1,17 @@
 ## The fixture package of `test_cs_m14_shim_answers_tests_entry`.
 ##
-## Three test binaries, each collected through `runPerTest`:
+## Four test binaries, each collected through `runPerTest`:
 ##
 ## * `shim_suite`: `suite` / `test` of `ct_test_unittest_parallel`, nothing
 ##   else. The shim answers nim-entrypoints' `tests` entry itself.
 ## * `shim_entry_suite`: the same tests in a `tests:` block of a program built
 ##   with nim-entrypoints (a `testCase` and a `main:` besides), which answers
 ##   the entry, with the shim as the block's framework.
-## * `plain_suite`: the same suite over `std/unittest` alone, which has no
-##   tests entry.
+## * `plain_suite`: the same tests over `std/unittest` alone, whose
+##   `std/unittest` (the pinned codetracer Nim fork's) answers the entry.
+## * `no_entry_suite`: the same tests in a program without the entry, which
+##   reads every argument as a test filter, as a `std/unittest` that does not
+##   know the entry does. It is run as a whole.
 ##
 ## The test copies this package to a scratch directory and fills in the
 ## placeholders before building it:
@@ -48,7 +51,12 @@ package cs_m14_shim_tests_entry:
       source = "src/plain_suite.nim",
       binary = "build/test-bin/plain_suite",
       actionId = "cs_m14_shim.compile.plain")
+    let noEntry = buildNimUnittest.build(
+      source = "src/no_entry_suite.nim",
+      binary = "build/test-bin/no_entry_suite",
+      actionId = "cs_m14_shim.compile.noentry")
     discard collect("test", [
       shim.testBinary.runPerTest(actionId = "cs_m14_shim.tests.shim"),
       entry.testBinary.runPerTest(actionId = "cs_m14_shim.tests.entry"),
-      plain.testBinary.runPerTest(actionId = "cs_m14_shim.tests.plain")])
+      plain.testBinary.runPerTest(actionId = "cs_m14_shim.tests.plain"),
+      noEntry.testBinary.runPerTest(actionId = "cs_m14_shim.tests.noentry")])

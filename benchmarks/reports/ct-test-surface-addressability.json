@@ -50,16 +50,16 @@
   "counts": {
     "catalogs": 5,
     "itemsByKind": {
-      "case": 22007,
-      "suite": 5181
+      "case": 22011,
+      "suite": 5182
     },
     "itemsByProvider": {
       "assembly-fallback": 3,
-      "nim-unittest": 26194,
+      "nim-unittest": 26199,
       "python-pytest": 7,
       "python-unittest": 984
     },
-    "itemsTotal": 27188,
+    "itemsTotal": 27193,
     "responseDiagnostics": {
       "info": 1,
       "warning": 33
@@ -349,28 +349,28 @@
   ],
   "reconciliation": {
     "caseCoveragePercent": 98.04,
-    "caseItemsInCatalog": 22007,
-    "casesAddressableThroughTheSurface": 20720,
+    "caseItemsInCatalog": 22011,
+    "casesAddressableThroughTheSurface": 20723,
     "collidingIdentities": 18,
-    "distinctCaseIdentities": 21987,
+    "distinctCaseIdentities": 21991,
     "groundTruth": "benchmarks/reports/reprobuild-suite-m0-inventory-sources.json",
     "perSourceCaseCountAgreement": {
-      "agree": 3329,
-      "compared": 3338,
+      "agree": 3330,
+      "compared": 3339,
       "disagree": 9
     },
     "sourceCoveragePercent": 99.76,
-    "sourcesAddressableThroughTheSurface": 3338,
+    "sourcesAddressableThroughTheSurface": 3339,
     "sourcesNotAddressable": 8,
-    "trackedNimSuiteSources": 3346,
-    "trackedStaticCaseCount": 21135
+    "trackedNimSuiteSources": 3347,
+    "trackedStaticCaseCount": 21138
   },
   "schemaVersion": 2,
   "surface": {
     "binary": "ct-test",
     "provenance": "",
     "resolvedBy": "PATH:ct-test",
-    "sha256": "746a73fd92f7d51f970910820f3ed136aebc59a2f58a0b0f6f97263d6d8eafe6"
+    "sha256": "ee098e52f64984e71c20a8bcf47018c1b5dc43be679ca4bc94c91e78cc4b0ad5"
   },
   "title": "Reprobuild case addressability through the canonical `ct test` surface",
   "trackedNimSources": [
@@ -2955,6 +2955,7 @@
     "tests/integration/t_pre_push_gate_checks_only_pushed_repo_dependency_closure.nim",
     "tests/integration/t_pre_push_gate_enforces_inside_a_linked_worktree.nim",
     "tests/integration/t_pre_push_gate_judges_a_large_reference_tree.nim",
+    "tests/integration/t_pre_push_identity_of_a_linked_worktree_beside_a_redirected_checkout.nim",
     "tests/integration/t_pre_push_identity_of_a_nested_submodule_checkout.nim",
     "tests/integration/t_pre_push_lock_records_unmaterialized_declared_repo.nim",
     "tests/integration/t_pre_push_membership_repo_scopes_to_touched_fragments.nim",

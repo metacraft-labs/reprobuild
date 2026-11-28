@@ -49814,7 +49814,10 @@ type
     repoIndex: int
     worktree: GitWorktreeDiscovery
     diagnostic: string
-    previousIdentityNotice: string
+    identityNotice: string
+      ## When found: a notice the gate prints with its verdict — the match
+      ## came through a declared previous identity, or through the Git common
+      ## directory of a declared checkout that is not its own worktree root.
     declaredCheckoutIndex: int
       ## When not found: the declared repo whose checkout EXISTS and whose
       ## remote identity the pushed worktree shares, or -1. The pushed
@@ -49982,6 +49985,7 @@ proc resolveRepoWorktreeMatch(identity: GitToolIdentity;
     return
 
   var commonMatches: seq[int]
+  var commonNotices = initTable[int, string]()
   var missingDeclaredWorktrees = initHashSet[int]()
   var presentDeclaredWorktrees: seq[int]
   for index, repo in repos:
@@ -49992,6 +49996,40 @@ proc resolveRepoWorktreeMatch(identity: GitToolIdentity;
         commonMatches.add(index)
       else:
         presentDeclaredWorktrees.add(index)
+    elif hasGitEntry(declaredPath):
+      # The declared path holds a repository (`.git` is there), but Git does
+      # not answer the path as its worktree root. In practice this is a
+      # `core.worktree` in the SHARED config — which every linked worktree of
+      # the repository reads — pointing the main worktree at another
+      # directory, so `rev-parse --show-toplevel` from the declared path
+      # answers that directory. The repository is still the one at the
+      # declared path, and sharing its Git common directory is what this
+      # step identifies a linked worktree by, so read it from the declared
+      # path's OWN `.git` entry: `--git-dir` binds to exactly that entry and
+      # never walks up, so a plain directory nested in another checkout
+      # cannot borrow the enclosing repository's identity. This must not
+      # become remote recovery for a corrupt checkout (below): only a
+      # worktree that shares this object store matches here. Without it,
+      # every push from every linked worktree of such a repository was
+      # refused as matching no declared repo.
+      let common = gitRunPlainQuery(identity,
+        ["--git-dir=" & declaredPath / ".git", "rev-parse", "--git-common-dir"])
+      let declaredCommon =
+        if common.code == 0 and common.output.strip().len > 0:
+          canonicalDiscoveredGitPath(declaredPath, common.output.strip())
+        else: ""
+      if declaredCommon.len > 0 and
+          samePathIdentity(result.worktree.commonDir, declaredCommon):
+        commonMatches.add(index)
+        commonNotices[index] = "recognized '" & repo.name & "' by its Git " &
+          "common directory, but its declared checkout at " &
+          canonicalDiscoveredGitPath(workspaceRoot, declaredPath) &
+          " is not its own Git worktree root (" &
+          declaredWorktree.diagnostic & "); a `core.worktree` in " &
+          canonicalDiscoveredGitPath(declaredPath, declaredCommon) /
+            "config" & " is the usual cause: check `git -C " &
+          remedyPathWord(canonicalDiscoveredGitPath(workspaceRoot,
+            declaredPath)) & " config --get core.worktree`"
     elif not dirExists(declaredPath) and not fileExists(declaredPath) and
         not symlinkExists(declaredPath):
       # Remote identity is a recovery path for an ABSENT declared checkout,
@@ -50004,6 +50042,7 @@ proc resolveRepoWorktreeMatch(identity: GitToolIdentity;
   if commonMatches.len == 1:
     result.found = true
     result.repoIndex = commonMatches[0]
+    result.identityNotice = commonNotices.getOrDefault(result.repoIndex)
     return
   if commonMatches.len > 1:
     result.ambiguous = true
@@ -50040,7 +50079,7 @@ proc resolveRepoWorktreeMatch(identity: GitToolIdentity;
   if previousMatches.len == 1:
     result.found = true
     result.repoIndex = previousMatches[0]
-    result.previousIdentityNotice = previousNotices[result.repoIndex]
+    result.identityNotice = previousNotices[result.repoIndex]
     return
   if previousMatches.len > 1:
     result.ambiguous = true
@@ -50075,7 +50114,7 @@ proc resolveRepoWorktreeMatch(identity: GitToolIdentity;
   if remoteMatches.len == 1:
     result.found = true
     result.repoIndex = remoteMatches[0]
-    result.previousIdentityNotice = previousNotices.getOrDefault(result.repoIndex)
+    result.identityNotice = previousNotices.getOrDefault(result.repoIndex)
   elif remoteMatches.len > 1:
     result.ambiguous = true
     result.diagnostic = "more than one declared repo matches the pushed " &
@@ -77344,6 +77383,17 @@ proc executeCheckPrePush(parsed: CheckArgs;
   # observers: it is the shared workspace-level diff that `sync` and `status`
   # also print, so it reads the DECLARED checkouts and would otherwise report a
   # different answer than they do for the same workspace.
+  template recordRefusalActiveBranch() =
+    # An identity refusal returns before the branch is derived below, and the
+    # report's header line then read `branch=<none>` for a workspace that has
+    # one. Best effort: a state file the strict reader rejects must not
+    # replace the identity refusal with its own error.
+    try:
+      result.activeBranch = deriveCheckActiveBranch(
+        parsed, workspaceLocal, resolved)
+    except CatchableError:
+      discard
+
   var currentRepoPath = ""
   var currentRepoName = ""
   var currentRepoMatch: RepoWorktreeMatch
@@ -77354,8 +77404,8 @@ proc executeCheckPrePush(parsed: CheckArgs;
       let repo = resolved.repos[currentRepoMatch.repoIndex]
       currentRepoPath = repo.path
       currentRepoName = repo.name
-      if currentRepoMatch.previousIdentityNotice.len > 0:
-        result.notices.add(currentRepoMatch.previousIdentityNotice)
+      if currentRepoMatch.identityNotice.len > 0:
+        result.notices.add(currentRepoMatch.identityNotice)
     elif currentRepoMatch.ambiguous:
       result.failures.add(CheckFailure(
         repo: "",
@@ -77364,6 +77414,7 @@ proc executeCheckPrePush(parsed: CheckArgs;
           "repair its Git remote, then retry the push",
         evidence: currentRepoMatch.diagnostic))
       result.exitCode = 2
+      recordRefusalActiveBranch()
       return
 
   let layerLocations = enumerateManifestLayerLocations(
@@ -77424,6 +77475,7 @@ proc executeCheckPrePush(parsed: CheckArgs;
       remediation: remediation,
       evidence: currentRepoMatch.diagnostic))
     result.exitCode = 2
+    recordRefusalActiveBranch()
     return
 
   result.activeBranch = deriveCheckActiveBranch(

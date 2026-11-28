@@ -10,8 +10,10 @@
 ##
 ## The tests entry (``<binary> --entrypoint=tests --list``, the run-time
 ## selector of nim-entrypoints, https://github.com/metacraft-labs/nim-entrypoints)
-## needs one more step.  The fork reads that ``--list`` as its own and points
-## descriptor 1 at stderr; in a program built with nim-entrypoints it is
+## needs one more step with a fork before ``4fda9ccd``.  That fork reads that
+## ``--list`` as its own and points descriptor 1 at stderr (from ``4fda9ccd``
+## on the fork knows the selector and does not); in a program built with
+## nim-entrypoints it is
 ## nim-entrypoints that prints the list, on descriptor 1, so the list would
 ## land on stderr.  ``restoreEntryStdout`` points descriptor 1 back at the
 ## stream kept here, and ``divertStdoutToStderr`` is the fork's protection,
