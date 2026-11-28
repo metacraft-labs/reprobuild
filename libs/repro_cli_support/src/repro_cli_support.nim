@@ -32899,10 +32899,15 @@ proc committedLockPathBase(projectRoot: string): string =
 # shares:
 #
 #   1. a develop override of that name (`.repro/develop-overrides.toml` of the
-#      lock's directory, then of the enclosing workspace root) — the specified
-#      home of a local materialization (§"Develop-Mode Override File");
+#      lock's directory, then of the enclosing workspace root when the lock
+#      belongs to that workspace, as in rule 2) — the specified home of a
+#      local materialization (§"Develop-Mode Override File");
 #   2. the enclosing workspace's DECLARED membership (`repos/*.toml`): where
-#      the manifest puts the repository of that name;
+#      the manifest puts the repository of that name — consulted only when the
+#      lock belongs to that workspace (`lockBelongsToWorkspace`: a directory
+#      between the lock's directory and the workspace root is a checkout some
+#      fragment declares, or none of them is a checkout), never for a checkout
+#      that merely sits below a workspace root it is not a member of;
 #   3. a directory of that name that is actually present BENEATH the lock's
 #      directory: `<lock dir>/<name>` when the lock's directory is not itself
 #      a repository — a committed-lock-only workspace root, whose member repos
@@ -32942,13 +32947,28 @@ type
     lockDir: string            ## the directory holding the lock, as invoked
     pathBase: string           ## ``committedLockPathBase(lockDir)``
     overrides: Table[string, string]
-      ## dependency name -> absolute override ``local_path``
+      ## dependency name -> absolute override ``local_path``, from the lock's
+      ## own directory
+    outerRoot: string
+      ## The enclosing workspace root (``findWorkspaceRoot`` of ``pathBase``)
+      ## when it is not the lock's directory; "" otherwise.
+    outerOverrides: Table[string, string]
+      ## Like ``overrides``, from ``outerRoot``'s override file. Honoured only
+      ## when the lock belongs to that workspace (``lockBelongsToOuter``).
+    belongsChecked: bool
+    belongs: bool
+      ## Memo of ``lockBelongsToOuter``.
     membershipLoaded: bool
     members: Table[string, string]
       ## repository name -> absolute manifest-declared checkout
+    membershipRoot: string
+      ## The workspace root whose declared membership ``members`` holds, when
+      ## ``loadMembership`` applied one; "" otherwise (including when the
+      ## caller supplied the membership). ``repro health --fix`` counts it as
+      ## part of the extent it may clone into.
 
-proc addDevelopOverridesOf(loc: var LockedDepLocator; root: string) =
-  ## Fold ``<root>/.repro/develop-overrides.toml`` into ``loc``; an entry
+proc addDevelopOverridesOf(table: var Table[string, string]; root: string) =
+  ## Fold ``<root>/.repro/develop-overrides.toml`` into ``table``; an entry
   ## already placed by an earlier file wins. An unreadable file contributes
   ## nothing: an override is a local preference, and the strict reader of
   ## that file is `repro develop`'s business, not every lock reader's.
@@ -32957,8 +32977,8 @@ proc addDevelopOverridesOf(loc: var LockedDepLocator; root: string) =
     if doc.isNone: return
     for e in listOverrides(doc.get()):
       if e.package.len == 0 or e.local_path.len == 0: continue
-      if e.package in loc.overrides: continue
-      loc.overrides[e.package] =
+      if e.package in table: continue
+      table[e.package] =
         os.normalizedPath(absolutePath(e.local_path, root))
   except CatchableError:
     discard
@@ -32972,11 +32992,13 @@ proc lockedDepLocator*(lockDir: string; pathBase = ""): LockedDepLocator =
   result = LockedDepLocator(lockDir: dir,
     pathBase: (if pathBase.len > 0: pathBase else: committedLockPathBase(dir)),
     overrides: initTable[string, string](),
+    outerOverrides: initTable[string, string](),
     members: initTable[string, string]())
-  result.addDevelopOverridesOf(dir)
+  result.overrides.addDevelopOverridesOf(dir)
   let ws = findWorkspaceRoot(result.pathBase)
   if ws.len > 0 and cmpPaths(os.normalizedPath(absolutePath(ws)), dir) != 0:
-    result.addDevelopOverridesOf(os.normalizedPath(absolutePath(ws)))
+    result.outerRoot = os.normalizedPath(absolutePath(ws))
+    result.outerOverrides.addDevelopOverridesOf(result.outerRoot)
 
 proc lockedDepLocator*(lockDir, workspaceRoot: string;
     members: openArray[tuple[name, path: string]];
@@ -32987,11 +33009,83 @@ proc lockedDepLocator*(lockDir, workspaceRoot: string;
   ## then resolves the membership once, not once per lock.
   result = lockedDepLocator(lockDir, pathBase)
   result.membershipLoaded = true
+  # The caller walks the participating repos of ``workspaceRoot``, so the lock
+  # is one of that workspace's own.
+  result.belongsChecked = true
+  result.belongs = true
   for m in members:
     if m.name.len == 0 or m.path.len == 0 or m.name in result.members:
       continue
     result.members[m.name] =
       os.normalizedPath(absolutePath(m.path, workspaceRoot))
+
+proc declaredFragmentCheckouts(ws: string): seq[string] =
+  ## The absolute checkout of every repository a ``repos/*.toml`` fragment of
+  ## ``ws``'s manifests declares, whether or not an enabled project includes
+  ## it. An unreadable fragment contributes nothing.
+  let reposDir = manifestsRoot(ws) / "repos"
+  if not dirExists(reposDir): return
+  for kind, path in walkDir(reposDir):
+    if kind notin {pcFile, pcLinkToFile} or not path.endsWith(".toml"):
+      continue
+    try:
+      # Manifest file I/O the compiler cannot prove GC-safe; lock readers call
+      # this from `{.gcsafe.}` procs on the owning thread (see
+      # ``loadMembership`` for the same cast).
+      var fragment: RepoFragment
+      {.cast(gcsafe).}:
+        fragment = readRepoFragment(path)
+      if fragment.repo.path.len > 0:
+        result.add(os.normalizedPath(absolutePath(fragment.repo.path, ws)))
+    except CatchableError:
+      discard
+
+proc lockBelongsToWorkspace(pathBase, ws: string;
+    declared: openArray[string]): bool =
+  ## Does the lock whose frame is ``pathBase`` belong to the workspace rooted
+  ## at ``ws`` (Workspace-Manifests.md §"The locked-dependency model", rule
+  ## 2)? ``declared`` holds the absolute checkouts the workspace's resolved
+  ## membership names; every fragment its manifests declare counts as well.
+  ##
+  ## The nearest marked ancestor is not necessarily the lock's workspace: a
+  ## project cloned into a plain directory below a home directory that is
+  ## itself a workspace root finds that home workspace, which declares its own
+  ## ``<home>/<name>`` checkouts and knows nothing of this one. Placing the
+  ## lock's dependencies by it (or by its develop overrides) put every
+  ## sibling at ``<home>/<name>`` while the real checkouts sat at
+  ## ``../<name>``, and ``repro health --fix`` cloned them into the home
+  ## directory.
+  ##
+  ## So the directories from ``pathBase`` up to, not including, ``ws`` are
+  ## examined. The lock belongs when one of them is a declared checkout (the
+  ## lock is a member's own, or sits anywhere inside a member's tree, such as
+  ## a nested ``deps/<name>`` checkout or a subdirectory project), or when none
+  ## of them is a checkout at all (the lock is the root repository's own, or
+  ## sits in a plain directory of the workspace). A ``ws`` that is not an
+  ## ancestor of ``pathBase`` was named explicitly (``REPRO_WORKSPACE_CONFIG``)
+  ## and is taken as the lock's workspace.
+  if cmpPaths(pathBase, ws) == 0: return true
+  let rel = relativePath(pathBase, ws).replace('\\', '/')
+  if rel.len == 0 or rel == ".." or rel.startsWith("../") or rel.isAbsolute:
+    return true
+  var fragments: seq[string]
+  var fragmentsRead = false
+  var sawCheckout = false
+  var probe = pathBase
+  while probe.len > 0 and cmpPaths(probe, ws) != 0:
+    if isGitCheckoutDir(probe):
+      sawCheckout = true
+      for path in declared:
+        if cmpPaths(path, probe) == 0: return true
+      if not fragmentsRead:
+        fragments = declaredFragmentCheckouts(ws)
+        fragmentsRead = true
+      for path in fragments:
+        if cmpPaths(path, probe) == 0: return true
+    let parent = parentDir(probe)
+    if parent.len == 0 or parent == probe: break
+    probe = parent
+  not sawCheckout
 
 proc loadMembership(loc: var LockedDepLocator) =
   ## Resolve the enclosing workspace's membership into ``loc.members``, once.
@@ -33022,12 +33116,35 @@ proc loadMembership(loc: var LockedDepLocator) =
     {.cast(gcsafe).}:
       repos = resolveWorkspaceProjectShared(ws, "",
         "placing a locked dependency").resolved.repos
+    var members = initTable[string, string]()
     for r in repos:
-      if r.name.len == 0 or r.path.len == 0 or r.name in loc.members:
+      if r.name.len == 0 or r.path.len == 0 or r.name in members:
         continue
-      loc.members[r.name] = os.normalizedPath(absolutePath(r.path, ws))
+      members[r.name] = os.normalizedPath(absolutePath(r.path, ws))
+    # The membership describes this lock only when the lock BELONGS to that
+    # workspace (``lockBelongsToWorkspace``); otherwise rules 3 and 4 decide.
+    var declared: seq[string]
+    for path in members.values: declared.add(path)
+    if not lockBelongsToWorkspace(loc.pathBase, ws, declared):
+      return
+    for name, path in members:
+      if name notin loc.members:
+        loc.members[name] = path
+    loc.membershipRoot = ws
   except CatchableError:
     discard
+
+proc lockBelongsToOuter(loc: var LockedDepLocator): bool =
+  ## Does this lock belong to the enclosing workspace ``loc.outerRoot``
+  ## (``lockBelongsToWorkspace``)? Memoized; false when there is none.
+  if loc.belongsChecked: return loc.belongs
+  loc.belongsChecked = true
+  loc.belongs = false
+  if loc.outerRoot.len == 0: return false
+  loc.loadMembership()
+  loc.belongs = loc.membershipRoot.len > 0 or
+    lockBelongsToWorkspace(loc.pathBase, loc.outerRoot, [])
+  loc.belongs
 
 proc lockedDepCheckoutPath*(loc: var LockedDepLocator; name: string;
     honourOverrides = true): string =
@@ -33047,6 +33164,12 @@ proc lockedDepCheckoutPath*(loc: var LockedDepLocator; name: string;
     else: rel
   if honourOverrides and name in loc.overrides:
     let rel = loc.placed(loc.overrides[name])
+    if rel.len > 0: return rel
+  # The enclosing workspace's overrides speak for that workspace's checkouts
+  # only, exactly like its membership below (``lockBelongsToOuter``).
+  if honourOverrides and name in loc.outerOverrides and
+      loc.lockBelongsToOuter():
+    let rel = loc.placed(loc.outerOverrides[name])
     if rel.len > 0: return rel
   loc.loadMembership()
   if name in loc.members:
@@ -83630,6 +83753,14 @@ type
       ## Malformed workspace files ``gatherHealthChecks`` set aside; the rows
       ## then describe the workspace without them, so ``--fix`` must not act.
     missingSiblings: seq[ResolvedRepo]
+    siblingDestinations: seq[string]
+      ## Parallel to ``missingSiblings``: the absolute directory a clone of
+      ## each would create (``siblingDestination``).
+    siblingExtent: seq[string]
+      ## The directories ``--fix`` may clone into (``siblingCloneExtent``).
+    siblingRefused: seq[bool]
+      ## Parallel to ``missingSiblings``: the destination lies outside
+      ## ``siblingExtent``, so ``--fix`` refuses to clone it.
     gitIdentity: GitToolIdentity
     gitOk: bool
     leafReports: seq[LeafCheckReport]
@@ -84085,6 +84216,45 @@ const HealthDigestMaxShown = 5
   ## finding list, so it is a constant rather than a per-call-site default:
   ## two rows that digested at different widths would make the `(+N more)`
   ## suffix unreadable as a convention.
+
+proc siblingDestination(workspaceRoot: string; repo: ResolvedRepo): string =
+  ## The absolute directory a clone of the missing ``repo`` creates: its
+  ## location (relative to ``workspaceRoot``, as the membership resolution
+  ## states it) joined to the root. Printed by the ``siblings`` row and its
+  ## ``--fix`` so the directory is on screen before anything is created there.
+  os.normalizedPath(absolutePath(repo.path, workspaceRoot))
+
+proc pathIsAtOrBelow(path, base: string): bool =
+  ## ``path`` is ``base`` or lies beneath it. Both absolute and normalized.
+  if cmpPaths(path, base) == 0: return true
+  let rel = relativePath(path, base).replace('\\', '/')
+  rel.len > 0 and rel != "." and rel != ".." and
+    not rel.startsWith("../") and not rel.isAbsolute
+
+proc siblingCloneExtent(workspaceRoot, projectName: string): seq[string] =
+  ## The directories ``repro health --fix`` may clone a missing sibling into
+  ## (CLI/health.md §"Dependencies / siblings"): the workspace root; and, for
+  ## a committed-lock-only workspace (one whose membership the resolution
+  ## ladder derives from its committed ``repro.lock``: no resolved manifest
+  ## checkout and no compositional state file, whatever other state file it
+  ## carries), the root's parent, where the one-level ``../<name>`` placement
+  ## puts its siblings — unless that parent is the filesystem root — plus the
+  ## root of an enclosing workspace whose declared membership placed them. A
+  ## develop override may name any directory; one outside this extent is not
+  ## a place a repair should create a repository in unasked.
+  let root = os.normalizedPath(absolutePath(workspaceRoot))
+  result = @[root]
+  if hasCommittedLockWorkspaceMarker(root) and
+      not hasResolvedManifestCheckout(root) and
+      not isCompositionalWorkspaceToml(root, projectName):
+    let parent = parentDir(root)
+    if parent.len > 0 and parent != root and parentDir(parent).len > 0 and
+        parentDir(parent) != parent:
+      result.add(os.normalizedPath(parent))
+    var loc = lockedDepLocator(root)
+    loc.loadMembership()
+    if loc.membershipRoot.len > 0 and loc.membershipRoot notin result:
+      result.add(loc.membershipRoot)
 
 proc formatFindingList(items: openArray[string]; verbose: bool;
                        maxShown = HealthDigestMaxShown): string =
@@ -84950,8 +85120,19 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
             " declared repos checked out",
           remedy: "", fixKind: hfNone))
       else:
+        ctx.siblingExtent = siblingCloneExtent(parsed.workspaceRoot,
+          parsed.projectName)
         var names: seq[string]
-        for repo in ctx.missingSiblings: names.add(repo.path)
+        for repo in ctx.missingSiblings:
+          let dest = siblingDestination(parsed.workspaceRoot, repo)
+          var inside = false
+          for base in ctx.siblingExtent:
+            if pathIsAtOrBelow(dest, base):
+              inside = true
+              break
+          ctx.siblingDestinations.add(dest)
+          ctx.siblingRefused.add(not inside)
+          names.add(repo.path & " (" & dest & ")")
         checks.add(HealthCheck(
           name: "siblings",
           status: hsFail,
@@ -86596,12 +86777,28 @@ proc healthFixPlanLines*(parsed: HealthArgs; checks: seq[HealthCheck];
     of hfStartDaemon:
       steps.add(c.name & ": start the user store daemon")
     of hfCloneSiblings:
-      var names: seq[string]
-      for repo in ctx.missingSiblings: names.add(repo.path)
-      steps.add(c.name & ": clone " & $names.len & " missing " &
-        (if names.len == 1: "repository" else: "repositories") &
-        " over the network (" & formatFindingList(names, parsed.verbose) &
-        ")")
+      # Every directory the fix will create is named here, absolute, and so is
+      # every destination it will refuse (CLI/health.md §"Dependencies /
+      # siblings"): the declared form alone (`../../../x`) hid that the clones
+      # were about to land in the home directory.
+      var names, dests, refused: seq[string]
+      for i, repo in ctx.missingSiblings:
+        if i < ctx.siblingRefused.len and ctx.siblingRefused[i]:
+          refused.add(ctx.siblingDestinations[i])
+        else:
+          names.add(repo.path)
+          dests.add(ctx.siblingDestinations[i])
+      var parts: seq[string]
+      if names.len > 0:
+        parts.add("clone " & $names.len & " missing " &
+          (if names.len == 1: "repository" else: "repositories") &
+          " over the network (" & formatFindingList(names, parsed.verbose) &
+          ") into " & formatFindingList(dests, parsed.verbose))
+      if refused.len > 0:
+        parts.add("refuse " & $refused.len & " outside the workspace (" &
+          ctx.siblingExtent.join(", ") & "): " &
+          formatFindingList(refused, parsed.verbose))
+      steps.add(c.name & ": " & parts.join("; "))
     of hfEnsureVcsHooks:
       steps.add(c.name & ": reinstall the managed VCS hooks across the " &
         "workspace")
@@ -86682,10 +86879,19 @@ proc applyHealthFixes(parsed: HealthArgs; checks: seq[HealthCheck];
         emit("fix: cannot clone siblings (no usable git tool)")
         continue
       let total = ctx.missingSiblings.len
-      var cloned = 0
+      var cloned, refusedCount = 0
       for i, repo in ctx.missingSiblings:
-        let abs = parsed.workspaceRoot / repo.path
-        emit("fix: cloning missing sibling " & repo.path &
+        let abs = siblingDestination(parsed.workspaceRoot, repo)
+        # A destination outside the workspace this run diagnoses is refused,
+        # never created (CLI/health.md §"Dependencies / siblings").
+        if i < ctx.siblingRefused.len and ctx.siblingRefused[i]:
+          inc refusedCount
+          emit("fix: refusing to clone " & repo.path & " into " & abs &
+            ": outside the workspace (" & ctx.siblingExtent.join(", ") &
+            "); clone it by hand or correct its develop override if that " &
+            "location is intended (" & $(i + 1) & "/" & $total & ")")
+          continue
+        emit("fix: cloning missing sibling " & repo.path & " into " & abs &
           " from " & repo.fetchUrl & " (" & $(i + 1) & "/" & $total & ")")
         let res = gitRunPlain(ctx.gitIdentity,
           ["clone", repo.fetchUrl, abs])
@@ -86696,7 +86902,8 @@ proc applyHealthFixes(parsed: HealthArgs; checks: seq[HealthCheck];
           emit("fix: clone of " & repo.path & " failed: " &
             res.output.strip())
       emit("fix: siblings: cloned " & $cloned & ", failed " &
-        $(total - cloned))
+        $(total - cloned - refusedCount) &
+        (if refusedCount > 0: ", refused " & $refusedCount else: ""))
     of hfEnsureVcsHooks:
       # Reinstalling a managed hook is additive and reversible: a foreign
       # hook found at the canonical path is preserved as

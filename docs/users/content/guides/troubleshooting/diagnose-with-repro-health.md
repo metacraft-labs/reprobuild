@@ -91,7 +91,7 @@ repro health --json
 | `workspace` | Verifies that an initialised workspace marker exists at the workspace root. | No |
 | `manifest` | Resolves the active workspace project set and checks its manifests. | Yes (migrates retired state file) |
 | `root-role-manifests` | Checks that every declared branch role of the workspace root loads its manifests cleanly. | No |
-| `siblings` | Checks that every repository declared in the active workspace project set is cloned on disk. | Yes (clones missing checkouts) |
+| `siblings` | Checks that every repository declared in the active workspace project set is cloned on disk. | Yes (clones missing checkouts; the plan and each clone line name the absolute directory, and a destination outside the workspace is refused) |
 | `vcs-host-auth` | Confirms that a usable `git` binary is resolvable for workspace operations. | No |
 | `repository-identities` | Compares declared repository URLs against canonical forge identities to spot renames or redirects. | No |
 | `vcs-hooks` | Verifies that managed Git hooks are installed, unshadowed, worktree-safe and contract-compatible across participating repositories. | Yes (missing, shadowed, path-unsafe) |
