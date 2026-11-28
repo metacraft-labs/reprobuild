@@ -50,16 +50,16 @@
   "counts": {
     "catalogs": 5,
     "itemsByKind": {
-      "case": 22000,
-      "suite": 5180
+      "case": 22003,
+      "suite": 5181
     },
     "itemsByProvider": {
       "assembly-fallback": 3,
-      "nim-unittest": 26186,
+      "nim-unittest": 26190,
       "python-pytest": 7,
       "python-unittest": 984
     },
-    "itemsTotal": 27180,
+    "itemsTotal": 27184,
     "responseDiagnostics": {
       "info": 1,
       "warning": 33
@@ -349,21 +349,21 @@
   ],
   "reconciliation": {
     "caseCoveragePercent": 98.04,
-    "caseItemsInCatalog": 22000,
-    "casesAddressableThroughTheSurface": 20713,
+    "caseItemsInCatalog": 22003,
+    "casesAddressableThroughTheSurface": 20716,
     "collidingIdentities": 18,
-    "distinctCaseIdentities": 21980,
+    "distinctCaseIdentities": 21983,
     "groundTruth": "benchmarks/reports/reprobuild-suite-m0-inventory-sources.json",
     "perSourceCaseCountAgreement": {
-      "agree": 3328,
-      "compared": 3337,
+      "agree": 3329,
+      "compared": 3338,
       "disagree": 9
     },
     "sourceCoveragePercent": 99.76,
-    "sourcesAddressableThroughTheSurface": 3337,
+    "sourcesAddressableThroughTheSurface": 3338,
     "sourcesNotAddressable": 8,
-    "trackedNimSuiteSources": 3345,
-    "trackedStaticCaseCount": 21128
+    "trackedNimSuiteSources": 3346,
+    "trackedStaticCaseCount": 21131
   },
   "schemaVersion": 2,
   "surface": {
@@ -2954,6 +2954,7 @@
     "tests/integration/t_pre_push_gate_checks_only_pushed_repo_dependency_closure.nim",
     "tests/integration/t_pre_push_gate_enforces_inside_a_linked_worktree.nim",
     "tests/integration/t_pre_push_gate_judges_a_large_reference_tree.nim",
+    "tests/integration/t_pre_push_identity_of_a_linked_worktree_beside_a_redirected_checkout.nim",
     "tests/integration/t_pre_push_identity_of_a_nested_submodule_checkout.nim",
     "tests/integration/t_pre_push_lock_records_unmaterialized_declared_repo.nim",
     "tests/integration/t_pre_push_membership_repo_scopes_to_touched_fragments.nim",

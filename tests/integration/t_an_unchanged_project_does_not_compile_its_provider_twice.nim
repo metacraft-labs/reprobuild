@@ -55,10 +55,12 @@ package pathsProviderProbe:
 
   build:
     discard nim.nimRepropathsConfig()
+    # Builtins only: a shell action's PATH holds the package's declared
+    # tools, and this recipe declares none besides `sh` and `nim`.
     let keyed = shell(
-      command = "mkdir -p build && printf 'k\\n' > build/keyed.txt",
+      command = "printf 'k\\n' > keyed.txt",
       actionId = "paths-provider.keyed",
-      extraOutputs = @["build/keyed.txt"])
+      extraOutputs = @["keyed.txt"])
     discard target("keyed", keyed)
 """
 
