@@ -6,8 +6,7 @@ file that lives next to a `home.nim` (or `system.nim`) profile root
 and exports reusable templates / procs the profile can compose.
 
 Use these examples as starting points for authoring your own
-modules. The shapes here are the same shapes the spec describes in
-[`Profile-Compilation-Model.md`](../../../reprobuild-specs/Profile-Compilation-Model.md);
+modules. A profile is compiled as an ordinary Nim program, so
 nothing magic happens — reprobuild's profile-compile pipeline just
 asks Nim to compile the profile, and Nim's normal sibling-import
 machinery resolves `import ./modules/git_dev_environment`.

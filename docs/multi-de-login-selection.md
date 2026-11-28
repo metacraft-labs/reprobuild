@@ -1,8 +1,8 @@
 # DEM2: Single-image login-time DE selection on ReproOS
 
-**Status.** DEM2 architecture decision -- Phase DEM of the
-[`ReproOS-Wayland-DEs-PoC`](../../reprobuild-specs/ReproOS-Wayland-DEs-PoC.milestones.org)
-campaign. Companion to:
+**Status.** DEM2 architecture decision -- Phase DEM (one image, desktop
+environment chosen at login) of the Wayland desktop-environments proof of
+concept for ReproOS. Companion to:
 
 - [`wayland-de-hyprland.md`](wayland-de-hyprland.md) (DE-H1)
 - [`wayland-de-gnome.md`](wayland-de-gnome.md) (DE-G1)
@@ -237,7 +237,7 @@ banner-green runtime gate. Specifically:
 The integration test
 [`tests/integration/dem/t_dem2_login_selection.sh`](../tests/integration/dem/t_dem2_login_selection.sh)
 gates the static composition; the gosti test
-[`gosti/tests/e2e/t_gosti_hyperv_reproos_multi_de_sddm.nim`](../../gosti/tests/e2e/t_gosti_hyperv_reproos_multi_de_sddm.nim)
+[`gosti/tests/e2e/t_gosti_hyperv_reproos_multi_de_sddm.nim`](https://github.com/metacraft-labs/gosti/blob/dev/tests/e2e/t_gosti_hyperv_reproos_multi_de_sddm.nim)
 attempts a runtime probe + documents the cascade-G outcome.
 
 ## References
@@ -248,5 +248,3 @@ attempts a runtime probe + documents the cascade-G outcome.
   -- stage 4k dispatcher (MVP_DE_SELECTION_MODE).
 - [`tests/integration/dem/t_dem2_login_selection.sh`](../tests/integration/dem/t_dem2_login_selection.sh)
   -- DEM2 static composition gate.
-- [`reprobuild-specs/ReproOS-Wayland-DEs-PoC.milestones.org`](../../reprobuild-specs/ReproOS-Wayland-DEs-PoC.milestones.org)
-  DEM2 section -- campaign spec.

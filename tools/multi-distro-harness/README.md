@@ -245,7 +245,7 @@ action cache (where the source-to-output digest mapping lives) is
 `~/.cache/repro/action-cache/cas/`. NOTE: this is the production
 layout as of 2026-06; it does NOT match the spec wording
 `$REPRO_STORE_ROOT/<algo>-<digest>-<name>/` from
-`Linux-Distro-Recipe-Validation.milestones.org` M1 verification clause.
+the distro-recipe validation plan's M1 verification clause.
 The content-addressability guarantee (same input -> same digest) holds
 under the actual layout but the surface name + per-output prefix
 convention is yet to be implemented.
@@ -975,11 +975,11 @@ repro multi-distro: 1/1 distros passed
 
 ## Sandbox-MVP (Linux-Third-Party-Sandbox-MVP M0)
 
-A second campaign reuses this harness for the Tier-3 FHS-view wrapper.
-See
-[`Linux-Third-Party-Sandbox-MVP.milestones.org`](../../../reprobuild-specs/Linux-Third-Party-Sandbox-MVP.milestones.org)
-for the full spec. The M0 deliverable is two probes, both POSIX-sh,
-sitting alongside the Recipe-Validation tests:
+A second campaign reuses this harness for the Tier-3 FHS-view wrapper,
+which runs third-party Linux binaries under bubblewrap in a standard
+filesystem layout (FHS) composed from realized packages. The M0
+deliverable is two probes, both POSIX-sh, sitting alongside the
+Recipe-Validation tests:
 
 | Test                          | Purpose                                                                  |
 | ----------------------------- | ------------------------------------------------------------------------ |
@@ -1107,11 +1107,10 @@ content-addressed by upstream BYTES, so the three realize into three
 distinct `sha256-<...>-libc6` / `sha256-<...>-glibc` prefixes. This is
 correct behaviour and matches Nix (a glibc derivation built via apt is
 a different store path from one built via dnf even when both are
-"logically glibc 2.36"). Cross-distro shared store paths are the
-[`Linux-Distro-Recipe-Validation.milestones.org`](../../../reprobuild-specs/Linux-Distro-Recipe-Validation.milestones.org)
-M5 problem space and require either Realize-Closure-style toolchain
-pinning or per-toolchain-tier keying — both out-of-scope for the
-Tier 3 sandbox consumption story.
+"logically glibc 2.36"). Cross-distro shared store paths are a separate,
+later problem (M5 of the recipe-validation campaign) and require
+either Realize-Closure-style toolchain pinning or per-toolchain-tier
+keying — both out-of-scope for the Tier 3 sandbox consumption story.
 
 **Peer-cache integration verdict (blocked):**
 
@@ -1156,7 +1155,5 @@ host measures.
 - M8: multi-output package realize (blocked on a cross-campaign
   Reprobuild-Development milestone — DSL, build graph, and
   content-addressed store do not yet partition a package's
-  outputs into independently-realized prefixes; see the
-  `Linux-Distro-Recipe-Validation.milestones.org` M8 "Blocker
-  Investigation" + "Cross-Campaign Dependency" sections for the
-  layer-by-layer gap analysis).
+  outputs into independently-realized prefixes, and each of
+  those layers needs its own change before M8 can land).

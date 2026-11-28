@@ -1,11 +1,9 @@
 # Reprobuild Cache Planes — Three-Layer Taxonomy
 
-> **Status:** Authoritative inventory landed by A1 of the
-> [ReproOS-Generations-And-Foreign-Packages campaign][campaign]. Authored
+> **Status:** Authoritative inventory landed by A1 of the ReproOS
+> generations and foreign-packages work. Authored
 > 2026-06-14. Cross-link reference for orchestrators, sub-agents, and
 > reviewers writing about reprobuild caching.
-
-[campaign]: ../../../reprobuild-specs/ReproOS-Generations-And-Foreign-Packages.milestones.org
 
 ## Why this document exists
 
@@ -22,7 +20,7 @@ This document is the single audit-grade inventory.
 |---|---|---|---|
 | 1 — Local build-action cache | "Has this exact action been executed before?" | Action fingerprint (weak + strong) over BuildXL-style declarative inputs + observed evidence; output blobs identified by BLAKE3-256 content digest | `libs/repro_build_engine/` + `libs/repro_local_store/` (implemented) |
 | 2 — Peer cache | "Does a sibling node on my LAN already hold this output blob?" | Same BLAKE3-256 content digest as Layer 1; no separate identity space | `libs/repro_peer_cache/` (implemented, 18 modules) |
-| 3 — Binary cache | "Has this exact solved package instance already been realized somewhere I can fetch from?" | Solved package-instance identity tuple (name, version, options, target, ABI, toolchain id, dep-closure id, provider revision) | spec only (`reprobuild-specs/Binary-Caches.md`); v1 lands in Phase A of the ReproOS-Generations-And-Foreign-Packages campaign |
+| 3 — Binary cache | "Has this exact solved package instance already been realized somewhere I can fetch from?" | Solved package-instance identity tuple (name, version, options, target, ABI, toolchain id, dep-closure id, provider revision) | design only; v1 lands in Phase A of the ReproOS generations and foreign-packages work |
 
 The rest of the document expands each layer with definition, identity
 model, where implemented, public API entry points, and the boundary
@@ -42,8 +40,8 @@ Reprobuild does — compiler invocations, generated config files, test
 runs, function-level query nodes, package-definition evaluations —
 goes through this plane.
 
-Per [Caching-Architecture.md][cache-arch] §"Overview" and §"Two
-Layers Of Identity", the layer is BuildXL-style precisely because:
+The layer is BuildXL-style, with two layers of identity, precisely
+because:
 
 - a **weak fingerprint** is computed from the static action
   specification (tool identity, normalized arguments, declared
@@ -58,14 +56,11 @@ Layers Of Identity", the layer is BuildXL-style precisely because:
 
 This is fine-grained per-action. It is NOT package-level.
 
-[cache-arch]: ../../../reprobuild-specs/Caching-Architecture.md
-
 ### Identity model
 
 - **Action key**: weak fingerprint (declarative) and strong
-  fingerprint (declarative + observed evidence) per
-  [Caching-Architecture.md][cache-arch] §"BuildXL-Inspired
-  Fingerprinting".
+  fingerprint (declarative + observed evidence), in the manner of
+  BuildXL's two-phase fingerprinting.
 - **Content key**: BLAKE3-256 of the payload bytes; the same digest
   identifies a blob anywhere in the system — local, peer, or remote.
 - **Non-interchangeability invariant**: two actions that are not
@@ -126,12 +121,9 @@ re-exporter).
   Layer-1 cache entries (one per compile, link, test, install
   step). Layer 3 is package-level: one cache entry per solved
   package-instance identity. Layer 3 reuses Layer 1's content store
-  for its payload objects per [Binary-Caches.md][binary-caches]
-  §"Interaction With The Store" — "payload blobs become store
-  objects" — but the cache *key* is different (package-instance
+  for its payload objects — payload blobs become store objects —
+  but the cache *key* is different (package-instance
   identity, not action fingerprint).
-
-[binary-caches]: ../../../reprobuild-specs/Binary-Caches.md
 
 ---
 
@@ -144,7 +136,7 @@ realized output blob from a sibling node on the same network rather
 than rebuilding from source or fetching from a central remote cache.
 Same content identity as Layer 1; no separate identity space.
 
-Per [Peer-Cache.md][peer-cache] §"Overview", the runtime stack is:
+The runtime stack is:
 
 1. local action cache (fastest, no network) — Layer 1
 2. peer cache (LAN, point-to-point) — Layer 2
@@ -152,8 +144,6 @@ Per [Peer-Cache.md][peer-cache] §"Overview", the runtime stack is:
 4. rebuild from source
 
 A peer cache miss falls through to layer 3 automatically.
-
-[peer-cache]: ../../../reprobuild-specs/Peer-Cache.md
 
 ### Identity model
 
@@ -245,8 +235,8 @@ From `libs/repro_peer_cache/src/repro_peer_cache/`:
   trust/signature. Layer 2 is a LAN fabric extension; Layer 3 is a
   WAN-grade signed publication plane (the Nix-substituter /
   Spack-buildcache analogue). Layer 3 falls through to Layer 1 on
-  miss; Layer 2 falls through to Layer 3 on miss (per
-  [Peer-Cache.md][peer-cache] §"Overview" runtime stack).
+  miss; Layer 2 falls through to Layer 3 on miss (the runtime stack
+  listed under Layer 2).
 - **Reused primitives**: `pki.nim` and `auth.nim` are layer-agnostic
   (ECDSA + X.509 + trust-anchor loader); Layer 3 will reuse them
   for binary-cache entry signing per the A1 reuse survey below.
@@ -267,14 +257,12 @@ re-extract them. Direct analogue of:
 - Spack buildcaches (`spack install --use-buildcache` consulting a
   mirror for a concrete spec)
 
-Per [Binary-Caches.md][binary-caches] §"Overview":
-"This document is only about the package-level substitute plane,
-not the lower memoization/content-store plane for arbitrary actions."
+Layer 3 is only the package-level substitute plane, not the lower
+memoization/content-store plane for arbitrary actions.
 
 ### Identity model
 
 - **Cache entry key**: the solved package-instance identity tuple per
-  [Binary-Caches.md][binary-caches] §"Cache Entry Identity":
   - package name
   - package version
   - selected options
@@ -297,9 +285,8 @@ not the lower memoization/content-store plane for arbitrary actions."
 
 ### Where implemented
 
-**Spec only.** Phase A of the
-[ReproOS-Generations-And-Foreign-Packages][campaign] campaign lands
-v1:
+**Design only.** Phase A of the ReproOS generations and
+foreign-packages work lands v1:
 
 - A1 (this milestone): cache-layer taxonomy + binary-cache impl-gap
   matrix. **No code lands.**
@@ -319,10 +306,10 @@ closest *existing* shape to Layer 3: it produces signed attestation
 envelopes for each step of the hex0-through-tcc bootstrap chain,
 with a per-step manifest, blob storage by SHA-256, and an `openssl
 dgst -verify` chain walk. But it predates the formal
-[Binary-Caches.md][binary-caches] design and lacks:
+binary-cache design and lacks:
 
 - closure-aware substitution
-- the Binary-Caches.md manifest format (CBOR/SSZ + version-tagged
+- the binary-cache manifest format (CBOR/SSZ + version-tagged
   envelopes)
 - payload-object encoding (compressed prefix archives /
   content-addressed trees / launchers)
@@ -357,16 +344,15 @@ while preserving the signing identity.
   - `closure_walk.nim` — closure-aware substitute walk
   - `compat_check.nim` — platform/ABI/store/provider compatibility
   - `index.nim` — local CAS index updates
-  - `cache_key.nim` — canonical Binary-Caches.md §"Cache Entry
-    Identity" tuple encoding (A3)
+  - `cache_key.nim` — canonical cache-entry identity tuple
+    encoding (A3)
   - `in_process.nim` — single-user mode wrapper
 
 ### Boundary versus the other two layers
 
 - **Versus Layer 1**: Layer 3 is package-level, Layer 1 is per-action.
-  Layer 3 reuses Layer 1's content store for payload objects per
-  [Binary-Caches.md][binary-caches] §"Interaction With The Store":
-  "payload blobs become store objects". The cache *key* is the
+  Layer 3 reuses Layer 1's content store for payload objects:
+  payload blobs become store objects. The cache *key* is the
   package-instance identity tuple, not the action fingerprint. On a
   Layer 3 miss, fallback is to "ordinary build/fetch/install logic"
   — which means populating Layer 1 the normal way, then optionally
@@ -389,19 +375,18 @@ while preserving the signing identity.
     REST surface + per-entry SSZ index file.
   - `tools/bootstrap-cache/cache.sh` envelope + signing flow (in
     the specs repo) — the schema is roughly the same shape Layer 3
-    needs; A3 promotes it to the Binary-Caches.md manifest format.
+    needs; A3 promotes it to the binary-cache manifest format.
 
 ---
 
 ## Cross-link index
 
-- [Caching-Architecture.md][cache-arch] — Layer 1 spec.
-- [Peer-Cache.md][peer-cache] — Layer 2 spec.
-- [Binary-Caches.md][binary-caches] — Layer 3 spec.
-- [ReproOS-Generations-And-Foreign-Packages campaign][campaign] —
-  Phase A lands Layer 3 v1.
+- `libs/repro_build_engine/` and `libs/repro_local_store/` — Layer 1.
+- [`libs/repro_peer_cache/`](../../libs/repro_peer_cache/README.md) —
+  Layer 2.
+- [`README.md`](./README.md) — the Layer 3 operator handbook.
 - [BINARY-CACHE-IMPL-GAP-2026-06-14.md](./BINARY-CACHE-IMPL-GAP-2026-06-14.md)
-  — section-by-section gap matrix of Binary-Caches.md against the
+  — section-by-section gap matrix of the binary-cache design against the
   existing reprobuild codebase, with the A2 deliverable names that
   fill each gap.
 
@@ -409,16 +394,16 @@ while preserving the signing identity.
 
 - **Don't write "the binary cache" when you mean "the action cache"
   or "the peer cache".** The three planes are independent and the
-  terms are not interchangeable. When in doubt, name the spec
-  document.
+  terms are not interchangeable. When in doubt, name the layer
+  by number.
 - **Don't put action-cache metadata into a Layer 2 message.** The
   peer cache moves *only* content blobs.
 - **Don't put package-instance identity into a Layer 1 cache key.**
   Action fingerprints are over inputs + observed evidence; package
   identity belongs to Layer 3.
 - **Don't publish externally-installed prefixes through Layer 3.**
-  Per [Binary-Caches.md][binary-caches] §"External Implementations
-  Are Excluded From Binary Caches By Default", weak external
+  External implementations are excluded from binary caches by
+  default: weak external
   installers (winget/scoop/chocolatey/brew) and strong external
   installers (nix/spack) are recorded via the separate **external
   installation receipt** mechanism, not republished into Layer 3.

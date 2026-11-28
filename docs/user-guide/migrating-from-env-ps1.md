@@ -188,6 +188,3 @@ the 6-month coexistence window so you can fall back if needed.
 - [`home-profile-walkthrough.md`](./home-profile-walkthrough.md) — the
   full end-to-end walkthrough; the M71 validation harness mirrors it
   verbatim.
-- [`Builtin-Catalog-And-Home-Profile-Provisioning.milestones.org`](../../../reprobuild-specs/Builtin-Catalog-And-Home-Profile-Provisioning.milestones.org)
-  — the campaign spec; §M70 documents the synthesizer's design, §M71
-  the validation flow.

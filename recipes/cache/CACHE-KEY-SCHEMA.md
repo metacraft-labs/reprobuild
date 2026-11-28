@@ -1,13 +1,10 @@
 # Cache Key Schema
 
-> **Status:** A3 P1 deliverable for the
-> [ReproOS-Generations-And-Foreign-Packages campaign][campaign].
-> Documents the canonical encoding rules used to derive a 32-byte
+> **Status:** A3 P1 deliverable of the ReproOS generations and
+> foreign-packages work. Documents the canonical encoding rules used
+> to derive a 32-byte
 > BLAKE3-256 cache-entry-key from a structured ``CacheEntryIdentity``
 > tuple.
-
-[campaign]: ../../../reprobuild-specs/ReproOS-Generations-And-Foreign-Packages.milestones.org
-[binary-caches]: ../../../reprobuild-specs/Binary-Caches.md
 
 ---
 
@@ -17,7 +14,7 @@
 - Canonical encoder: `libs/repro_binary_cache_server/src/repro_binary_cache_server/key.nim`
 - Gate: `libs/repro_binary_cache_client/tests/t_a3_p1_cache_key.nim`
 
-## The identity tuple (Binary-Caches.md § Cache Entry Identity)
+## The identity tuple
 
 ```nim
 type CacheEntryIdentity = object
