@@ -408,6 +408,19 @@ const
     ## the host's C compiler) uses nothing it takes away; see
     ## ``PrivilegedSyscallFilter`` for how it is derived.
 
+const EgressUnitsFloor* =
+  when mutated("egress-units-unhardened"): ""
+  else:
+    "MemoryDenyWriteExecute=yes\n" & FetchSyscallFilter &
+    "SystemCallErrorNumber=EPERM\n"
+  ## The CONF-1 settings the egress observer and its check had left unset
+  ## with no reason given (A11 round 28): ``nft`` and the add-on binary
+  ## need no writable-and-executable memory, and both run within the fetch
+  ## unit's filter, the policy recipe (``@system-service`` without
+  ## ``@privileged @resources @obsolete``). The VM egress observer gate
+  ## exercises them under it: the table loaded, reloaded and deleted, and
+  ## the check reading its counters.
+
 proc privilegedConfinement*(network: bool): string =
   ## The CONF-1 floor of the add-on's root units -- the apply unit, and the
   ## re-assert and secrets units, which run "the apply unit's confinement"
@@ -1290,6 +1303,7 @@ proc egressUnit*(nft: string; tableSha256 = ""): string =
   "RestrictSUIDSGID=yes\n" &
   "LockPersonality=yes\n" &
   "SystemCallArchitectures=native\n" &
+  EgressUnitsFloor &
   # It loads one root-written file with nft over netlink: no Unix socket
   # (§13 decision 181), no IP socket, nothing of the add-on's state.
   (when mutated("egress-units-unix-sockets"):
@@ -1324,7 +1338,13 @@ proc egressCheckUnit*(reproExe: string): string =
   (when mutated("egress-check-dac-override"):
      "ReadWritePaths=" & EvidenceDirPath & " -" & EvidenceShipStateDir & "\n"
    else: "ReadWritePaths=" & EvidenceDirPath & "\n") &
-  "InaccessiblePaths=-/var/lib/repro/agent -/run/repro\n" &
+  # The sink write credential and the rest of EvidenceStateDir are hidden
+  # too (A11 round 28): the check, uid 0 with the evidence directory
+  # writable, reads none of it.
+  (when mutated("egress-check-sees-credential"):
+     "InaccessiblePaths=-/var/lib/repro/agent -/run/repro\n"
+   else:
+     "InaccessiblePaths=-/var/lib/repro/agent -/run/repro -" & EvidenceStateDir & "\n") &
   "ProtectHome=yes\n" &
   "PrivateTmp=yes\n" &
   "PrivateDevices=yes\n" &
@@ -1339,6 +1359,7 @@ proc egressCheckUnit*(reproExe: string): string =
   "RestrictSUIDSGID=yes\n" &
   "LockPersonality=yes\n" &
   "SystemCallArchitectures=native\n" &
+  EgressUnitsFloor &
   # AF_NETLINK alone (§13 decision 181): it reads the table's counters
   # over netlink and needs no Unix socket, so neither the system bus nor
   # PID 1's private socket is reachable from it.

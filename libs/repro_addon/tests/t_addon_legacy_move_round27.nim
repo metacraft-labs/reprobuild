@@ -3,10 +3,12 @@
 ## the operator's decision of 2026-11-26, "Migrate existing hosts"; A11
 ## round 27, M1, L2, L3). Built on the round-27 reviewer's reproduction.
 ##
-## * A mark an unfinished move left ("1": killed after its last removal or
-##   after removing the emptied legacy outbox) is cleared by the next
-##   harvest, which runs the move again because of it; shipping is then not
-##   refused.
+## * A mark an unfinished move left ("1": killed after its last removal) is
+##   cleared by the next harvest, which runs the move again because of it;
+##   shipping is then not refused. (Since round 28 the harvest no longer
+##   removes the emptied legacy outbox, so the kill after that removal is
+##   gone; the empty outbox is no legacy state, so the kill after the last
+##   removal now depends on the mark alone.)
 ## * A link or a FIFO in the legacy outbox's place (the egress check, uid 0
 ##   with the evidence directory writable, can plant one) is moved aside
 ##   unread; the move does not fail, and shipping is not refused.
@@ -18,7 +20,8 @@
 ##   records the units that keep the bootstrap engine write there leave at
 ##   once.
 ##
-## Falsifying builds: ``legacy-left-not-rerun`` (the mark after the rmdir),
+## Falsifying builds: ``legacy-left-not-rerun`` (the full-move mark and the
+## kill after the last removal),
 ## ``legacy-outbox-not-dir-raises`` (the link and the FIFO),
 ## ``legacy-state-newer-dropped`` (the newer receipt),
 ## ``legacy-move-ignores-ship-lock`` (the earlier engine's run) and
@@ -104,22 +107,7 @@ suite "the legacy move never leaves shipping refused (round 27)":
     discard moveLegacyShipState(s)
     check legacyLeft(s.stateDir) == 0
     check names(s.outbox) == @Queued
-    check not dirExists(s.legacyOutbox)
-    check not refused(s)
-
-  test "killed after removing the emptied legacy outbox: the next harvest clears the mark":
-    let s = site("kill-rmdir")
-    plant(s)
-    killPoint = "legacy-rmdir"
-    crashPointHook = killHook
-    expect CrashPointKill: discard moveLegacyShipState(s)
-    crashPointHook = nil
-    check legacyLeft(s.stateDir) == 1
-    check not dirExists(s.legacyOutbox)
-    check not hasLegacyShipState(s)
-    discard moveLegacyShipState(s)
-    check legacyLeft(s.stateDir) == 0
-    check names(s.outbox) == @Queued
+    check names(s.legacyOutbox).len == 0
     check not refused(s)
 
   test "a link in the legacy outbox's place is moved aside, not followed":

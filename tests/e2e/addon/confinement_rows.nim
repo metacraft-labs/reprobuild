@@ -199,10 +199,6 @@ const
     "repro-addon-store-verify.service"]
     ## The units ``generation0.privilegedConfinement`` confines.
 
-const EgressFinding = "the egress units carry no MemoryDenyWriteExecute=, " &
-  "SystemCallFilter= or SystemCallErrorNumber= and state no reason for it: " &
-  "a finding for the units' owner, who sets the key or states why not"
-
 const UnsetByDesign* = [
   ("repro-addon-boot-hold.service", "PrivateTmp",
     "the /tmp mounts it needs are not up before sysinit.target (the unit's " &
@@ -235,17 +231,14 @@ const UnsetByDesign* = [
   ## in every unit: a unit that does not set one fails the gate, whatever
   ## the unit (``missingSettings``), but those ``UnsetPendingOwner`` names.
 
-const UnsetPendingOwner* = [
-  ("repro-addon-egress.service", "MemoryDenyWriteExecute", EgressFinding),
-  ("repro-addon-egress.service", "SystemCallFilter", EgressFinding),
-  ("repro-addon-egress.service", "SystemCallErrorNumber", EgressFinding),
-  ("repro-addon-egress-check.service", "MemoryDenyWriteExecute", EgressFinding),
-  ("repro-addon-egress-check.service", "SystemCallFilter", EgressFinding),
-  ("repro-addon-egress-check.service", "SystemCallErrorNumber", EgressFinding)]
+const UnsetPendingOwner*: array[0, (string, string, string)] = []
   ## Settings a unit does not set and gives no reason for: findings filed
   ## with the unit's owner, recorded by the gate in a list of their own
   ## (``unsetPendingOwner``) so they are visible and not silently excused.
   ## Each entry goes when the owner sets the key or states why not.
+  ## Empty since A11 round 28: the egress observer and its check set
+  ## MemoryDenyWriteExecute=, SystemCallFilter= and SystemCallErrorNumber=
+  ## (``generation0.EgressUnitsFloor``).
 
 proc expectedSettings*(unit: string): seq[string] =
   ## Every key ``ProbeRows`` tries, but those ``UnsetByDesign`` gives

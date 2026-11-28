@@ -50,16 +50,16 @@
   "counts": {
     "catalogs": 5,
     "itemsByKind": {
-      "case": 21924,
-      "suite": 5169
+      "case": 21961,
+      "suite": 5175
     },
     "itemsByProvider": {
       "assembly-fallback": 3,
-      "nim-unittest": 26130,
+      "nim-unittest": 26173,
       "python-pytest": 7,
       "python-unittest": 953
     },
-    "itemsTotal": 27093,
+    "itemsTotal": 27136,
     "responseDiagnostics": {
       "info": 1,
       "warning": 33
@@ -349,28 +349,28 @@
   ],
   "reconciliation": {
     "caseCoveragePercent": 98.03,
-    "caseItemsInCatalog": 21924,
-    "casesAddressableThroughTheSurface": 20665,
+    "caseItemsInCatalog": 21961,
+    "casesAddressableThroughTheSurface": 20702,
     "collidingIdentities": 18,
-    "distinctCaseIdentities": 21904,
+    "distinctCaseIdentities": 21941,
     "groundTruth": "benchmarks/reports/reprobuild-suite-m0-inventory-sources.json",
     "perSourceCaseCountAgreement": {
-      "agree": 3321,
-      "compared": 3330,
+      "agree": 3326,
+      "compared": 3335,
       "disagree": 9
     },
     "sourceCoveragePercent": 99.76,
-    "sourcesAddressableThroughTheSurface": 3330,
+    "sourcesAddressableThroughTheSurface": 3335,
     "sourcesNotAddressable": 8,
-    "trackedNimSuiteSources": 3338,
-    "trackedStaticCaseCount": 21080
+    "trackedNimSuiteSources": 3343,
+    "trackedStaticCaseCount": 21117
   },
   "schemaVersion": 2,
   "surface": {
     "binary": "ct-test",
-    "provenance": "ctTestTools from the reprobuild flake's CodeTracer pin, codetracer a7cddd8bce554f5d73a7636e2bad15605b71963c (metacraft-github-actions 9916d9ff9e pins/codetracer.json)",
-    "resolvedBy": "environment",
-    "sha256": "d989d0480cee9446da2b715b205ea4f19f4bae64dbc02a63f7d167a8745c277a"
+    "provenance": "",
+    "resolvedBy": "PATH:ct-test",
+    "sha256": "87b4cfdbd1b02862bb5e88d8748fd025fcecc9f1a64682b8fd36a3aec8ffd7ec"
   },
   "title": "Reprobuild case addressability through the canonical `ct test` surface",
   "trackedNimSources": [
@@ -423,6 +423,7 @@
     "libs/repro_addon/tests/t_addon_evidence_key_survives_retention.nim",
     "libs/repro_addon/tests/t_addon_evidence_lag_resigned.nim",
     "libs/repro_addon/tests/t_addon_evidence_probe_owns_its_connection.nim",
+    "libs/repro_addon/tests/t_addon_evidence_round28.nim",
     "libs/repro_addon/tests/t_addon_evidence_ship_confinement.nim",
     "libs/repro_addon/tests/t_addon_evidence_ships_off_host.nim",
     "libs/repro_addon/tests/t_addon_evidence_units_and_tick_records.nim",
@@ -660,6 +661,8 @@
     "libs/repro_build_engine/tests/test_umask_wrap_both_spawn_paths.nim",
     "libs/repro_build_engine/tests/test_wrapped_monitor_evidence_ownership.nim",
     "libs/repro_bundle/tests/t_repro_bundle_halves.nim",
+    "libs/repro_cargo_edge/tests/t_build_script_edges.nim",
+    "libs/repro_cargo_edge/tests/t_build_script_output.nim",
     "libs/repro_cargo_edge/tests/t_cargo_plan.nim",
     "libs/repro_cargo_edge/tests/t_plan_run_spawn_environment.nim",
     "libs/repro_cargo_edge/tests/t_plan_units.nim",
@@ -3113,6 +3116,7 @@
     "tests/integration/t_rqe_cg3_per_crate_totals_learned.nim",
     "tests/integration/t_rqe_cg3_wrapper_is_transparent.nim",
     "tests/integration/t_rqe_cg3_wrapper_is_transparent_fixture_crates.nim",
+    "tests/integration/t_rqe_cg5_build_script_cfg_and_links.nim",
     "tests/integration/t_rqe_cg5_no_mixed_rlibs.nim",
     "tests/integration/t_rqe_cg5_plan_completes_to_cargos_argv.nim",
     "tests/integration/t_rqe_cg5_plan_edges_lower_isolated.nim",
@@ -3124,6 +3128,7 @@
     "tests/integration/t_rqe_m15_action_exports_its_lease.nim",
     "tests/integration/t_rqe_m15_nim_edge_bounded.nim",
     "tests/integration/t_rqe_m15_recorder_cargo_edge_bounded.nim",
+    "tests/integration/t_rqm_reprobuild_memory_cap.nim",
     "tests/integration/t_run_consumes_opaque_out_of_tree.nim",
     "tests/integration/t_run_consumes_session_store_out_of_tree.nim",
     "tests/integration/t_run_edge_session_resolver_auto.nim",

@@ -44,7 +44,13 @@ proc runRunQuotaHelperOf*[T](c: T): int =
     stderrLimit: c.stderrLimit,
     isolatedEnv: c.isolatedEnv,
     widthFlag: c.widthFlag)
-  runRunQuotaHelper(request, command, c.resultPath)
+  var memoryCap: ReproMemoryCapPolicy
+  var problem = ""
+  if not decodePolicyArg(c.memoryCap, memoryCap, problem):
+    stderr.writeLine("repro internal runquota-helper: --memory-cap is not " &
+      "a memory-cap policy (" & problem & "): " & c.memoryCap)
+    return 2
+  runRunQuotaHelper(request, command, c.resultPath, memoryCap)
 
 proc selectsRunQuotaHelper*(argv: openArray[string]): bool =
   ## Whether ``argv`` (without the image) starts with the words of the

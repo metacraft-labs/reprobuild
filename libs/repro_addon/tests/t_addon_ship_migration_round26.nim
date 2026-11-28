@@ -168,7 +168,7 @@ suite "existing hosts are migrated (owner decision 2026-11-26)":
     checkpoint $m
     check m.found
     check exactlyOnce(s)
-    check not dirExists(s.legacyOutbox)
+    check names(s.legacyOutbox).len == 0     # emptied, and kept (round 28)
     check readFile(s.stateDir / "receipt") == "R1\n"
     check readFile(s.stateDir / "last-ship") == "100\n"
     check not fileExists(s.legacyStateDir / "receipt")

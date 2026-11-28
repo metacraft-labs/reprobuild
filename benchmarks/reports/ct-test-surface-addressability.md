@@ -49,19 +49,19 @@ Rendered from `ct-test-surface-addressability.json` by the script that writes it
 
 | Measure | Value |
 |---|---|
-| Surface | `ct-test`, resolved by `environment`, sha256 `d989d0480cee…` |
-| Surface provenance | ctTestTools from the reprobuild flake's CodeTracer pin, codetracer a7cddd8bce554f5d73a7636e2bad15605b71963c (metacraft-github-actions 9916d9ff9e pins/codetracer.json) |
+| Surface | `ct-test`, resolved by `PATH:ct-test`, sha256 `87b4cfdbd1b0…` |
+| Surface provenance | not declared ($CT_TEST_PROVENANCE was empty when this was measured) |
 | Command | `ct-test test discover --workspace <repo> --json` |
 | Ground truth | `benchmarks/reports/reprobuild-suite-m0-inventory-sources.json` (`staticCaseCount`) |
 | Catalogs returned | 5, from providers `assembly-fallback`, `nim-unittest`, `python-pytest`, `python-unittest` |
-| Items returned | 27,093 — 21,924 cases, 5,169 suites |
+| Items returned | 27,136 — 21,961 cases, 5,175 suites |
 | Response diagnostics | info: 1, warning: 33 (errors: 0) |
-| Tracked Nim suite sources | 3,338 |
-| …addressable through the surface | **3,330 (99.76%)** |
-| Tracked static case count | 21,080 |
-| …addressable through the surface | **20,665 (98.03%)** |
-| Per-source case-count agreement | 3,321 of 3,330 agree with the independent scanner |
-| Distinct case identities vs case items | 21,904 distinct for 21,924 items — **18** colliding identities |
+| Tracked Nim suite sources | 3,343 |
+| …addressable through the surface | **3,335 (99.76%)** |
+| Tracked static case count | 21,117 |
+| …addressable through the surface | **20,702 (98.03%)** |
+| Per-source case-count agreement | 3,326 of 3,335 agree with the independent scanner |
+| Distinct case identities vs case items | 21,941 distinct for 21,961 items — **18** colliding identities |
 
 ### The 8 sources the surface cannot see, by recorded reason
 
