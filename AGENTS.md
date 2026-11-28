@@ -80,3 +80,10 @@
   inherited from the branch you rebased onto, regenerate in a `chore(tests)`
   commit of its own, never folded into an unrelated change. Do not push past
   it with `--no-verify`.
+- A change to a source of the generated user docs — the CLI description in
+  `libs/repro_cli_support/src/repro_cli_support/cli_description.nim`, the
+  health checks, the installers, or the front matter under
+  `docs/users/content/` — runs `python3 scripts/render_user_docs_generated.py`
+  and commits the result in the same commit. The same `pre-push` hook runs
+  its `--check` on the pushed commit and refuses a stale page; drift you
+  inherited is regenerated in a `chore(docs)` commit of its own.

@@ -125,11 +125,20 @@
 ## nim-entrypoints owns the entry.
 ##
 ## For such a program the shim also undoes the fork's redirection under
-## ``--entrypoint=tests --list``: the fork reads that ``--list`` as its own
-## and points descriptor 1 at stderr, and nim-entrypoints prints the list on
-## descriptor 1 (see ``protocol_output``). Import this module before anything
-## that imports ``std/unittest``, so the original descriptor 1 is still there
-## to keep; the shim re-exports ``std/unittest``.
+## ``--entrypoint=tests --list``: a fork before ``4fda9ccd`` reads that
+## ``--list`` as its own and points descriptor 1 at stderr, and
+## nim-entrypoints prints the list on descriptor 1 (see ``protocol_output``).
+## From ``4fda9ccd`` on, the fork's ``std/unittest`` knows the selector and
+## leaves descriptor 1 alone whenever it is given, so the undoing changes
+## nothing there; it stays for binaries built with an older fork. Import this
+## module before anything that imports ``std/unittest``, so the original
+## descriptor 1 is still there to keep; the shim re-exports ``std/unittest``.
+##
+## A program that imports ``std/unittest`` without this shim answers the
+## entry through ``std/unittest`` itself from fork ``4fda9ccd`` on, in the
+## same protocol, except that it reads ``--run=<pattern>`` under
+## the entry as a filter pattern instead of refusing it. Where this shim is
+## linked, that ``std/unittest`` stands down and the shim answers, as above.
 
 # Import this leaf before ``std/unittest``: its module initialiser preserves the
 # real stdout before the protocol-carrying fork redirects descriptor 1.
@@ -687,7 +696,8 @@ proc initProtocol*() =
     stdUnittest.addOutputFormatter(SilentFormatter())
     # Whoever prints the document (nim-entrypoints, in a program built with
     # it) writes on descriptor 1, which the protocol-carrying std/unittest
-    # pointed at stderr when it saw ``--list``. When the shim prints it
+    # of a fork before 4fda9ccd pointed at stderr when it saw ``--list``
+    # (from 4fda9ccd on it leaves it alone). When the shim prints it
     # instead, ``suite`` diverts descriptor 1 again (``divertStdoutToStderr``).
     restoreEntryStdout()
   of pmEntryUnknown, pmEntryUsage:

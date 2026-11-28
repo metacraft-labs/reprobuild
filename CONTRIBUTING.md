@@ -370,6 +370,27 @@ failure, asserts the refusal against this repository's own `.gitattributes`,
 and derives the protected set from the generators' path constants — so a fifth
 generated artifact cannot arrive without a mark.
 
+## Changing the CLI: regenerate the user docs in the same commit
+
+The command tables in `docs/users/content/reference/commands/index.md`, the
+`repro health` check table, the installer help and `llms.txt` are rendered from
+their sources (the CLI description in
+`libs/repro_cli_support/src/repro_cli_support/cli_description.nim`, the health
+checks, the installers and the docs front matter) by
+`scripts/render_user_docs_generated.py`. A commit that changes one of those
+sources runs it and commits the result:
+
+```bash
+python3 scripts/render_user_docs_generated.py
+```
+
+`just lint` and the docs build run its `--check`, and so does the pre-push
+hook above (`scripts/pre_push_suite_checks.sh`), on the pushed commit. Before
+the push ran it, a CLI change that skipped the regeneration reached `agents`,
+and every later commit was refused by `just lint` until someone else
+regenerated the page. When the drift is inherited, regenerate in a
+`chore(docs)` commit of its own.
+
 ## Nix Dev Shell
 
 `nix develop` activates the compiler and library toolchain. Every input this

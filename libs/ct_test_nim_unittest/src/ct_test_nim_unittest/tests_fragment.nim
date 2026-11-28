@@ -79,15 +79,21 @@
 ## ``<binary> --entrypoint=list`` whether the binary has a ``tests`` entry,
 ## and reads its list only when it does. A binary that answers
 ## ``--entrypoint=tests --list`` without having the entry cannot be trusted
-## to run one test under ``--run-exact=<name>``: a ``std/unittest`` binary of
-## the protocol-carrying codetracer Nim fork reads that ``--list`` as its own
-## and prints its tests' names, and then reads ``--entrypoint=tests`` and
-## ``--run-exact=<name>`` as test filters that match nothing, so every
-## per-test run would skip every test and pass. So when ``--entrypoint=list``
-## exits 0 without an ``entrypoints/1`` document, the fragment creates one
-## run of the whole binary instead (``<prefix>.whole-binary``, argv
-## ``[<binary>]``, otherwise as a test's run): sound, but not per test. One
-## binary per test needs the entry, so that mode refuses such a binary.
+## to run one test under ``--run-exact=<name>``. A ``std/unittest`` binary
+## built with upstream Nim, or with the codetracer Nim fork before it
+## answered the entry (``metacraft-labs/nim`` ``4fda9ccd``, which reprobuild
+## pins), reads every argument as its own: ``--entrypoint=tests`` and
+## ``--run-exact=<name>`` as test filters that match nothing (the older fork
+## also takes ``--list`` as its own flag and prints its tests' names), so
+## every per-test run would skip every test and pass. A ``std/unittest``
+## binary of the pinned fork has the entry and answers ``--entrypoint=list``
+## with its document, so it is listed; the probe is for the binaries that
+## misread it.
+## So when ``--entrypoint=list`` exits 0 without an ``entrypoints/1``
+## document, the fragment creates one run of the whole binary instead
+## (``<prefix>.whole-binary``, argv ``[<binary>]``, otherwise as a test's
+## run): sound, but not per test. One binary per test needs the entry, so
+## that mode refuses such a binary.
 ##
 ## WHAT IS REFUSED, AND WHY. The listing is the only thing that says what
 ## the binary's tests are, so a listing this module cannot turn into one

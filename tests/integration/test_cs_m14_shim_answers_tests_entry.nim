@@ -1,10 +1,10 @@
-## A binary whose tests are `ct_test_unittest_parallel`'s `suite` / `test`
-## answers nim-entrypoints' `tests` entry, so `repro test` lists and runs its
-## tests one by one through `runPerTest`, as it does a nim-entrypoints
-## binary's.
+## A binary whose tests are `ct_test_unittest_parallel`'s `suite` / `test`,
+## or plain `std/unittest`'s, answers nim-entrypoints' `tests` entry, so
+## `repro test` lists and runs its tests one by one through `runPerTest`, as
+## it does a nim-entrypoints binary's.
 ##
 ## The fixture package (`tests/fixtures/cs_m14_shim_tests_entry`, copied to a
-## scratch directory so it is a project outside this tree) builds three test
+## scratch directory so it is a project outside this tree) builds four test
 ## binaries from the same tests (`math::add`, `math::mul`, `loose`) and puts
 ## each one's `runPerTest` collector into its `test` collection:
 ##
@@ -12,39 +12,53 @@
 ## * `shim_entry_suite` is built with nim-entrypoints, the shim's tests in a
 ##   `tests:` block beside a `testCase "alpha"` and a `main:`; nim-entrypoints
 ##   answers the entry, the shim runs the block's tests;
-## * `plain_suite` links `std/unittest` alone and has no tests entry.
+## * `plain_suite` links `std/unittest` alone, which answers the entry itself:
+##   the pinned codetracer Nim fork's `std/unittest` does (`metacraft-labs/nim`
+##   `4fda9ccd`, `flake.nix`'s `nim-fork-src`);
+## * `no_entry_suite` has no tests entry: it reads every argument as a test
+##   filter, as a `std/unittest` that does not know the entry does (upstream
+##   Nim's, or the fork's before `4fda9ccd`).
 ##
 ## Cases, each a real `repro test` read from its build report:
 ##
-##   1. both shim binaries are listed and run per test: one created action
-##      per test, argv `<binary> --entrypoint=tests --run-exact=<name>`, each
-##      running only its test (its stdout carries its own marker and no
-##      other); a second `repro test` serves every run from the cache. The
-##      binaries themselves answer the entry on the right streams: the list
-##      on stdout and nothing else there (a suite body's output goes to
-##      stderr), the entry list as an `entrypoints/1` document, an unknown
-##      `--run-exact` name and any `--run` under the shim's own entry refused
-##      with 64 and nothing run;
-##   2. with `math::mul` failing, its action fails in both shim binaries, the
-##      other tests' actions succeed, and the command fails.
+##   1. the shim binaries and the plain one are listed and run per test: one
+##      created action per test, argv
+##      `<binary> --entrypoint=tests --run-exact=<name>`, each running only
+##      its test (its stdout carries its own marker and no other); a second
+##      `repro test` serves every run from the cache. The binaries themselves
+##      answer the entry on the right streams: the list on stdout and nothing
+##      else there (a suite body's output goes to stderr), the entry list as
+##      an `entrypoints/1` document, an unknown `--run-exact` name refused
+##      with 64 and nothing run, and any `--run` under the shim's own entry
+##      refused with 64 and nothing run;
+##   2. with `math::mul` failing, its action fails in each of those binaries,
+##      the other tests' actions succeed, and the command fails. Run by hand,
+##      the plain binary's `--run-exact=math::mul` runs that test alone and
+##      exits 1.
 ##
-## Negative control (both cases): the plain `std/unittest` binary lists
-## nothing and stays a whole-binary edge. Its collection is one run of the
-## whole binary, `<collector>.whole-binary` with argv `[<binary>]`, not one
-## per test: the check the shim binaries pass rejects it. That run runs every
+## Negative control (both cases): the binary without the entry lists nothing
+## and stays a whole-binary edge. Its collection is one run of the whole
+## binary, `<collector>.whole-binary` with argv `[<binary>]`, not one per
+## test: the check the other binaries pass rejects it. That run runs every
 ## test (case 2: it fails with `math::mul`). The case also records why it is
-## not listed: asked `--entrypoint=tests --run-exact=math::mul`, the plain
-## binary runs no test and exits 0 with `math::mul` failing, so a per-test
-## run of it would pass having run nothing.
+## not listed: asked `--entrypoint=tests --run-exact=math::mul`, that binary
+## runs no test and exits 0 with `math::mul` failing, so a per-test run of it
+## would pass having run nothing. It is a program of its own rather than a
+## `std/unittest` binary because the dev shell's Nim is the fork, whose
+## `std/unittest` now has the entry; it reproduces the argument reading the
+## producer's `--entrypoint=list` probe guards against. Forcing that probe to
+## answer "has the entry" makes this control fail (its listing prints no
+## name, so the listing edge fails and no whole-binary run exists).
 ##
 ## nim-entrypoints is found as `test_cs_m14_repro_collects_tests_per_entry`
 ## finds it (the `../nim-entrypoints` checkout, else `$ENTRYPOINTS_SRC`;
 ## `REPRO_SIBLING_POLICY=pin` takes `$ENTRYPOINTS_SRC` first), and must have
 ## `--run-exact`.
 ##
-## MOCKS: none. The real `repro` of this build compiles the fixture's recipe
-## and the three test binaries with the real Nim (the dev shell's, whose
-## `std/unittest` is the protocol-carrying fork), runs the real
+## MOCKS: none (the `no_entry_suite` stand-in is a real program, justified
+## above). The real `repro` of this build compiles the fixture's recipe
+## and the four test binaries with the real Nim (the dev shell's, whose
+## `std/unittest` is the pinned fork's), runs the real
 ## `repro-tests-fragment` under the io monitor, and the engine creates,
 ## monitors and caches the runs. The direct probes run the binaries that
 ## build produced.
@@ -61,16 +75,19 @@ const
   ShimCollector = "cs_m14_shim.tests.shim"
   EntryCollector = "cs_m14_shim.tests.entry"
   PlainCollector = "cs_m14_shim.tests.plain"
+  NoEntryCollector = "cs_m14_shim.tests.noentry"
   ShimNames = ["math::add", "math::mul", "loose"]
   EntryNames = ["alpha", "math::add", "math::mul", "loose"]
   ShimBinary = "build/test-bin/shim_suite"
   EntryBinary = "build/test-bin/shim_entry_suite"
   PlainBinary = "build/test-bin/plain_suite"
+  NoEntryBinary = "build/test-bin/no_entry_suite"
   Marker = "CSM14SHIM "
   SuiteMarker = "CSM14SUITE "
   MulBody = "echo \"CSM14SHIM math::mul\" # mul's body"
   MulFails = "echo \"CSM14SHIM math::mul\"; check 1 == 2"
-  Sources = ["shim_suite.nim", "shim_entry_suite.nim", "plain_suite.nim"]
+  Sources = ["shim_suite.nim", "shim_entry_suite.nim", "plain_suite.nim",
+    "no_entry_suite.nim"]
   ReuseStatuses = ["asUpToDate", "asCacheHit"]
   ReuseDecisions = ["cdHit", "cdHybridCutoff"]
 
@@ -241,28 +258,37 @@ proc probe(p: Project; binary: string; args: openArray[string]):
     "\nstdout:\n" & result.stdout & "\nstderr:\n" & result.stderr)
 
 proc checkWholeBinary(report: JsonNode): CreatedRun =
-  ## The negative control: the plain binary's collection is one run of the
-  ## whole binary, which the per-test check rejects.
-  let runs = report.createdRuns(PlainCollector)
-  checkpoint("plain:\n" & runs.describe)
-  check not runs.isPerTestCollection(["math::add", "math::mul"], PlainBinary,
-    PlainCollector)
+  ## The negative control: the collection of the binary without the entry is
+  ## one run of the whole binary, which the per-test check rejects.
+  let runs = report.createdRuns(NoEntryCollector)
+  checkpoint("no entry:\n" & runs.describe)
+  check not runs.isPerTestCollection(ShimNames, NoEntryBinary,
+    NoEntryCollector)
   check runs.len == 1
   if runs.len == 1:
     result = runs[0]
-    check result.id == PlainCollector & ".whole-binary"
+    check result.id == NoEntryCollector & ".whole-binary"
     check result.argv.len == 1 and
-      result.argv[0].endsWith(addFileExt(PlainBinary, ExeExt))
+      result.argv[0].endsWith(addFileExt(NoEntryBinary, ExeExt))
+
+proc testsEntryOf(document: JsonNode): JsonNode =
+  ## The `tests` entry of an `entrypoints/1` document, or null.
+  result = newJNull()
+  if document.kind == JObject and document{"entries"} != nil:
+    for entry in document{"entries"}:
+      if entry{"name"}.getStr() == "tests":
+        return entry
 
 suite "test_cs_m14_shim_answers_tests_entry":
 
-  test "a shim-linked binary, with and without entrypoints, runs per test":
+  test "shim-linked and plain std/unittest binaries run per test":
     let p = projectWith()
     let first = p.reproTest("first")
     check first.code == 0
     for (collector, names, binary) in [
         (ShimCollector, @ShimNames, ShimBinary),
-        (EntryCollector, @EntryNames, EntryBinary)]:
+        (EntryCollector, @EntryNames, EntryBinary),
+        (PlainCollector, @ShimNames, PlainBinary)]:
       let listing = first.report.action(collector & ".list")
       checkpoint(collector & " listing: " & $listing)
       check listing{"status"}.getStr() == "asSucceeded"
@@ -278,16 +304,17 @@ suite "test_cs_m14_shim_answers_tests_entry":
       check first.report.action(collector){"status"}.getStr() ==
         "asSucceeded"
 
-    # Negative control: no per-test runs for the plain binary; its one run
-    # ran both its tests.
+    # Negative control: no per-test runs for the binary without the entry;
+    # its one run ran all its tests.
     let whole = first.report.checkWholeBinary()
     check whole.status == "asSucceeded"
-    check whole.stdout.markers == @["math::add", "math::mul"]
+    check whole.stdout.markers == @ShimNames
 
     # Nothing changed: every run is served from the cache.
     let second = p.reproTest("second")
     check second.code == 0
-    for collector in [ShimCollector, EntryCollector, PlainCollector]:
+    for collector in [ShimCollector, EntryCollector, PlainCollector,
+        NoEntryCollector]:
       let again = second.report.createdRuns(collector)
       checkpoint(collector & " second:\n" & again.describe)
       check again.len > 0
@@ -310,10 +337,7 @@ suite "test_cs_m14_shim_answers_tests_entry":
     check shimEntries.code == 0
     let document = parseJson(shimEntries.stdout)
     check document{"schema"}.getStr() == "entrypoints/1"
-    var testsEntry = newJNull()
-    for entry in document{"entries"}:
-      if entry{"name"}.getStr() == "tests":
-        testsEntry = entry
+    let testsEntry = document.testsEntryOf()
     check testsEntry{"entries"} == %ShimNames
     check testsEntry{"select"} == %["runtime"]
     let unknown = p.probe(ShimBinary,
@@ -335,13 +359,43 @@ suite "test_cs_m14_shim_answers_tests_entry":
     check entryList.code == 0
     check entryList.stdout.lines == @EntryNames
 
+    # The plain std/unittest binary answers the entry itself, on the same
+    # streams: the list alone on stdout, the suite body's line on stderr.
+    let plainList = p.probe(PlainBinary, ["--entrypoint=tests", "--list"])
+    check plainList.code == 0
+    check plainList.stdout.lines == @ShimNames
+    check SuiteMarker & "math" in plainList.stderr
+    let plainEntries = p.probe(PlainBinary, ["--entrypoint=list"])
+    check plainEntries.code == 0
+    let plainDocument = parseJson(plainEntries.stdout)
+    check plainDocument{"schema"}.getStr() == "entrypoints/1"
+    let plainTests = plainDocument.testsEntryOf()
+    check plainTests{"entries"} == %ShimNames
+    check plainTests{"select"} == %["runtime"]
+    let plainOne = p.probe(PlainBinary,
+      ["--entrypoint=tests", "--run-exact=loose"])
+    check plainOne.code == 0
+    check plainOne.stdout.markers == @["loose"]
+    let plainUnknown = p.probe(PlainBinary,
+      ["--entrypoint=tests", "--run-exact=math::"])
+    check plainUnknown.code == 64
+    check plainUnknown.stdout.markers.len == 0
+
+    # The binary without the entry prints no entry list, so the producer
+    # runs it as a whole.
+    let noEntries = p.probe(NoEntryBinary, ["--entrypoint=list"])
+    check noEntries.code == 0
+    check noEntries.stdout.markers.len == 0
+    check not noEntries.stdout.contains("entrypoints/1")
+
   test "a failing test fails only its own action, and the command":
     let p = projectWith(mulBody = MulFails)
     let failing = p.reproTest("failing")
     check failing.code != 0
     for (collector, names, binary) in [
         (ShimCollector, @ShimNames, ShimBinary),
-        (EntryCollector, @EntryNames, EntryBinary)]:
+        (EntryCollector, @EntryNames, EntryBinary),
+        (PlainCollector, @ShimNames, PlainBinary)]:
       check failing.report.action(collector & ".list"){"status"}.getStr() ==
         "asSucceeded"
       let runs = failing.report.createdRuns(collector)
@@ -358,21 +412,21 @@ suite "test_cs_m14_shim_answers_tests_entry":
       check failing.report.action(collector){"status"}.getStr() !=
         "asSucceeded"
 
-    # Negative control: the plain binary's one run runs every test, so it
-    # fails with math::mul.
+    # The plain std/unittest binary runs math::mul alone and fails.
+    let plainMul = p.probe(PlainBinary,
+      ["--entrypoint=tests", "--run-exact=math::mul"])
+    check plainMul.code == 1
+    check plainMul.stdout.markers == @["math::mul"]
+
+    # Negative control: the one run of the binary without the entry runs
+    # every test, so it fails with math::mul.
     let whole = failing.report.checkWholeBinary()
     check whole.status == "asFailed"
-    check whole.stdout.markers == @["math::add", "math::mul"]
+    check whole.stdout.markers == @ShimNames
 
-    # Why the plain binary is not listed: asked to run math::mul alone
-    # through the entry it does not have, it runs nothing and passes.
-    let vacuous = p.probe(PlainBinary,
+    # Why that binary is not listed: asked to run math::mul alone through
+    # the entry it does not have, it runs nothing and passes.
+    let vacuous = p.probe(NoEntryBinary,
       ["--entrypoint=tests", "--run-exact=math::mul"])
     check vacuous.code == 0
     check vacuous.stdout.markers.len == 0
-    # Recorded, not asserted (it depends on the Nim's std/unittest): what the
-    # plain binary prints for `--entrypoint=tests --list`.
-    let plainList = p.probe(PlainBinary, ["--entrypoint=tests", "--list"])
-    echo "measured: plain std/unittest binary, --entrypoint=tests --list: " &
-      "exit ", plainList.code, ", stdout ", plainList.stdout.lines,
-      ", stderr ", plainList.stderr.lines.len, " lines"
