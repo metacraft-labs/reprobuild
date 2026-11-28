@@ -1,16 +1,23 @@
 #!/usr/bin/env bash
-# The push-time suite-description gates, run on the PUSHED commit inside this
-# repository's dev shell.
+# The push-time gates over checked-in generated files, run on the PUSHED
+# commit inside this repository's dev shell.
 #
-# `.pre-commit-config.yaml` runs this at the `pre-push` stage. It runs the two
-# build-free source scans that judge the checked-in description of the test
-# suite and refuses the push when either finds drift:
+# `.pre-commit-config.yaml` runs this at the `pre-push` stage. It runs the
+# build-free source scans that judge files derived from other files in the
+# tree, and refuses the push when any finds drift:
 #
 #   * scripts/check_suite_case_counts.sh -- the static case-count baseline,
 #     the source half of the inventory, the declared-source walk, the
 #     edge-generator shape parity and the `ct test` addressability ledger;
 #   * scripts/check_vacuous_test_cases.py -- no case that asserts only
-#     `check true`.
+#     `check true`;
+#   * scripts/render_user_docs_generated.py --check -- the generated regions
+#     of the user docs (the command tables rendered from the CLI description,
+#     the `repro health` table, the installer help) and llms.txt match the
+#     sources they are rendered from. A CLI change that skipped the
+#     regeneration reached `agents` (reprobuild `c709357a70`, 2026-11-25),
+#     and from then on `just lint` refused every later commit at its docs
+#     step, whatever the commit changed.
 #
 # WHY AT THE PUSH. `agents` has no CI, so its gates are the ones run on the
 # pushing machine (metacraft-dev-guidelines branching-policy.md, "Product
@@ -19,8 +26,9 @@
 # in two days (reprobuild `3452e1bc4`, `24b330f23`) a commit that added test
 # cases without `just regen-suite-artifacts` reached `agents`, and every later
 # pusher inherited the red check.
-# These scans cost about two minutes and no build, which is what makes them
-# affordable at every push.
+# These scans cost about two minutes and no build (the docs check is Python
+# over source files and takes seconds), which is what makes them affordable at
+# every push.
 #
 # Both hooks were declared at the `pre-push` stage in flake.nix's
 # git-hooks.nix set from the start, but that set is never installed: the dev
@@ -58,9 +66,9 @@
 #   scripts/pre_push_suite_checks.sh            # from a pre-push hook
 #   PRE_COMMIT_TO_REF=<rev> scripts/pre_push_suite_checks.sh
 #
-# Exit codes: 0 -- the pushed commit's suite description matches its tree;
-# non-zero -- it does not (the checks name what moved and how to regenerate),
-# or the pushed commit could not be checked out.
+# Exit codes: 0 -- the pushed commit's suite description and generated user
+# docs match its tree; non-zero -- they do not (the checks name what moved and
+# how to regenerate), or the pushed commit could not be checked out.
 set -euo pipefail
 repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
@@ -109,5 +117,11 @@ cd "$repo_root/scripts"
 	status=0
 	bash scripts/check_suite_case_counts.sh "$1" || status=1
 	python3 scripts/check_vacuous_test_cases.py --root "$1" || status=1
+	# The generator resolves every path from its own location, so the copy in
+	# the checked tree judges that tree.
+	if ! python3 scripts/render_user_docs_generated.py --check; then
+		echo "pre_push_suite_checks: the generated user docs do not match their sources in the pushed commit. Run python3 scripts/render_user_docs_generated.py and commit the result in the commit that changed the source (the CLI description, the health checks, the installers or the docs front matter); when the drift was inherited, regenerate in a chore(docs) commit of its own." >&2
+		status=1
+	fi
 	exit "$status"
 ' _ "$check_root")

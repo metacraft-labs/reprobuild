@@ -150,7 +150,7 @@ printf 'import unittest\n\nsuite "untracked":\n  test "not enrolled":\n    check
 green_output="$(push "$clean")" ||
 	fail "a push of the regenerated commit was refused: $(tail -40 <<<"$green_output")"
 no_ambient_tool "$green_output"
-grep -q 'suite description matches the pushed tree' <<<"$green_output" ||
+grep -q 'suite description and generated docs match the pushed tree' <<<"$green_output" ||
 	fail "the push did not run the suite-description hook: $green_output"
 # Control: judged in place, the checkout IS refused, so the pass above came
 # from checking the pushed commit apart from the untracked source.
