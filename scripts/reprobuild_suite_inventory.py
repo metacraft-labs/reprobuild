@@ -494,9 +494,7 @@ def python_imported_module_names(text: str) -> list[str] | None:
     source keeps much of its prose in docstrings and string constants: run
     over the raw text, a docstring line that begins with "from " is taken for
     `from x import y`, the words after it are recorded as a module, and
-    rewording the prose moves the tracked inventory
-    (reprobuild-pm issues/2026-11-26-suite-inventory-reads-a-python-docstring-
-    line-as-an-import.md). `ast` sees only code
+    rewording the prose moves the tracked inventory. `ast` sees only code
     (https://docs.python.org/3/library/ast.html#ast.Import and
     #ast.ImportFrom), so string literals and comments cannot contribute.
 

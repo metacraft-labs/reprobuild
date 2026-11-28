@@ -10283,8 +10283,7 @@ class ShapeParityGateTests(unittest.TestCase):
 class PythonImportScanTests(unittest.TestCase):
     """The purity import scan reads a Python source's code, not its prose.
 
-    Issue reprobuild-pm/issues/2026-11-26-suite-inventory-reads-a-python-
-    docstring-line-as-an-import.md: the scan ran the Nim import regex over
+    The scan used to run the Nim import regex over
     the raw text of a Python test, so a docstring line that began with
     "from " was recorded as a module the file imports, and rewording that
     prose moved the tracked inventory artifact.

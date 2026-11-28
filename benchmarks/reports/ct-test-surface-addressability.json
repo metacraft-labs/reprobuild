@@ -50,16 +50,16 @@
   "counts": {
     "catalogs": 5,
     "itemsByKind": {
-      "case": 21961,
-      "suite": 5175
+      "case": 21997,
+      "suite": 5179
     },
     "itemsByProvider": {
       "assembly-fallback": 3,
-      "nim-unittest": 26173,
+      "nim-unittest": 26182,
       "python-pytest": 7,
-      "python-unittest": 953
+      "python-unittest": 984
     },
-    "itemsTotal": 27136,
+    "itemsTotal": 27176,
     "responseDiagnostics": {
       "info": 1,
       "warning": 33
@@ -348,29 +348,29 @@
     }
   ],
   "reconciliation": {
-    "caseCoveragePercent": 98.03,
-    "caseItemsInCatalog": 21961,
-    "casesAddressableThroughTheSurface": 20702,
+    "caseCoveragePercent": 98.04,
+    "caseItemsInCatalog": 21997,
+    "casesAddressableThroughTheSurface": 20710,
     "collidingIdentities": 18,
-    "distinctCaseIdentities": 21941,
+    "distinctCaseIdentities": 21977,
     "groundTruth": "benchmarks/reports/reprobuild-suite-m0-inventory-sources.json",
     "perSourceCaseCountAgreement": {
-      "agree": 3326,
-      "compared": 3335,
+      "agree": 3327,
+      "compared": 3336,
       "disagree": 9
     },
     "sourceCoveragePercent": 99.76,
-    "sourcesAddressableThroughTheSurface": 3335,
+    "sourcesAddressableThroughTheSurface": 3336,
     "sourcesNotAddressable": 8,
-    "trackedNimSuiteSources": 3343,
-    "trackedStaticCaseCount": 21117
+    "trackedNimSuiteSources": 3344,
+    "trackedStaticCaseCount": 21125
   },
   "schemaVersion": 2,
   "surface": {
     "binary": "ct-test",
     "provenance": "",
     "resolvedBy": "PATH:ct-test",
-    "sha256": "87b4cfdbd1b02862bb5e88d8748fd025fcecc9f1a64682b8fd36a3aec8ffd7ec"
+    "sha256": "746a73fd92f7d51f970910820f3ed136aebc59a2f58a0b0f6f97263d6d8eafe6"
   },
   "title": "Reprobuild case addressability through the canonical `ct test` surface",
   "trackedNimSources": [
@@ -2652,6 +2652,7 @@
     "tests/integration/t_health_fix_remediates_safe_issues_only.nim",
     "tests/integration/t_health_names_the_binary_skew_and_does_not_propose_an_older_ensure.nim",
     "tests/integration/t_health_names_the_row_and_checkout_it_is_in.nim",
+    "tests/integration/t_health_places_missing_siblings_where_the_workspace_has_them.nim",
     "tests/integration/t_health_push_gateway_check_reports_observed_state.nim",
     "tests/integration/t_health_reports_a_disagreement_between_two_repro_resolutions.nim",
     "tests/integration/t_health_reports_a_malformed_repo_fragment.nim",
