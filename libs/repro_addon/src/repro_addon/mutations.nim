@@ -1441,6 +1441,22 @@
 ## ``path-unit-ignores-legacy-outbox``        the path unit does not start the
 ##                                            shipping unit for the legacy
 ##                                            outbox (round 27)
+## ``aside-failure-not-left``                 an entry neither moved aside nor
+##                                            removed is not counted as left
+##                                            (round 28, M-a)
+## ``aside-dir-planted-file-kept``            a file in the aside directory's
+##                                            place disables moving aside
+##                                            (round 28, M-a)
+## ``legacy-outbox-removed-when-empty``       the harvest removes the emptied
+##                                            legacy outbox under a writer
+##                                            (round 28, M-b)
+## ``legacy-move-ignores-confined-lock``      the move does not take this
+##                                            engine's shipping lock (round
+##                                            28, L3)
+## ``egress-units-unhardened``                the egress units carry no MDWE or
+##                                            syscall filter (round 28)
+## ``egress-check-sees-credential``           the egress check can read the
+##                                            sink credential (round 28)
 ## ``outbox-listed-by-path``                  the outbox is listed by path,
 ##                                            through a link its dynamic user
 ##                                            planted (decision 181)
@@ -2635,6 +2651,12 @@ const
                           "legacy-state-newer-dropped",
                           "legacy-move-ignores-ship-lock",
                           "path-unit-ignores-legacy-outbox",
+                          "aside-failure-not-left",
+                          "aside-dir-planted-file-kept",
+                          "legacy-outbox-removed-when-empty",
+                          "legacy-move-ignores-confined-lock",
+                          "egress-units-unhardened",
+                          "egress-check-sees-credential",
                           "outbox-listed-by-path",
                           "confined-output-unescaped",
                           "confined-copy-shared",

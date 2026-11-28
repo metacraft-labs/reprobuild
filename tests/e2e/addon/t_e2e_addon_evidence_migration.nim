@@ -32,7 +32,10 @@
 ## 5. an egress check run's record goes through the drop directory: the
 ##    shipping unit's harvest reports moving it;
 ## 6. the sink accepts the host again, and every record queued in step 2
-##    reaches it exactly once.
+##    reaches it exactly once;
+## 7. (pre-181) with the shipping timer stopped, a record written into the
+##    old outbox as the bootstrap engine writes it reaches the sink through
+##    the path unit: the steady state of a migrated host.
 ##
 ## Falsifying builds, red here: ``migration-skips-ship-identity`` on the
 ## pre-181 stand-in (the shipping unit stays root, step 3) and
@@ -44,7 +47,7 @@
 ## *Mocking.* None: the real add-on of two engines, the real sink, the
 ## base's own systemd.
 
-import std/[json, os, sequtils, strutils, unittest]
+import std/[json, os, sequtils, strutils, times, unittest]
 
 import repro_test_support/reasoned_skip
 import repro_peer_cache/evidence
@@ -243,6 +246,40 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
   record["shippedCounts"] = %counts
   step("every record queued before the upgrade reached the sink exactly once",
        counts.len == queued.len and counts.allIt(it == 1), $counts)
+  # 7. (pre-181) The steady state (A11 round 27, measured from round 28):
+  # the units that keep the bootstrap engine write into the old outbox for
+  # the host's life. A record written there as that engine writes it (a
+  # staged file renamed into the old outbox; here a copy of a record it
+  # queued above, under a fresh name) reaches the sink with the shipping
+  # timer stopped, so only the path unit's DirectoryNotEmpty= on the old
+  # outbox can have started the shipping unit.
+  if pre181 and queued.len > 0:
+    discard g.exec("systemctl stop repro-addon-evidence.timer")
+    let fresh = "09999999999999999999-1-steady-state.evr"
+    discard g.exec("mkdir -p /var/lib/repro/system/addon/evidence/.outbox-staging")
+    g.copyTo(snap / queued[0], "/var/lib/repro/system/addon/evidence/.outbox-staging/" & fresh)
+    let t0 = epochTime()
+    discard g.exec("mv /var/lib/repro/system/addon/evidence/.outbox-staging/" & fresh &
+                   " " & LegacyOutbox & "/" & fresh)
+    var arrivedSec = -1.0
+    while epochTime() - t0 < 90:
+      var c = 0
+      for e in sink.entries():
+        if e.kind == ekRecord and $e.senderHostId == bs.host and
+            cast[string](e.body) == queuedBytes[0]: inc c
+      if c >= 2:
+        arrivedSec = epochTime() - t0
+        break
+      sleep(2000)
+    let pathRuns = g.exec("journalctl -q -o cat -u repro-addon-evidence.service | " &
+      "grep -c 'queued record(s)'; true").stdout.strip()
+    record["steadyState"] = %*{"arrivedSec": arrivedSec, "moveLines": pathRuns}
+    discard g.exec("systemctl start repro-addon-evidence.timer")
+    step("pre-181: a record written into the old outbox afterwards reaches the " &
+         "sink through the path unit, the timer stopped",
+         arrivedSec >= 0, $arrivedSec & " s; " &
+           g.exec("systemctl status repro-addon-evidence.path --no-pager | head -5; ls -la " &
+             LegacyOutbox).stdout)
 
 suite Gate:
   test "a host an earlier engine bootstrapped is migrated by an operator's apply":

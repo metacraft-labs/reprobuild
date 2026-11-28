@@ -300,7 +300,11 @@ nim-stackable-hooks
 # commits behind the pin.
 # Private auto-start requires the explicit endpoint policy in this revision;
 # keep release archives and CI overrides on the same API as the Nix pin.
-runquota=4dd0d6bbf1a3e067cd53f296ceefaa9ffff2a688
+# Moved to 1b5ca6a (2026-11-27): the per-task memory cap, and the memory-only
+# cgroup target (`memoryOnlyPlacement`) a capped action's leaf is placed in.
+# Moved to b9b280b (2026-11-28), runquota's `agents` tip, recorded by the
+# lock refresh: benchmark and issue changes only, no daemon or client change.
+runquota=b9b280b142715ef9c935efb0e24ae383eaa4f522
 nim-shm-queue
 # Moved to 803a4fa (2026-11-22), nim-shm-gset's `agents` tip, with
 # `nim-shm-gset-src` in flake.nix and flake.lock: a reader handle stops

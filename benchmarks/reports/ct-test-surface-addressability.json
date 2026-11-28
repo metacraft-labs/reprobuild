@@ -50,16 +50,16 @@
   "counts": {
     "catalogs": 5,
     "itemsByKind": {
-      "case": 21945,
-      "suite": 5173
+      "case": 21993,
+      "suite": 5179
     },
     "itemsByProvider": {
       "assembly-fallback": 3,
-      "nim-unittest": 26155,
+      "nim-unittest": 26178,
       "python-pytest": 7,
-      "python-unittest": 953
+      "python-unittest": 984
     },
-    "itemsTotal": 27118,
+    "itemsTotal": 27172,
     "responseDiagnostics": {
       "info": 1,
       "warning": 33
@@ -348,29 +348,29 @@
     }
   ],
   "reconciliation": {
-    "caseCoveragePercent": 98.03,
-    "caseItemsInCatalog": 21945,
-    "casesAddressableThroughTheSurface": 20686,
+    "caseCoveragePercent": 98.04,
+    "caseItemsInCatalog": 21993,
+    "casesAddressableThroughTheSurface": 20706,
     "collidingIdentities": 18,
-    "distinctCaseIdentities": 21925,
+    "distinctCaseIdentities": 21973,
     "groundTruth": "benchmarks/reports/reprobuild-suite-m0-inventory-sources.json",
     "perSourceCaseCountAgreement": {
-      "agree": 3325,
-      "compared": 3334,
+      "agree": 3327,
+      "compared": 3336,
       "disagree": 9
     },
     "sourceCoveragePercent": 99.76,
-    "sourcesAddressableThroughTheSurface": 3334,
+    "sourcesAddressableThroughTheSurface": 3336,
     "sourcesNotAddressable": 8,
-    "trackedNimSuiteSources": 3342,
-    "trackedStaticCaseCount": 21101
+    "trackedNimSuiteSources": 3344,
+    "trackedStaticCaseCount": 21121
   },
   "schemaVersion": 2,
   "surface": {
     "binary": "ct-test",
     "provenance": "",
     "resolvedBy": "PATH:ct-test",
-    "sha256": "86847c06f9c8b0a5ceefcad181a660bd11b06a1b02df0523303474f2d7b4bdc9"
+    "sha256": "746a73fd92f7d51f970910820f3ed136aebc59a2f58a0b0f6f97263d6d8eafe6"
   },
   "title": "Reprobuild case addressability through the canonical `ct test` surface",
   "trackedNimSources": [
@@ -423,6 +423,7 @@
     "libs/repro_addon/tests/t_addon_evidence_key_survives_retention.nim",
     "libs/repro_addon/tests/t_addon_evidence_lag_resigned.nim",
     "libs/repro_addon/tests/t_addon_evidence_probe_owns_its_connection.nim",
+    "libs/repro_addon/tests/t_addon_evidence_round28.nim",
     "libs/repro_addon/tests/t_addon_evidence_ship_confinement.nim",
     "libs/repro_addon/tests/t_addon_evidence_ships_off_host.nim",
     "libs/repro_addon/tests/t_addon_evidence_units_and_tick_records.nim",
@@ -3128,6 +3129,7 @@
     "tests/integration/t_rqe_m15_action_exports_its_lease.nim",
     "tests/integration/t_rqe_m15_nim_edge_bounded.nim",
     "tests/integration/t_rqe_m15_recorder_cargo_edge_bounded.nim",
+    "tests/integration/t_rqm_reprobuild_memory_cap.nim",
     "tests/integration/t_run_consumes_opaque_out_of_tree.nim",
     "tests/integration/t_run_consumes_session_store_out_of_tree.nim",
     "tests/integration/t_run_edge_session_resolver_auto.nim",

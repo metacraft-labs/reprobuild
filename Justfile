@@ -364,11 +364,14 @@ list-standalone-gates:
 # Enters the dev shell repeatedly and lints twice, so it is not part of
 # `just test`. The commit hook's shell holds a permanent GC root for its
 # closure (a local probe shell; `just lint` runs only its wiring check).
+# A push of a commit whose tree-derived suite artifacts are stale is refused
+# by the installed pre-push hook, which judges the pushed commit.
 dev-shell-hooks:
     bash ./tests/test_dev_shell_entry_roots_its_closure.sh
     bash ./tests/test_dev_shell_writes_nothing_elsewhere.sh
     bash ./tests/test_dev_shell_hooks_warning_names_the_command_it_ran.sh
     bash ./tests/test_pre_commit_runs_lint_in_dev_shell.sh
+    bash ./tests/test_pre_push_refuses_stale_suite_artifacts.sh
 
 # The test runner uses the host's RunQuota daemon, and keeps a private
 # per-user endpoint only where no host service answers. Needs `runquota` and
@@ -831,6 +834,13 @@ lint:
     # count may fall (the baseline is rewritten smaller) but never rise. Pure
     # git grep over tracked files, no build needed.
     python3 ./scripts/check_private_pm_references.py 2>&1 | tee -a test-logs/lint.log
+    # Its Markdown-link counterpart, and zero-tolerance rather than a ratchet:
+    # a relative link that resolves outside this repository works only in a
+    # checkout that has that sibling directory, and when the sibling is
+    # private it points a public reader somewhere they cannot go. Link to a
+    # public URL or state the fact in the document. Pure Python over tracked
+    # Markdown, no build needed.
+    python3 ./scripts/check_markdown_links_stay_in_repo.py 2>&1 | tee -a test-logs/lint.log
     # Distributed-Execution M7 (deployment-security-architecture.md CONF-1,
     # CONF-3, CONF-4): the worker unit carries the confinement floor (every
     # omission argued in the unit), its syscall additions are the derived

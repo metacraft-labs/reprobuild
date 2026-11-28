@@ -12,7 +12,7 @@ provisioning flow. By the end of it you will have:
 
 The walkthrough mirrors the M71 validation harness verbatim — the
 campaign's verification gate copies the reference `home.nim` shipped at
-[`reprobuild-examples/m71-home-profile-walkthrough/home.nim`](../../../reprobuild-examples/m71-home-profile-walkthrough/home.nim)
+[`reprobuild-examples/m71-home-profile-walkthrough/home.nim`](https://github.com/metacraft-labs/reprobuild-examples/blob/dev/m71-home-profile-walkthrough/home.nim)
 into a sandbox and runs the same `repro home apply` invocation you'll
 run yourself.
 
@@ -74,7 +74,7 @@ That single command:
    to produce the active activity set.
 3. For each `package(<id>, "<version>")`, selects a realization of the
    package's canonical definition exactly as a recipe's `uses:` would
-   (see Provisioning-Contributions.md, "Profile Package References"):
+   (see [Profiles](../users/content/reference/dsl.md#profiles)):
    the selection policy is your profile's `adapterPreference:` entry for
    the platform, else `tarball, nix, scoop, path` on every platform. Every
    package in the reference profile has a `tarball` realization for
@@ -252,7 +252,6 @@ removed in a milestone post-2026-11-30; until then both paths coexist.
 - [`migrating-from-env-ps1.md`](./migrating-from-env-ps1.md) — operator
   guide for replacing `D:/metacraft/env.ps1` with a home profile,
   including the `repro home migrate-from-env-scripts` synthesizer.
-- [`Builtin-Catalog-And-Home-Profile-Provisioning.milestones.org`](../../../reprobuild-specs/Builtin-Catalog-And-Home-Profile-Provisioning.milestones.org)
-  — the campaign spec (M63–M71) covering the full design.
-- [`Home-Profile-Intent-Layer.md`](../../../reprobuild-specs/Home-Profile-Intent-Layer.md)
-  — the `home.nim` schema reference.
+- [Profiles](../users/content/reference/dsl.md#profiles) in the DSL
+  reference — the `home.nim` syntax: activities, `config:`, `hosts:` and
+  `resources:`.

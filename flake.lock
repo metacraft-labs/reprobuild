@@ -2556,11 +2556,11 @@
     "reprobuild-test-adapters-src": {
       "flake": false,
       "locked": {
-        "lastModified": 1795745250,
-        "narHash": "sha256-gM1YHX6idMaQVW32UGfjN+vITgfEo2QJaN5IsAjnY8A=",
+        "lastModified": 1795840271,
+        "narHash": "sha256-aATsC0DlNdqa2BwL7xR9KGAx9wvFA2O8PH1LtuwrpyM=",
         "owner": "metacraft-labs",
         "repo": "reprobuild-test-adapters",
-        "rev": "070435761453f18f5eb0f86e967c5e3c80ea82dc",
+        "rev": "104298306a9af57da48db0495f043d9a9d92c3d0",
         "type": "github"
       },
       "original": {
@@ -2642,6 +2642,9 @@
           "nixos-modules",
           "git-hooks-nix"
         ],
+        "metacraft-github-actions": [
+          "metacraft-github-actions"
+        ],
         "nim-shm-lease": "nim-shm-lease",
         "nixos-modules": [
           "nixos-modules"
@@ -2653,15 +2656,14 @@
         ],
         "release-bearssl-src": "release-bearssl-src",
         "release-nimcrypto-src": "release-nimcrypto-src",
-        "release-packaging-src": [],
         "runquota-package-catalog": "runquota-package-catalog"
       },
       "locked": {
-        "lastModified": 1795789244,
-        "narHash": "sha256-csK0bzwN+0hg+QfQz50ATdUr9Y+ReVVcv1XKCi6ZNJ8=",
+        "lastModified": 1795831356,
+        "narHash": "sha256-DH5WLUV+BZFxL3sMniOxzwPApkRWImfBn/Il0JyisMU=",
         "owner": "metacraft-labs",
         "repo": "runquota",
-        "rev": "4dd0d6bbf1a3e067cd53f296ceefaa9ffff2a688",
+        "rev": "b9b280b142715ef9c935efb0e24ae383eaa4f522",
         "type": "github"
       },
       "original": {

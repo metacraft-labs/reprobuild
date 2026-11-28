@@ -1,11 +1,15 @@
 # Spec example fixtures
 
-This directory contains example projects that exercise the new spec
-additions:
+This directory contains example projects that exercise three planned
+additions to the `repro.nim` language:
 
-- [Build-Graph-Collections.md](../../../../reprobuild-specs/Build-Graph-Collections.md)
-- [Configurable-System.md §"Solver-Participating Configurables (Variants)"](../../../../reprobuild-specs/Configurable-System.md)
-- [Reprobuild-Standard-Library.md](../../../../reprobuild-specs/Reprobuild-Standard-Library.md)
+- build-graph collections, such as the `test` collection that test
+  targets enrol in and `repro test` runs;
+- solver-participating configurables (variants), whose values the
+  dependency solver chooses along with package versions;
+- the DSL standard library (`repro_dsl_stdlib`) and its cross-cutting
+  interfaces, such as the `Toolchain` interface a project's `uses:`
+  resolves against.
 
 Each subdirectory is a self-contained project whose `repro.nim` is a
 canonical demonstration of one or more of the new features. The projects

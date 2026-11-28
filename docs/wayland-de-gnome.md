@@ -1,8 +1,8 @@
 # DE-G1: GNOME on ReproOS (Wayland-DEs PoC — Phase DE-G)
 
-**Status.** DE-G1 architecture decision — Phase DE-G of the
-[`ReproOS-Wayland-DEs-PoC`](../../reprobuild-specs/ReproOS-Wayland-DEs-PoC.milestones.org)
-campaign. Companion to [`wayland-de-hyprland.md`](wayland-de-hyprland.md) (DE-H1)
+**Status.** DE-G1 architecture decision — Phase DE-G (GNOME) of the
+Wayland desktop-environments proof of concept for ReproOS. Companion to
+[`wayland-de-hyprland.md`](wayland-de-hyprland.md) (DE-H1)
 and the existing DE0 documents at
 [`recipes/catalog/linux/SCHEMA.md`](../recipes/catalog/linux/SCHEMA.md).
 

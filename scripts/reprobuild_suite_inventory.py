@@ -32,6 +32,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import warnings
 from collections.abc import Callable, Mapping
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
@@ -486,6 +487,50 @@ def imported_module_roots(text: str) -> list[str]:
     return roots
 
 
+def python_imported_module_names(text: str) -> list[str] | None:
+    """Every module a Python source imports, read from its syntax tree.
+
+    `imported_module_roots` is a line regex written for Nim, and a Python
+    source keeps much of its prose in docstrings and string constants: run
+    over the raw text, a docstring line that begins with "from " is taken for
+    `from x import y`, the words after it are recorded as a module, and
+    rewording the prose moves the tracked inventory. `ast` sees only code
+    (https://docs.python.org/3/library/ast.html#ast.Import and
+    #ast.ImportFrom), so string literals and comments cannot contribute.
+
+    The names have the shape the regex produced for the same statements, so
+    the verdict reasons of real imports do not change: `import a.b` yields
+    `a.b`, `from a.b import c` yields `a.b`, and a relative `from ..a import
+    b` yields `..a` (bare dots for `from . import b`). Imports nested in
+    function bodies are included, in source order.
+
+    Returns `None` when the text does not parse; the caller refuses such a
+    source rather than falling back to the text scan this replaces.
+
+    Warnings are silenced while parsing. `ast.parse` reports an invalid escape
+    such as `"\\d"` as a SyntaxWarning, and under `-W error` (or
+    `PYTHONWARNINGS=error`) that warning is raised as a SyntaxError, so the
+    same source would be recorded as unparseable on one run and scanned on
+    another, depending only on how the interpreter was started.
+    """
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            tree = ast.parse(text)
+    except (SyntaxError, ValueError):
+        return None
+    found: list[tuple[int, int, str]] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                found.append((node.lineno, node.col_offset, alias.name))
+        elif isinstance(node, ast.ImportFrom):
+            name = "." * node.level + (node.module or "")
+            found.append((node.lineno, node.col_offset, name))
+    found.sort(key=lambda entry: (entry[0], entry[1]))
+    return [name for _line, _col, name in found]
+
+
 def module_leaf(name: str) -> str:
     return name.replace("\\", "/").rstrip("/").split("/")[-1]
 
@@ -695,9 +740,22 @@ def pure_unit_verdict(
     # still gets the verdict for the text it passed.
     own_code = nim_code_only(text)
     scan: list[tuple[Path | None, str, str]] = [(None, text, own_code)]
-    for member in repo_local_import_closure(root, source_path):
-        raw, code = _nim_source(member)
-        scan.append((member, raw, code))
+    python_imports: list[str] | None = None
+    if spec.language == "python":
+        # A Python source's imports are read from its syntax tree, never from
+        # the text: see `python_imported_module_names`. Its closure is not
+        # walked, because that walk resolves Nim path imports to `.nim` files
+        # and a Python import never names one.
+        python_imports = python_imported_module_names(text)
+        if python_imports is None:
+            return False, (
+                "cannot be parsed as Python, so its imports are unknown; "
+                "refusing to call it pure rather than assuming it is"
+            )
+    else:
+        for member in repo_local_import_closure(root, source_path):
+            raw, code = _nim_source(member)
+            scan.append((member, raw, code))
 
     for member, raw, code in scan:
         if member is None:
@@ -721,7 +779,12 @@ def pure_unit_verdict(
             if pattern.search(code):
                 return False, why + through
 
-        for name in imported_module_roots(raw):
+        names = (
+            python_imports
+            if member is None and python_imports is not None
+            else imported_module_roots(raw)
+        )
+        for name in names:
             if name.startswith(".") or "/" in name and name.split("/")[0] in owned:
                 continue
             head = name.split("/")[0]

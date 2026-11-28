@@ -1,8 +1,7 @@
 # DE-K1: KDE Plasma on ReproOS (Wayland-DEs PoC - Phase DE-K)
 
-**Status.** DE-K1 architecture decision - Phase DE-K of the
-[`ReproOS-Wayland-DEs-PoC`](../../reprobuild-specs/ReproOS-Wayland-DEs-PoC.milestones.org)
-campaign. Companion to
+**Status.** DE-K1 architecture decision - Phase DE-K (KDE Plasma) of the
+Wayland desktop-environments proof of concept for ReproOS. Companion to
 [`wayland-de-hyprland.md`](wayland-de-hyprland.md) (DE-H1) and
 [`wayland-de-gnome.md`](wayland-de-gnome.md) (DE-G1).
 

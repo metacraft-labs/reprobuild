@@ -72,3 +72,11 @@
   the merged tree, so any resolution that is not a regeneration is a fabricated
   document that fails a gate later, on someone else's branch. See the block at
   the top of `.gitattributes`.
+- A change that adds, removes or renames a test case regenerates them in the
+  same commit. The dev shell installs a `pre-push` hook
+  (`scripts/pre_push_suite_checks.sh`, from `.pre-commit-config.yaml`) that
+  runs the build-free suite checks on the pushed commit and refuses on drift;
+  on `agents`, which has no CI, it is the gate. When it refuses over drift you
+  inherited from the branch you rebased onto, regenerate in a `chore(tests)`
+  commit of its own, never folded into an unrelated change. Do not push past
+  it with `--no-verify`.

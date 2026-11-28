@@ -303,8 +303,15 @@ red for everyone, and the next branch had to carry the regeneration in order
 to land. `scripts/check_suite_case_counts.sh` runs all three checks at four
 points, so it cannot get that far:
 
-- as a **pre-push hook** installed by the Nix dev shell (`flake.nix`,
-  `pre-commit-check`), which refuses the push and prints the commands above;
+- as a **pre-push hook**, the `suite-description` hook of the committed
+  `.pre-commit-config.yaml`, which entering the Nix dev shell installs
+  (`scripts/install-git-hooks.sh`; under a Reprobuild dispatcher it is
+  `.git/hooks/pre-push.repro-local`, run before the publication gate).
+  `scripts/pre_push_suite_checks.sh` runs it on the **pushed commit**, in the
+  dev shell, and the refusal names `just regen-suite-artifacts`. `agents` has
+  no CI, so on `agents` this hook is the gate. Until 2026-11-27 the hook was
+  declared only in `flake.nix`'s `pre-commit-check`, which is never installed,
+  so no push ran it;
 - as its own hosted workflow, `.github/workflows/suite-case-counts.yml`, which
   has no concurrency cancellation and so reaches a verdict on every commit;
 - as an early step of the CI lint job, ahead of the whole-tree compile;

@@ -74,6 +74,29 @@ real tools produce is the macOS case above. The packager refuses the root in
 a publishing run and with production signing credentials, which a case
 checks, so the seam cannot swap the tools of a package that is released.
 
+ArchiveCodesignTests checks the archive step's ad-hoc re-sign on macOS
+(scripts/relocate_release_posix.sh, run by "Package release assets (POSIX)"):
+codesign is run as /usr/bin/codesign, never from PATH, a missing one stops the
+step naming that path, and a failing codesign stops it with codesign's own
+message. It needs macOS for the darwin branch, so it uses FAKES, each
+justified by what is under test (which codesign runs, and what the step does
+when it fails), not what the tools do:
+  * a `uname` first on PATH that answers Darwin, so the script takes its
+    darwin branch on this host;
+  * `file`, `otool`, `install_name_tool` and `lipo` first on PATH, answering
+    just enough for two marker files (bin/repro, lib/libfixture.dylib) to be
+    the tree's only Mach-O images with no dependencies; these stay looked up
+    on PATH, as on macOS;
+  * the fake root of AppleToolLookupTests, REPRO_APPLE_TOOL_ROOT, holding a
+    usr/bin/codesign that records each call and can be told to fail, and a
+    look-alike codesign first on PATH that fails the case if it runs.
+The Python helper staging that the step runs first is the real one, with this
+interpreter. The off-macOS case runs the real Linux branch (patchelf, ldd)
+over a copy of this interpreter, with the look-alike codesign on PATH; it is
+skipped, which counts as not passed, without patchelf or ldd. The root is
+refused in a publishing run, which a case checks. What Apple's codesign does
+with the relocated images is checked only by the macOS release leg.
+
 test_cs_m8c_windows_packages_carry_completion is the Windows counterpart. From
 a fixture .zip of the Windows archive's shape it generates the MSI authoring
 (.wxs) with repro-build-packages.sh --ecosystem msi, builds the MSI and reads
@@ -127,6 +150,7 @@ import re
 import stat
 import shutil
 import subprocess
+import sys
 import tarfile
 import tempfile
 import unittest
@@ -824,6 +848,177 @@ class AppleToolLookupTests(PackagerFixture):
         self.assertTrue((root / "usr" / "local" / "bin" / "repro").is_file())
         self.assertEqual([], list(self.out.glob("*.pkg")))
         self.assertEqual([], self.calls())
+
+
+RELOCATOR = REPO_ROOT / "scripts" / "relocate_release_posix.sh"
+MACHO_MARKER = "FIXTURE-MACH-O\n"
+
+# The darwin branch's tools other than codesign (see the module header). Each
+# appends what it was run as to $STUB_LOG, so a case can see they ran.
+ARCHIVE_DARWIN_STUBS = {
+    "uname": """#!/bin/sh
+echo Darwin
+""",
+    "file": f"""#!/bin/sh
+[ "$1" = -b ] && shift
+if [ "$(head -n 1 "$1" 2>/dev/null)" = "{MACHO_MARKER.strip()}" ]; then
+  echo 'Mach-O 64-bit executable arm64'
+else
+  echo data
+fi
+""",
+    "otool": """#!/bin/sh
+# -L <img>: the header line and no dependencies; -l <img>: no LC_RPATH.
+[ "$1" = -L ] && printf '%s:\n' "$2"
+exit 0
+""",
+    "install_name_tool": """#!/bin/sh
+printf 'install_name_tool %s\n' "$*" >> "$STUB_LOG"
+""",
+    "lipo": """#!/bin/sh
+[ "$1" = -archs ] && echo arm64
+""",
+}
+
+# Apple's codesign in the fake root: records "<path it ran as> <args>" and
+# fails, saying so on stderr, when $CODESIGN_FAIL names its operation
+# ("sign" for -f -s -, "remove" for --remove-signature).
+ROOT_CODESIGN = r"""#!/bin/sh
+printf '%s %s
+' "$0" "$*" >> "$STUB_LOG"
+case "$1:${CODESIGN_FAIL:-}" in
+  --remove-signature:remove) echo "stand-in codesign: cannot remove the signature" >&2; exit 1 ;;
+  -f:sign) echo "stand-in codesign: the signature could not be written" >&2; exit 1 ;;
+esac
+exit 0
+"""
+
+
+class ArchiveCodesignTests(unittest.TestCase):
+    """The archive step re-signs with /usr/bin/codesign on macOS, never one
+    from PATH, and stops when codesign fails (fakes: see the module header)."""
+
+    def setUp(self):
+        self.work = Path(tempfile.mkdtemp(prefix="relocate-codesign-"))
+        self.addCleanup(shutil.rmtree, self.work, True)
+        self.new_pkg("pkg")
+        self.tools = self.work / "tools"
+        write_executable(self.tools / "codesign", LOOKALIKE)
+        self.fake_root = self.work / "apple-root"
+        write_executable(self.fake_root / "usr" / "bin" / "codesign", ROOT_CODESIGN)
+        # The bare-dlopen'd libraries, found through their prefixes so the
+        # step does not scan /nix/store.
+        self.prefix = self.work / "prefix"
+        self.prefix.mkdir()
+        self.log = self.work / "stub.log"
+        self.log.touch()
+
+    def new_pkg(self, name):
+        """A fresh archive tree: bin/, lib/ and the helper the staging step
+        expects (a Python script before it is relocated)."""
+        self.pkg = self.work / name
+        (self.pkg / "bin").mkdir(parents=True)
+        (self.pkg / "lib").mkdir()
+        write_executable(self.pkg / "bin" / "reprobuild-nix-daemon",
+                         "#!/usr/bin/env python3\nimport argparse\n")
+
+    def darwin_tree(self):
+        for name, text in ARCHIVE_DARWIN_STUBS.items():
+            write_executable(self.tools / name, text)
+        for name in ("libclingo.dylib", "libzstd.1.dylib"):
+            (self.prefix / name).write_text("data\n", encoding="utf-8")
+        self.images = [self.pkg / "bin" / "repro", self.pkg / "lib" / "libfixture.dylib"]
+        for image in self.images:
+            write_executable(image, MACHO_MARKER)
+
+    def relocate(self, **extra):
+        env = dict(os.environ, PATH=os.pathsep.join([str(self.tools), os.environ.get("PATH", "")]),
+                   STUB_LOG=str(self.log), CLINGO_PREFIX=str(self.prefix), ZSTD_PREFIX=str(self.prefix))
+        for name in ("REPRO_APPLE_TOOL_ROOT", "REPRO_RELEASE_PUBLISHING", "CODESIGN_FAIL"):
+            env.pop(name, None)
+        env.update(extra)
+        return subprocess.run(["bash", str(RELOCATOR), str(self.pkg)], env=env,
+                              capture_output=True, text=True, timeout=300)
+
+    def calls(self):
+        return self.log.read_text(encoding="utf-8").splitlines()
+
+    def codesign_calls(self):
+        return [c for c in self.calls() if "codesign" in c.split(" ", 1)[0]]
+
+    def assert_no_lookalike(self):
+        self.assertFalse(any(c.startswith("LOOKALIKE") for c in self.calls()), self.calls())
+
+    def test_cs_m8e_archive_codesign_is_run_by_absolute_path_not_from_path(self):
+        self.darwin_tree()
+        run = self.relocate(REPRO_APPLE_TOOL_ROOT=str(self.fake_root))
+        self.assertEqual(0, run.returncode, run.stderr)
+        self.assertIn("relocate(darwin):", run.stdout)
+        codesign = f"{self.fake_root}/usr/bin/codesign"
+        expected = sorted([f"{codesign} --remove-signature {img}" for img in self.images]
+                          + [f"{codesign} -f -s - {img}" for img in self.images])
+        self.assertEqual(expected, sorted(self.codesign_calls()))
+        self.assert_no_lookalike()
+        # The other Mach-O tools still come from PATH: the fixup ran them.
+        self.assertTrue(any(c.startswith("install_name_tool -add_rpath") for c in self.calls()),
+                        self.calls())
+
+    def test_cs_m8e_a_failing_archive_codesign_stops_the_step(self):
+        codesign = f"{self.fake_root}/usr/bin/codesign"
+        for fail, operation, said in (
+                ("sign", "-f -s - (also with --preserve-metadata=entitlements)",
+                 "stand-in codesign: the signature could not be written"),
+                ("remove", "--remove-signature", "stand-in codesign: cannot remove the signature")):
+            with self.subTest(fail=fail):
+                self.new_pkg(f"pkg-{fail}")
+                self.darwin_tree()
+                self.log.write_text("", encoding="utf-8")
+                run = self.relocate(REPRO_APPLE_TOOL_ROOT=str(self.fake_root), CODESIGN_FAIL=fail)
+                self.assertNotEqual(0, run.returncode, run.stdout)
+                self.assertRegex(run.stderr, re.escape(f"relocate: {codesign} {operation} failed for ")
+                                 + re.escape(str(self.pkg)) + r"/(bin/repro|lib/libfixture\.dylib):")
+                self.assertIn(said, run.stderr)
+                self.assertNotIn("relocate(darwin):", run.stdout)
+                self.assert_no_lookalike()
+
+    def test_cs_m8e_a_missing_archive_codesign_is_refused_naming_its_path(self):
+        self.darwin_tree()
+        (self.fake_root / "usr" / "bin" / "codesign").unlink()
+        run = self.relocate(REPRO_APPLE_TOOL_ROOT=str(self.fake_root))
+        self.assertNotEqual(0, run.returncode)
+        self.assertIn(f"relocate: codesign not found at {self.fake_root}/usr/bin/codesign "
+                      "(macOS installs it there; PATH is not searched for it)", run.stderr)
+        self.assert_no_lookalike()
+        # Refused before anything was staged or rewritten.
+        self.assertEqual([], self.calls())
+        self.assertFalse((self.pkg / "bin" / "repro-python").exists())
+
+    def test_cs_m8e_the_archive_test_root_is_refused_in_a_publishing_run(self):
+        self.darwin_tree()
+        run = self.relocate(REPRO_APPLE_TOOL_ROOT=str(self.fake_root), REPRO_RELEASE_PUBLISHING="1")
+        self.assertNotEqual(0, run.returncode)
+        self.assertIn("REPRO_APPLE_TOOL_ROOT is a test-only seam and is refused in a publishing run",
+                      run.stderr)
+        self.assertEqual([], self.calls())
+        self.assertFalse((self.pkg / "bin" / "repro-python").exists())
+
+    @unittest.skipIf(os.uname().sysname != "Linux", "the Linux branch runs on Linux")
+    @unittest.skipUnless(shutil.which("patchelf") and shutil.which("ldd"), "needs patchelf and ldd")
+    def test_cs_m8e_off_macos_the_archive_step_runs_no_codesign(self):
+        for name in ("libclingo.so", "libzstd.so.1"):
+            (self.prefix / name).write_text("data\n", encoding="utf-8")
+        for extra in ({}, {"REPRO_APPLE_TOOL_ROOT": str(self.fake_root)}):
+            with self.subTest(root=bool(extra)):
+                # A real ELF, so the Linux branch walks a real closure and
+                # finds a loader: this interpreter. A fresh tree each time.
+                self.new_pkg(f"linux-{len(extra)}")
+                shutil.copy2(Path(sys.executable).resolve(), self.pkg / "bin" / "repro")
+                self.log.write_text("", encoding="utf-8")
+                run = self.relocate(**extra)
+                self.assertEqual(0, run.returncode, run.stderr)
+                self.assertIn("relocate(linux):", run.stdout)
+                self.assertEqual([], self.calls())
+                self.assertTrue((self.pkg / "bin" / ".repro.real").is_file())
 
 
 @unittest.skipUnless(os.uname().sysname == "Darwin"
