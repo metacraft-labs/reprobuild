@@ -40,6 +40,19 @@ JUSTFILE = REPO_ROOT / "Justfile"
 
 BASELINE_STEP_NAME = "Suite case-count baseline and inventory entry set"
 SUITE_INVENTORY_CHECK = "reprobuild_suite_inventory.py --check-"
+# The addressability ledger's check is suite-description bookkeeping of the
+# same kind -- it goes stale when a source is enrolled without regenerating it
+# -- so it belongs at the end with the four inventory checks.
+LEDGER_CHECK = "ct_test_surface_addressability.py --check"
+# The `reprobuild/dsl` re-export tree's check is the same class too, and the
+# recipe's comment places it behind the suite gates for that reason (f79db5e4d);
+# this test was not taught about it then, and failed on the order it asks for.
+DSL_MODULES_CHECK = "generate_reprobuild_dsl_modules.py --check"
+SUITE_DESCRIPTION_CHECKS = (SUITE_INVENTORY_CHECK, LEDGER_CHECK, DSL_MODULES_CHECK)
+
+
+def is_suite_description_check(command):
+    return any(check in command for check in SUITE_DESCRIPTION_CHECKS)
 
 
 def job_steps(workflow_text, job):
@@ -152,15 +165,19 @@ class JustLintOrderingTests(unittest.TestCase):
         inventory = [
             index
             for index, command in enumerate(commands)
-            if SUITE_INVENTORY_CHECK in command
+            if is_suite_description_check(command)
         ]
-        # Positive control: all four checks are still in the recipe, so the
+        # Positive control: all six checks are still in the recipe, so the
         # ordering assertion below is about something.
-        self.assertEqual(len(inventory), 4, commands)
+        self.assertEqual(len(inventory), 6, commands)
+        for check in (LEDGER_CHECK, DSL_MODULES_CHECK):
+            self.assertEqual(
+                sum(check in commands[i] for i in inventory), 1, commands
+            )
         behind = [
             command
             for command in commands[inventory[0] + 1:]
-            if SUITE_INVENTORY_CHECK not in command
+            if not is_suite_description_check(command)
         ]
         self.assertEqual(
             behind,
@@ -168,7 +185,7 @@ class JustLintOrderingTests(unittest.TestCase):
             "these `just lint` audits run AFTER a suite-inventory check, so "
             "a stale baseline -- bookkeeping that can go stale through no "
             "fault of the change being linted -- aborts them under `bash -e`. "
-            "Keep the four inventory checks at the end of the recipe.",
+            "Keep the six tree-derived-artifact checks at the end of the recipe.",
         )
 
     def test_the_dev_shell_gate_is_still_first(self):

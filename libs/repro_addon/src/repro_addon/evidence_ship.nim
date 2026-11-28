@@ -264,6 +264,9 @@ proc harvestDropEntries*(dropDir, outbox: string; stateDir = "";
     take = proc (e: DropEntry) = writeOutboxEntry(outbox, e.name, e.bytes))
   for r in result.asideNames & result.left:
     stderr.write("repro-addon evidence: drop entry " & escapeControl(r) & "\n")
+  for r in displacedAsideNotes:
+    stderr.write("repro-addon evidence: " & escapeControl(r) & "\n")
+  displacedAsideNotes.setLen(0)
   if stateDir.len > 0:
     try:
       # ``otherLeft``: the legacy outbox's entries this harvest could not
@@ -310,12 +313,18 @@ type
     stateLeft*: seq[string]  ## state files that could not be moved, with why
 
 proc hasLegacyShipState*(site: ShipSite): bool =
-  ## Whether ``site`` names legacy state and any of it is there: the legacy
-  ## outbox's place (whatever holds it), or a ``LegacyShipStateNames`` file.
-  ## Judged without following a link.
+  ## Whether ``site`` names legacy state and any of it is there: anything
+  ## but a directory in the legacy outbox's place, an entry in that
+  ## directory, or a ``LegacyShipStateNames`` file. Judged without following
+  ## a link. An empty legacy outbox is no legacy state: the harvest never
+  ## removes it (A11 round 28, M-b), so it is there on every migrated host.
   if site.legacyOutbox.len > 0:
     var st: Stat
-    if lstat(site.legacyOutbox.cstring, st) == 0: return true
+    if lstat(site.legacyOutbox.cstring, st) == 0:
+      if not S_ISDIR(st.st_mode): return true
+      when mutated("legacy-outbox-removed-when-empty"):
+        return true
+      if dirHasEntries(site.legacyOutbox): return true
   if site.legacyStateDir.len > 0:
     for n in LegacyShipStateNames:
       var st: Stat
@@ -394,6 +403,22 @@ proc moveLegacyShipState*(site: ShipSite;
         site.legacyStateDir / "ship.lock" & ": " & e.msg
       return
   defer: releaseExclusiveFileLock(shipLock)
+  # And this engine's own shipping lock in the dynamic user's state (A11
+  # round 28, L3): no confined shipping run overlaps the move. Made 0666 if
+  # absent: the directory is the dynamic user's alone (0700), and a lock
+  # file root made 0600 would stop that user ever locking it again. Taken
+  # without following a link (``acquireExclusiveLockWithin``).
+  var confinedLock: ReproFileLock
+  when not mutated("legacy-move-ignores-confined-lock"):
+    try:
+      ensureDelegatedState(site.stateDir)
+      confinedLock = acquireExclusiveLockWithin(site.stateDir / "ship.lock", lockWaitMs,
+                                                mode = 0o666)
+    except IOError, OSError:
+      result.skipped = "a shipping run holds " & site.stateDir / "ship.lock" & ": " &
+        getCurrentExceptionMsg()
+      return
+  defer: releaseExclusiveFileLock(confinedLock)
   writeDelegatedEntry(site.stateDir / "harvest", LegacyLeftName, "1\n",
                       mode = 0o644)
   try:
@@ -452,11 +477,14 @@ proc moveLegacyShipState*(site: ShipSite;
           # The directory could not be opened: nothing was handed over, so
           # nothing can leave twice; reported, and shipping goes on.
           result.entries.left.add(site.legacyOutbox & ": " & e.msg)
-      # The emptied legacy outbox goes; an engine unit that still runs the
-      # bootstrap engine makes it again, and the next harvest moves that.
-      if result.entries.left.len == 0:
-        discard posix.rmdir(site.legacyOutbox.cstring)
-        if crashPointHook != nil: crashPointHook("legacy-rmdir")
+      # The emptied legacy outbox stays (A11 round 28, M-b). The engine units
+      # that keep the bootstrap engine write into it with mkdir, a staged
+      # write and a rename; removing it in that window made the write fail
+      # and lost the record's off-host copy.
+      when mutated("legacy-outbox-removed-when-empty"):
+        if result.entries.left.len == 0:
+          discard posix.rmdir(site.legacyOutbox.cstring)
+          if crashPointHook != nil: crashPointHook("legacy-rmdir")
   except CrashPointKill:
     raise                 # tests only: a kill writes nothing more
   except CatchableError:
@@ -487,6 +515,9 @@ proc reportLegacyMove(m: LegacyMove) =
   for r in m.entries.asideNames & m.entries.left & m.stateLeft:
     stderr.write("repro-addon evidence: legacy shipping state: " &
       escapeControl(r) & "\n")
+  for r in displacedAsideNotes:
+    stderr.write("repro-addon evidence: " & escapeControl(r) & "\n")
+  displacedAsideNotes.setLen(0)
 
 const
   StaleOutboxMs* = 60_000'i64

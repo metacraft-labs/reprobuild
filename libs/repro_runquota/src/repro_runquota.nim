@@ -21,7 +21,10 @@ import runquota_process
 import runquota_protocol
 import runquota_client/pressure_text
 import repro_runquota/build_pressure
+import repro_runquota/action_memory_cap
 import repro_runquota/store_status
+
+export action_memory_cap
 # The helper's command line is declared in repro's description; only its
 # spellings are read here, at compile time (no parser is linked).
 from repro_cli_support/cli_description import reproLongFlags
@@ -50,6 +53,11 @@ type
     session: RunQuotaSession
     nextCandidateId: uint64
     active*: bool
+    memoryCap*: ReproMemoryCapPolicy
+      ## What this session's launches do about the grant's memory cap,
+      ## resolved once by the build that opened it
+      ## (`currentReproMemoryCapPolicy`). The zero value is inactive: a
+      ## session nobody gave a policy applies no cap.
 
   ReproResourceRequest* = object
     label*: string
@@ -127,10 +135,28 @@ type
     backendName*: string
     leaseFinishedSent*: bool
     leaseReleased*: bool
+    memoryCapGrant*: GrantMemoryCap
+      ## The memory cap the lease was granted with.
+    memoryCapBlock*: FinishMemoryCap
+      ## The memory-cap block sent with the finish (`present` false when the
+      ## launch applied no cap).
+    memoryCapExceeded*: bool
+      ## The tree was killed by its memory cap: the finish was
+      ## `lfCapExceeded`. The action failed for the cap, not for its own
+      ## exit status.
+    memoryCapNote*: string
+      ## "memory cap not enforced: <why>" when a cap applied and the
+      ## platform did not put it in place, else "".
+    memoryCapReport*: string
+      ## The breach report, where the launcher knew the action's name (the
+      ## RunQuota helper); the inline path leaves it to the engine, which
+      ## does (`actionMemoryCapReport`).
 
   ReproRunQuotaRunningProcess* = object
     lease: RunQuotaLease
     child: LaunchedProcess
+    memoryCap: ActionMemoryCap
+      ## The memory cap this launch applied (inactive when none).
     active*: bool
     completed*: bool
     execution*: ReproRunQuotaExecution
@@ -773,8 +799,28 @@ proc finishOutcome(completion: ProcessCompletion;
   ## it and storable. A LOST EXECUTION IS WORSE THAN A COARSE ONE: the
   ## coarse row still carries the duration, the peak RSS and the profile,
   ## and a reader can see that something ended it.
+  ##
+  ## A KILL FOR MEMORY IS NAMED BEFORE ANYTHING ELSE, as RunQuota's own
+  ## launchers name it (`runquota_exec.finishOutcome`): the same signal reads
+  ## as a crash otherwise. The launch that applied the cap classified how
+  ## the tree ended (`capKilled`: by its cap; `oomKilledOutsideCap`: by
+  ## another limit or a host-wide OOM), and either conclusion needs kill
+  ## evidence. A cap kill is named only with the measurement that goes with
+  ## it, because the daemon refuses a cap-exceeded finish without the
+  ## memory-cap block. Neither flag is ever set on a launch with no cap.
   var kill: KillEvidence
   let killSignal = finishSignal(completion, child)
+  let killStatus =
+    if completion.exited and completion.exitCode > 0:
+      uint32(completion.exitCode)
+    else: 0'u32
+  var memoryKill: KillEvidence
+  if (completion.capKilled or completion.oomKilledOutsideCap) and
+      killEvidence(killStatus, (if completion.signaled: killSignal else: 0'u32),
+        memoryKill):
+    if completion.capKilled and completion.memoryCapMeasured:
+      return capExceeded(memoryKill)
+    return oomKilled(memoryKill)
   if deadlineKill(completion, child, kill):
     timedOut(kill)
   elif completion.signaled and killSignal != 0'u32:
@@ -1087,7 +1133,8 @@ const
 
 proc helperCliArgs*(request: ReproResourceRequest;
                     command: ReproCommandSpec;
-                    resultPath: string): seq[string] =
+                    resultPath: string;
+                    memoryCap = ReproMemoryCapPolicy()): seq[string] =
   ## The command line the RunQuota helper is started with: the words the
   ## generated parser of repro's command line reads back to these values.
   ## Each value is attached to its flag (``--<long>=<value>``), so an empty
@@ -1111,6 +1158,11 @@ proc helperCliArgs*(request: ReproResourceRequest;
   ]
   if command.isolatedEnv:
     result.add(HelperFlags.isolatedEnv)
+  # The build's memory-cap policy, only when it is active: an inactive one
+  # adds nothing, and the helper then applies no cap.
+  let capArg = encodePolicyArg(memoryCap)
+  if capArg.len > 0:
+    result.add(HelperFlags.memoryCap & "=" & capArg)
   for entry in command.env:
     result.add(HelperFlags.env & "=" & entry)
   result.add("--")
@@ -1918,8 +1970,20 @@ proc declareRunQuotaPools*(session: ReproRunQuotaSession;
   except CatchableError as err:
     RunQuotaPoolDeclaration(supported: false, diagnostic: err.msg)
 
+proc refuseInvalidMemoryCap(cap: ActionMemoryCap) =
+  ## A `RUNQUOTA_MEMORY_CAP` that is none of the accepted values refuses
+  ## the launch, before the lease is marked starting (so the lease is
+  ## released having started nothing), naming the variable.
+  if cap.resolution.error.len > 0:
+    raise newException(ReproRunQuotaError, cap.resolution.error)
+
 proc runWithRunQuota*(request: ReproResourceRequest;
-                      command: ReproCommandSpec): ReproRunQuotaExecution =
+                      command: ReproCommandSpec;
+                      memoryCap = ReproMemoryCapPolicy()):
+    ReproRunQuotaExecution =
+  ## ``memoryCap`` is the build's memory-cap policy, resolved by the engine
+  ## that started this helper and passed on its command line; the helper
+  ## reads neither the host file nor the variable itself.
   var client = connectDefault()
   try:
     var session = client.registerSession("reprobuild action", "0.1.0")
@@ -1934,15 +1998,20 @@ proc runWithRunQuota*(request: ReproResourceRequest;
     var lease = session.waitForQueuedGrant(request.toRunQuotaRequest())
     result.leaseId = lease.id.value
     try:
+      let cap = resolveActionMemoryCap(memoryCap, lease.memoryCap)
+      refuseInvalidMemoryCap(cap)
       lease.markStarting()
-      var child = launchProcess(launchSpec(
-        command.applyGrant(lease)))
+      var spec = launchSpec(command.applyGrant(lease))
+      spec.applyActionMemoryCap(cap)
+      var child = launchProcess(spec)
+      let capNote = cap.actionMemoryCapNote(child.info)
       lease.markRunning(
         childProcessId = child.info.processId,
         processGroupId = child.info.processGroupId,
         cleanupRegistered = true)
       let completion = child.waitForCompletion()
       let outcome = finishOutcome(completion, child)
+      let capBlock = cap.finishBlock(completion)
       child.close()
       lease.finish(
         outcome = outcome,
@@ -1950,7 +2019,8 @@ proc runWithRunQuota*(request: ReproResourceRequest;
         processCount = completion.processCount,
         totals = completion.totals,
         cpuProfile = completion.cpuProfile,
-        sizing = completion.finishSizing())
+        sizing = completion.finishSizing(),
+        memoryCap = capBlock)
       result = ReproRunQuotaExecution(
         leaseId: lease.id.value,
         exitCode: completion.exitCode,
@@ -1965,7 +2035,14 @@ proc runWithRunQuota*(request: ReproResourceRequest;
         peakResidentMemoryBytes: completion.peakResidentMemoryBytes,
         processCount: completion.processCount,
         backendName: child.info.backend.name,
-        leaseFinishedSent: true)
+        leaseFinishedSent: true,
+        memoryCapGrant: lease.memoryCap,
+        memoryCapBlock: capBlock,
+        memoryCapExceeded: outcome.kind == lfCapExceeded,
+        memoryCapNote: capNote,
+        memoryCapReport: actionMemoryCapReport(request.label,
+          request.commandStatsId, lease.memoryCap, capBlock,
+          killed = outcome.kind == lfCapExceeded))
     except CatchableError:
       if lease.active and lease.state == leaseClientStarting:
         lease.finish(outcome = launchFailed())
@@ -1983,6 +2060,17 @@ proc runWithRunQuota*(request: ReproResourceRequest;
     raise newException(ReproRunQuotaError, err.msg)
   finally:
     client.close()
+
+proc noteMemoryCap(execution: var ReproRunQuotaExecution;
+                   grant: GrantMemoryCap; capBlock: FinishMemoryCap;
+                   outcome: LeaseFinish; note: string) =
+  ## What the execution says of its memory cap: the grant and the block the
+  ## finish carried, whether the cap killed the tree, and the launch's
+  ## not-enforced note.
+  execution.memoryCapGrant = grant
+  execution.memoryCapBlock = capBlock
+  execution.memoryCapExceeded = outcome.kind == lfCapExceeded
+  execution.memoryCapNote = note
 
 proc executionFromCompletion(leaseId: uint64; completion: ProcessCompletion;
                              backendName: string; leaseFinishedSent,
@@ -2461,19 +2549,28 @@ proc startGrantedWithRunQuota(session: ReproRunQuotaSession;
   var child: LaunchedProcess
   var launched = false
   try:
+    # THE MEMORY CAP, from the build's policy and this lease's grant. With
+    # the policy inactive (the cap off, the variable unset) this is a
+    # field test and nothing else: no file, no cgroup, no system call.
+    let cap = resolveActionMemoryCap(session.memoryCap, lease.memoryCap)
+    refuseInvalidMemoryCap(cap)
     lease.markStarting()
-    child = launchProcess(launchSpec(
-      command.applyGrant(lease)))
+    var spec = launchSpec(command.applyGrant(lease))
+    spec.applyActionMemoryCap(cap)
+    child = launchProcess(spec)
     launched = true
     lease.markRunning(
       childProcessId = child.info.processId,
       processGroupId = child.info.processGroupId,
       cleanupRegistered = true)
-    return ReproRunQuotaRunningProcess(
+    var running = ReproRunQuotaRunningProcess(
       lease: lease,
       child: child,
+      memoryCap: cap,
       active: true,
       completed: false)
+    running.execution.memoryCapNote = cap.actionMemoryCapNote(child.info)
+    return running
   except CatchableError as err:
     # Until this proc returns it is the only owner of the lease and, once
     # ``launchProcess`` succeeded, of the child: nobody else holds a handle to
@@ -2490,6 +2587,10 @@ proc startGrantedWithRunQuota(session: ReproRunQuotaSession;
       try:
         let completion = child.cancelAndWait()
         outcome = finishOutcome(completion, child)
+        if outcome.kind == lfCapExceeded:
+          # A cap kill needs its block, which this rollback does not send:
+          # the kill is reported as the memory kill it also is.
+          outcome = oomKilled(outcome.kill)
         child.close()
       except CatchableError as cleanupErr:
         cleanupFailures.add("cancelling child pid " &
@@ -3330,6 +3431,7 @@ proc finishCompleted*(running: var ReproRunQuotaRunningProcess):
       discard running.child.waitForCompletion()
     let completion = running.child.completion
     let outcome = finishOutcome(completion, running.child)
+    let capBlock = running.memoryCap.finishBlock(completion)
     running.child.close()
     var leaseFinishedSent = false
     var leaseReleased = false
@@ -3341,18 +3443,22 @@ proc finishCompleted*(running: var ReproRunQuotaRunningProcess):
         totals = completion.totals,
         cpuProfile = completion.cpuProfile,
         askExpectedDuration = pressureReportsEnabled(),
-        sizing = running.sizingOf(completion))
+        sizing = running.sizingOf(completion),
+        memoryCap = capBlock)
       leaseFinishedSent = true
     finally:
       if running.lease.active:
         running.lease.release()
         leaseReleased = true
+    let capNote = running.execution.memoryCapNote
     running.execution = executionFromCompletion(
       running.lease.id.value,
       completion,
       running.child.info.backend.name,
       leaseFinishedSent,
       leaseReleased)
+    running.execution.noteMemoryCap(running.lease.memoryCap, capBlock,
+      outcome, capNote)
     running.execution.expectedUncontendedMillis =
       running.lease.expectedUncontendedMillis
     running.completed = true
@@ -3370,6 +3476,7 @@ proc cancelAndWait*(running: var ReproRunQuotaRunningProcess):
   try:
     let completion = running.child.cancelAndWait()
     let outcome = finishOutcome(completion, running.child)
+    let capBlock = running.memoryCap.finishBlock(completion)
     running.child.close()
     var leaseFinishedSent = false
     var leaseReleased = false
@@ -3380,18 +3487,22 @@ proc cancelAndWait*(running: var ReproRunQuotaRunningProcess):
         processCount = completion.processCount,
         totals = completion.totals,
         cpuProfile = completion.cpuProfile,
-        sizing = running.sizingOf(completion))
+        sizing = running.sizingOf(completion),
+        memoryCap = capBlock)
       leaseFinishedSent = true
     finally:
       if running.lease.active:
         running.lease.release()
         leaseReleased = true
+    let capNote = running.execution.memoryCapNote
     running.execution = executionFromCompletion(
       running.lease.id.value,
       completion,
       running.child.info.backend.name,
       leaseFinishedSent,
       leaseReleased)
+    running.execution.noteMemoryCap(running.lease.memoryCap, capBlock,
+      outcome, capNote)
     running.completed = true
     running.active = false
     running.execution
@@ -3411,12 +3522,17 @@ proc executionJson(execution: ReproRunQuotaExecution; runnerError = ""): JsonNod
     "backend_name": execution.backendName,
     "runquota_socket": getEnv("RUNQUOTA_SOCKET", ""),
     "lease_finished_sent": execution.leaseFinishedSent,
-    "lease_released": execution.leaseReleased
+    "lease_released": execution.leaseReleased,
+    "memory_cap_exceeded": execution.memoryCapExceeded,
+    "memory_cap_applied": execution.memoryCapBlock.present,
+    "memory_cap_report": execution.memoryCapReport,
+    "memory_cap_note": execution.memoryCapNote
   }
 
 proc runRunQuotaHelper*(request: ReproResourceRequest;
                         command: ReproCommandSpec;
-                        resultPath: string): int =
+                        resultPath: string;
+                        memoryCap = ReproMemoryCapPolicy()): int =
   ## The RunQuota helper (``repro internal runquota-helper``): runs
   ## ``command`` under a lease for ``request`` and writes the execution, a
   ## failure included, to ``resultPath`` as JSON. Exit 2 when there is no
@@ -3425,7 +3541,8 @@ proc runRunQuotaHelper*(request: ReproResourceRequest;
   if resultPath.len == 0 or command.argv.len == 0:
     return 2
   try:
-    writeFile(extendedPath(resultPath), $executionJson(runWithRunQuota(request, command)))
+    writeFile(extendedPath(resultPath), $executionJson(runWithRunQuota(
+      request, command, memoryCap)))
   except CatchableError as err:
     var failed = ReproRunQuotaExecution(
       exitCode: 1,

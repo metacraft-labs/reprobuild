@@ -2642,6 +2642,9 @@
           "nixos-modules",
           "git-hooks-nix"
         ],
+        "metacraft-github-actions": [
+          "metacraft-github-actions"
+        ],
         "nim-shm-lease": "nim-shm-lease",
         "nixos-modules": [
           "nixos-modules"
@@ -2653,15 +2656,14 @@
         ],
         "release-bearssl-src": "release-bearssl-src",
         "release-nimcrypto-src": "release-nimcrypto-src",
-        "release-packaging-src": [],
         "runquota-package-catalog": "runquota-package-catalog"
       },
       "locked": {
-        "lastModified": 1795763284,
-        "narHash": "sha256-zhgYWjaNdKYha1FI8APxkIwJuv84jQ91c/jFOImZi9E=",
+        "lastModified": 1795808553,
+        "narHash": "sha256-cuCG1kTOJxemyjX6ToJ/Qds9P8tMzIcxVOUDUokE9iY=",
         "owner": "metacraft-labs",
         "repo": "runquota",
-        "rev": "7c98da54daa1b828c39da4cea47cc06c6af3ddd1",
+        "rev": "1b5ca6a0212e0d1816b354b94e949f1181ea58dd",
         "type": "github"
       },
       "original": {

@@ -231,6 +231,36 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
   step("a burst of thirty records all leave, the path unit alive",
        arrived >= 30 and pathState != "failed", $arrived & " arrived in " &
        $tookSec & " s; path " & pathState)
+  # 3b'. The egress units' CONF-1 floor (A11 round 28): both carry
+  # MemoryDenyWriteExecute= and a syscall filter, and the steps above (the
+  # table loaded, the check reading its counters and recording thirty
+  # destinations) ran under it. A process given the check's own installed
+  # [Service] confinement cannot read the sink write credential.
+  let floor = g.exec("systemctl show -p MemoryDenyWriteExecute -p SystemCallErrorNumber " &
+    "-p SystemCallFilter repro-addon-egress.service repro-addon-egress-check.service").stdout
+  record["egressFloor"] = %floor
+  step("both egress units carry MemoryDenyWriteExecute= and a syscall filter",
+       floor.count("MemoryDenyWriteExecute=yes") == 2 and
+         floor.count("SystemCallErrorNumber=1\n") + floor.count("SystemCallErrorNumber=EPERM\n") == 2 and
+         floor.splitLines().filterIt(it.startsWith("SystemCallFilter=") and
+           it.len > "SystemCallFilter=".len).len == 2, floor)
+  let checkCat = g.exec("systemctl cat repro-addon-egress-check.service")
+  var checkProps = ""
+  var inCheckService = false
+  for l in checkCat.stdout.splitLines():
+    if l.startsWith("["): inCheckService = l == "[Service]"
+    elif inCheckService and '=' in l and not l.startsWith("Exec") and
+        not l.startsWith("Type="):
+      checkProps.add(" -p " & quoteShell(l))
+  let credProbe = g.exec("systemd-run --wait --pipe --quiet --collect" & checkProps &
+    " /bin/sh -c " & quoteShell("echo probe-ran; " &
+      "cat /var/lib/repro/evidence/host-ca.key >/dev/null 2>&1 && " &
+      "echo credential-read; true"))
+  record["egressCheckCredential"] = %(credProbe.stdout & credProbe.stderr)
+  step("the egress check's confinement cannot read the sink credential",
+       "probe-ran" in credProbe.stdout and "credential-read" notin credProbe.stdout and
+         g.exec("test -s /var/lib/repro/evidence/host-ca.key").exitCode == 0,
+       credProbe.stdout & credProbe.stderr)
   # 3c. The re-assert, confined to a private network namespace, reads the
   # HOST's table (session 2, G4): a healthy reboot is ``ok``, a deleted
   # table is ``missing``.

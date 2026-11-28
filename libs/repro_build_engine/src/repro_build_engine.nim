@@ -1038,6 +1038,11 @@ type
     # launches child processes directly under leases instead of spawning a
     # `repro internal runquota-helper` process for every action.
     inlineRunQuota*: bool
+    memoryCapHostConfig*: string
+      ## The RunQuota host file the build's memory-cap policy reads its
+      ## `[enforcement] memoryCap` (and `cgroups`) from; "" is the system's.
+      ## Tests name a file of their own, so the host's file cannot decide
+      ## their outcome.
     runQuotaQueueTimeoutMs*: int
       ## Bound, in milliseconds, on how long this build may sit with EVERY
       ## in-flight action queued at RunQuota -- i.e. with nothing of its own
@@ -2115,6 +2120,17 @@ type
     leaseId*: uint64
     runQuotaBackend*: string
     runQuotaSocket*: string
+    memoryCapWarning*: string
+      ## The report of an action that succeeded although its tree reached
+      ## its memory cap (an allocation refused) or passed it in advisory
+      ## mode: a warning in the build output and the run report, never a
+      ## failure. "" otherwise. A tree its cap KILLED fails instead, with
+      ## ``reason`` ``MemoryCapExceededReason`` and the report in ``stderr``.
+    memoryCapApplied*: bool
+      ## This action's launch put its memory cap (or measurement) in place.
+    memoryCapNote*: string
+      ## "memory cap not enforced: <why>" from this action's launch, or "";
+      ## gathered once per build into ``BuildRunResult.memoryCapNotEnforced``.
     evidence*: PathSetEvidence
     evidencePathCounts*: EvidencePathCounts
       ## Populated INSTEAD of `evidence` when the engine was told no consumer
@@ -2383,6 +2399,20 @@ type
       ## LOCAL pool gate, which cannot make concurrent cross-invocation runs
       ## safe. Surfaced in the build header + run report so the unsafe state is
       ## never entered silently. Stays false when RunQuota gated every launch.
+    memoryCap*: ReproMemoryCapPolicy
+      ## The memory-cap policy this build's RunQuota launches applied
+      ## (`currentReproMemoryCapPolicy`), resolved once, at the first leased
+      ## launch. `resolved` is false for a build that leased nothing, and the
+      ## build header then resolves it itself.
+    memoryCapApplied*: bool
+      ## At least one action of this build ran with its memory cap (or its
+      ## measurement) in place. Until one has, the build header says the
+      ## cap "will be" enforced rather than that it is.
+    memoryCapNotEnforced*: string
+      ## The first "memory cap not enforced: <why>" any action's launch gave
+      ## in this build, or "". One note per build: every action of a build
+      ## shares the reason (the host, the root, the platform), so the build
+      ## output says it once rather than once per action.
 
   BuildProgressEvent* = object
     kind*: BuildProgressKind
@@ -18925,7 +18955,8 @@ proc withWidthPlaceholders(action: BuildAction): BuildAction =
 
 proc startRunQuotaProcess(action: BuildAction; config: BuildEngineConfig;
                           resultPath: string;
-                          poolCapacity: uint32): Process =
+                          poolCapacity: uint32;
+                          memoryCap: ReproMemoryCapPolicy): Process =
   ## ``poolCapacity`` is what the build declares for ``action.pool``; the
   ## helper declares it on its own session before it asks for the lease
   ## (``runWithRunQuota``), as the inline path does for the whole build.
@@ -18943,8 +18974,8 @@ proc startRunQuotaProcess(action: BuildAction; config: BuildEngineConfig;
   command.widthFlag = action.widthFlag
   let helper = if config.runQuotaCliPath.len > 0: config.runQuotaCliPath
     else: defaultRunQuotaHelperPath()
-  startProcess(helper, args = helperCliArgs(rq, command, resultPath),
-    options = {poUsePath, poStdErrToStdOut})
+  startProcess(helper, args = helperCliArgs(rq, command, resultPath,
+    memoryCap), options = {poUsePath, poStdErrToStdOut})
 
 proc runQuotaRequest(action: BuildAction): ReproResourceRequest =
   ReproResourceRequest(
@@ -18963,6 +18994,48 @@ proc runQuotaCommand(action: BuildAction; config: BuildEngineConfig):
   ## granted width at launch, once the grant is known.
   result = preparedRunQuotaCommand(action.withWidthPlaceholders(), config)
   result.widthFlag = action.widthFlag
+
+proc noteMemoryCapOutcome(result: var ActionResult; exceeded, applied: bool;
+                          report, note: string) =
+  ## What an action's memory cap did to its result, on every leased launch
+  ## path (inline and helper alike).
+  ##
+  ## A TREE ITS CAP KILLED FAILS, whatever status the tree's root left: the
+  ## kill is the conclusion, and the report (the cap and its basis, the
+  ## peak, the previous maximum, both ways to declare expected growth, and
+  ## whom to tell) is what the user is shown in place of a bare signal. The
+  ## reason tells it from a command that failed on its own.
+  ##
+  ## NOT RETRIED, BY DESIGN. The engine re-runs no failed action within a
+  ## build, and a cap-exceeded one must stay that way even if a retry is
+  ## ever added: running the same regression again would only kill it
+  ## again, and a declared growth (`RUNQUOTA_MEMORY_CAP`, `runquota
+  ## expect-growth`) takes a new build to apply. Any retry must test
+  ## ``reason == MemoryCapExceededReason`` and leave such an action failed.
+  ## Its outputs are not published: only a succeeded action reaches the
+  ## publication path.
+  ##
+  ## A cap REACHED without a kill, or PASSED in advisory mode, on an action
+  ## that otherwise succeeded, is a warning (``memoryCapWarning``), not a
+  ## failure; on a failed action the report joins its stderr.
+  result.memoryCapNote = note
+  result.memoryCapApplied = applied
+  if exceeded:
+    result.status = asFailed
+    result.reason = MemoryCapExceededReason
+    var text = report
+    if text.len == 0:
+      text = "action " & result.id & " exceeded its memory cap"
+    if result.stderr.len > 0 and not result.stderr.endsWith("\n"):
+      result.stderr.add("\n")
+    result.stderr.add(text)
+  elif report.len > 0:
+    if result.status == asSucceeded:
+      result.memoryCapWarning = report
+    else:
+      if result.stderr.len > 0 and not result.stderr.endsWith("\n"):
+        result.stderr.add("\n")
+      result.stderr.add(report)
 
 proc finishBypassRunQuotaProcess(id: string;
                                  process: var ReproDirectRunningProcess;
@@ -19000,8 +19073,19 @@ proc finishBypassRunQuotaProcess(id: string;
     result.exitCode = 1
     result.stderr = "direct process finish failed: " & err.msg
 
+proc helperRefusedMemoryCapFlag*(helperOutput: string): bool =
+  ## Whether a RunQuota helper's output is its command-line parser refusing
+  ## `--memory-cap` as unknown, as an image built before the flag existed
+  ## says it: `Error: unknown flag '--memory-cap' for 'repro internal
+  ## runquota-helper'` (repro's generated parser, measured with a helper
+  ## built from the revision before the flag).
+  "unknown flag '--memory-cap'" in helperOutput
+
 proc finishRunQuotaProcess(id: string; process: Process; resultPath: string;
-                           cacheRoot: string): ActionResult =
+                           cacheRoot: string;
+                           memoryCapPassed = false): ActionResult =
+  ## ``memoryCapPassed``: the helper was started with ``--memory-cap``
+  ## (the build's memory-cap policy is active).
   result = ActionResult(
     id: id,
     launched: true,
@@ -19041,6 +19125,21 @@ proc finishRunQuotaProcess(id: string; process: Process; resultPath: string;
     result.stderr = "runquota helper did not write result"
     if helperOutput.len > 0:
       result.stderr.add(": " & helperOutput)
+    if memoryCapPassed and helperRefusedMemoryCapFlag(helperOutput):
+      # VERSION SKEW, NAMED. With the memory cap active the engine passes
+      # the helper `--memory-cap`, which a helper image older than this
+      # engine does not know: it refuses its command line and writes no
+      # result, for every action. Say so, rather than leave a bare "did not
+      # write result" to be debugged action by action -- but only when the
+      # helper's own words show that refusal; any other failure is left to
+      # what the helper said.
+      result.stderr.add("\n(the build's memory cap is active, so the " &
+        "helper was started with --memory-cap; a RunQuota helper image " &
+        "older than this engine refuses that option. Use a helper " &
+        "(BuildEngineConfig.runQuotaCliPath) built from the same tree as " &
+        "the engine, or turn the cap off for this build with " &
+        "RUNQUOTA_MEMORY_CAP unset and the host file's [enforcement] " &
+        "memoryCap off.)")
     return
   try:
     # extendedPath() is required: the result file's path can exceed Windows
@@ -19081,6 +19180,9 @@ proc finishRunQuotaProcess(id: string; process: Process; resultPath: string;
         asSucceeded
       else:
         asFailed
+    result.noteMemoryCapOutcome(node{"memory_cap_exceeded"}.getBool(false),
+      node{"memory_cap_applied"}.getBool(false),
+      node{"memory_cap_report"}.getStr(""), node{"memory_cap_note"}.getStr(""))
   except CatchableError as err:
     result.status = asFailed
     result.exitCode = if helperExit == 0: 1 else: helperExit
@@ -19143,7 +19245,7 @@ proc afterLeases*(deps: seq[string]; actionsById: Table[string, BuildAction];
     if result.len > MaxAfterLeases:
       return
 
-proc finishInlineRunQuotaProcess(id: string;
+proc finishInlineRunQuotaProcess(id, commandStatsId: string;
                                  process: var ReproRunQuotaRunningProcess):
     ActionResult =
   result = ActionResult(id: id, launched: true)
@@ -19162,6 +19264,11 @@ proc finishInlineRunQuotaProcess(id: string;
         asSucceeded
       else:
         asFailed
+    result.noteMemoryCapOutcome(execution.memoryCapExceeded,
+      execution.memoryCapBlock.present,
+      actionMemoryCapReport(id, commandStatsId, execution.memoryCapGrant,
+        execution.memoryCapBlock, killed = execution.memoryCapExceeded),
+      execution.memoryCapNote)
   except CatchableError as err:
     result.status = asFailed
     result.exitCode = 1
@@ -24095,6 +24202,16 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         noteUnleasedFallback(probe)
     not runQuotaDaemonReachable.get()
 
+  proc buildMemoryCapPolicy(): ReproMemoryCapPolicy =
+    ## The build's memory-cap policy, resolved at the first leased launch and
+    ## kept: the host file and `RUNQUOTA_MEMORY_CAP` are read once per build,
+    ## never per action, and from the ENGINE's environment (an action's own
+    ## declared environment never decides how the action is capped).
+    if not runResult.memoryCap.resolved:
+      runResult.memoryCap = currentReproMemoryCapPolicy(
+        config.memoryCapHostConfig)
+    runResult.memoryCap
+
   proc tryEnsureInlineRunQuotaSession(): bool =
     if inlineRunQuotaSessionOpen:
       return true
@@ -24104,6 +24221,9 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         project = runQuotaSizingProject(),
         entryPoint = runQuotaSizingEntryPoint())
       inlineRunQuotaSessionOpen = true
+      # The memory cap of every action this session launches, resolved once
+      # for the build (`buildMemoryCapPolicy`).
+      inlineRunQuotaSession.memoryCap = buildMemoryCapPolicy()
       runQuotaDaemonReachable = some(true)
       result = true
       # Before the first lease: tell the daemon the pools this graph uses.
@@ -26842,6 +26962,18 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             bypassRunQuota = not inlineRunQuota
           else:
             bypassRunQuota = launchBypassesRunQuota()
+          # An invalid `RUNQUOTA_MEMORY_CAP` refuses the build at its first
+          # LEASED process launch, before any lease is asked for: a switch
+          # that decides whether a tree may be killed is never guessed at,
+          # and refusing each action once its lease is granted would only
+          # queue the same refusal. A launch that bypasses RunQuota has no
+          # grant and so no cap to apply: the variable does not concern it,
+          # and a `--no-runquota` build ignores it.
+          if not bypassRunQuota:
+            let capPolicy = buildMemoryCapPolicy()
+            if capPolicy.error.len > 0:
+              raiseEngine("refusing to launch " & action.id & ": " &
+                capPolicy.error)
         # In-Process-Monitor-Hosting P3 — "which launch path" is now ONE
         # value, and it is the only input to the hosting decision besides the
         # config. It used to be a bare ``bypassRunQuota`` conjunct on the line
@@ -27096,7 +27228,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
               widthMilli, bypassWidth)
           else:
             process = startRunQuotaProcess(plan.action, config, resultPath,
-              runQuotaPoolCaps.getOrDefault(plan.action.pool, 0'u32))
+              runQuotaPoolCaps.getOrDefault(plan.action.pool, 0'u32),
+              buildMemoryCapPolicy())
         except CatchableError as err:
           launchFailure = err.msg
         finishStat("repro runquota launch", launchStart)
@@ -27483,6 +27616,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
               sizingFrontierMemo))
           finishInlineRunQuotaProcess(
             runningItem.id,
+            runningItem.action.commandStatsId,
             runningItem.runQuotaProcess)
         of rpkInlineRunQuotaFailed:
           runningItem.inlineFailure
@@ -27504,7 +27638,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             runningItem.id,
             runningItem.process,
             runningItem.resultPath,
-            cacheRoot)
+            cacheRoot,
+            memoryCapPassed = runResult.memoryCap.active)
       finishStat("repro runquota finish", finishStart)
       # The lease this action ran under, for the `after` lists of the
       # actions that depend on it (`sizing-data`).
@@ -27549,6 +27684,11 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       let previousPreserved = runResult.results[idx].preservedModifiedOutputs
       let previousDropped = runResult.results[idx].droppedCorruptPayloads
       runResult.results[idx] = finished
+      if finished.memoryCapNote.len > 0 and
+          runResult.memoryCapNotEnforced.len == 0:
+        runResult.memoryCapNotEnforced = finished.memoryCapNote
+      if finished.memoryCapApplied:
+        runResult.memoryCapApplied = true
       runResult.results[idx].cacheMissReason = previousMissReason
       runResult.results[idx].preservedModifiedOutputs = previousPreserved
       runResult.results[idx].droppedCorruptPayloads = previousDropped

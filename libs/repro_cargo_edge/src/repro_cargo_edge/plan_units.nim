@@ -262,7 +262,8 @@ proc raiseRefusal(refused: var seq[(string, string)]) {.noreturn.} =
   e.refused = refused
   raise e
 
-proc planRoots(cfg: PlanUnitsConfig): seq[RecordRoot] =
+proc planRoots*(cfg: PlanUnitsConfig): seq[RecordRoot] =
+  ## The logical roots a plan names, on this host, from ``cfg``.
   var text = "project=" & cfg.projectRoot & "\n" & OutRootLabel & "=" &
     cfg.outRoot
   if cfg.storeRoot.len > 0: text.add "\nstore=" & cfg.storeRoot
@@ -275,7 +276,7 @@ proc expand(roots: openArray[RecordRoot]; text, where: string): string =
   except RecordModeError as err:
     raise newException(CargoPlanError, where & ": " & err.msg)
 
-proc externPaths(argv: openArray[string]): seq[string] =
+proc externPaths*(argv: openArray[string]): seq[string] =
   ## The files a command line's `--extern name=path` flags name.
   var i = 0
   while i < argv.len:
