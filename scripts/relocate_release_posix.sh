@@ -27,6 +27,14 @@
 #            / add LC_RPATH to `@loader_path/../lib` (via fixup_macho_runtime.sh),
 #            and ad-hoc re-sign (every install_name_tool edit invalidates the
 #            signature and macOS refuses to exec a Mach-O with a stale one).
+#            The re-sign runs Apple's codesign at /usr/bin/codesign, never one
+#            found on PATH (this step runs in the Nix dev shell, whose PATH may
+#            hold a different program of that name), and a codesign failure
+#            stops the step: an image left with a stale signature does not run.
+#
+# REPRO_APPLE_TOOL_ROOT (tests only, empty by default) names a directory put in
+# front of /usr/bin/codesign, so a test can stand in for it. It is refused in a
+# publishing run (REPRO_RELEASE_PUBLISHING=1), whose archive is released.
 #
 # Idempotent-ish and loud: it fails hard rather than shipping a half-relocated
 # tree, because a broken relocation becomes a 404-at-runtime for every consumer.
@@ -38,6 +46,28 @@ libdir="${pkg_dir}/lib"
 mkdir -p "${libdir}"
 
 os="$(uname -s)"
+
+# The test seam for Apple's tools must not reach an archive that is released:
+# refuse it (rather than ignore it, so a stray setting is visible) before
+# anything is staged.
+if [ -n "${REPRO_APPLE_TOOL_ROOT:-}" ] && [ "${REPRO_RELEASE_PUBLISHING:-0}" = 1 ]; then
+  echo "relocate: REPRO_APPLE_TOOL_ROOT is a test-only seam and is refused in a publishing run; unset it" >&2
+  exit 1
+fi
+
+# On darwin, resolve codesign before anything is staged or modified, so a
+# missing one leaves the tree as it was instead of half-relocated with stale
+# signatures. Only codesign is pinned: otool and install_name_tool below, and
+# lipo in fixup_macho_runtime.sh, are still found on PATH.
+case "${os}" in
+  Darwin*)
+    codesign_tool="${REPRO_APPLE_TOOL_ROOT:-}/usr/bin/codesign"
+    if [ ! -x "${codesign_tool}" ]; then
+      echo "relocate: codesign not found at ${codesign_tool} (macOS installs it there; PATH is not searched for it)" >&2
+      exit 1
+    fi
+    ;;
+esac
 
 # The staged helper's shebang names the build host's Python store path.
 # Bundle its interpreter and standard library before walking the native
@@ -229,10 +259,31 @@ case "${os}" in
     done < <(find "${bindir}" "${libdir}" -type f -print0)
 
     # ---- 3. Ad-hoc re-sign (install_name_tool invalidated signatures) ------
+    # Every codesign failure is fatal: an image whose signature install_name_tool
+    # invalidated and that could not be re-signed is killed by macOS on exec,
+    # so shipping it would only move the failure to every consumer. The
+    # second signing form is tried only when the first fails, and the step
+    # fails when both do, printing what codesign said. An image that carries
+    # no signature (an x86_64 one the linker did not sign) is not an error:
+    # codesign only refuses to sign an already-signed image without -f, and
+    # removal rewrites the image without a signature either way (Apple's
+    # published sources: security_systemkeychain src/cs_sign.cpp sign(), and
+    # Security OSX/libsecurity_codesigning/lib/signer.cpp Signer::remove()).
+    codesign_failed() {
+      echo "relocate: ${codesign_tool} $1 failed for ${img}:" >&2
+      printf '%s\n' "$2" >&2
+      exit 1
+    }
     while IFS= read -r -d '' img; do
       is_macho "${img}" || continue
-      codesign --remove-signature "${img}" 2>/dev/null || true
-      codesign -f -s - "${img}" 2>/dev/null || codesign -f -s - --preserve-metadata=entitlements "${img}" 2>/dev/null || true
+      if ! out="$("${codesign_tool}" --remove-signature "${img}" 2>&1)"; then
+        codesign_failed "--remove-signature" "${out}"
+      fi
+      if ! out="$("${codesign_tool}" -f -s - "${img}" 2>&1)"; then
+        if ! out2="$("${codesign_tool}" -f -s - --preserve-metadata=entitlements "${img}" 2>&1)"; then
+          codesign_failed "-f -s - (also with --preserve-metadata=entitlements)" "${out}"$'\n'"${out2}"
+        fi
+      fi
     done < <(find "${bindir}" "${libdir}" -type f -print0)
 
     echo "relocate(darwin): bundled $(find "${libdir}" -type f | wc -l | tr -d ' ') dylibs; re-signed bin/ + lib/."

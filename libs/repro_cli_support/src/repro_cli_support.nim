@@ -77038,6 +77038,50 @@ proc roleHistoryRewriteFailure(declared: tuple[role, branch: string];
       declaredFor & ", and this update is not a fast-forward: it would make " &
       discarded & " unreachable there, including " & remoteOldOid)
 
+proc roleBranchAdvancedFailure(declared: tuple[role, branch: string];
+    repoLabel, declaredFor, gitRepoArg, remoteName, remoteOldOid,
+    lastSeenOid, headOid: string; newCount: int): CheckFailure =
+  ## The ``mainline-advanced`` refusal: a non-fast-forward push to a branch
+  ## a declared role names, which is non-fast-forward only because that
+  ## branch moved on the remote since this checkout last fetched it
+  ## (``OutgoingCurrentDecision.remoteAdvanced``). The push is refused as a
+  ## rewrite is, because it would discard the commits the remote gained, but
+  ## nothing this checkout saw there is rewritten, so the remedy is git's
+  ## own for a push that is behind: fetch, integrate the new tip, push again.
+  ## The wording carries git's terms for that case ("non-fast-forward",
+  ## "fetch first") so a retry loop written against git's rejection
+  ## recognizes it, and never says "rewrite", which such a loop rightly
+  ## treats as a stop condition (push-hook-publication-protocol.md,
+  ## Invariant 4b). ``newCount`` is how many commits the remote has that
+  ## HEAD lacks, or negative when they cannot be counted.
+  let isMainline = declared.role == "mainline"
+  let what =
+    if isMainline: "the shared mainline '" & declared.branch & "'"
+    else: "the shared branch '" & declared.branch & "' (role `" &
+      declared.role & "`)"
+  let declaredAs =
+    if isMainline: "the mainline branch"
+    else: "the branch of the `" & declared.role & "` role"
+  let remoteWord = if remoteName.len > 0: remoteName else: "<remote>"
+  let gained =
+    if newCount >= 0: $newCount & " commit(s)"
+    else: "commits"
+  CheckFailure(
+    repo: repoLabel,
+    property: "mainline-advanced",
+    remediation: "fetch first: " & what & " moved on the remote since " &
+      "this checkout last fetched it, so this push is non-fast-forward " &
+      "because the remote contains work it does not have (nothing is " &
+      "being discarded that this checkout had seen). Run `git -C " &
+      remedyPathWord(gitRepoArg) & " fetch " & quoteShellPosix(remoteWord) &
+      " " & quoteShellPosix(declared.branch) & "`, merge " & remoteOldOid &
+      " into this work (or rebase onto it), and push again",
+    evidence: "'" & declared.branch & "' is " & declaredAs & " the " &
+      declaredFor & ". This checkout last fetched it at " & lastSeenOid &
+      " and HEAD " & headOid & " contains that commit; the remote is now " &
+      "at " & remoteOldOid & ", which descends from it with " & gained &
+      " HEAD does not contain")
+
 proc verifyCommittedLockDependencySet*(repoRoot: string;
     workspaceRoot = ""):
     tuple[examined, stale, unverified, engineOlderThanEnvelope: bool;
@@ -78185,11 +78229,25 @@ proc executeCheckPrePush(parsed: CheckArgs;
       # deliberately rewritten: near zero, which is what keeps a blanket rule
       # from becoming a bypass lesson. A role that resolves only by fallback
       # adds nothing: its branch is the one it fell back to, already listed.
+      #
+      # A push that is merely BEHIND the branch (it moved on the remote since
+      # this checkout last fetched it, and HEAD contains what was fetched) is
+      # refused just the same, since it would discard the commits the remote
+      # gained, but as `mainline-advanced` with git's fetch-first remedy:
+      # nothing this checkout saw there is being rewritten, and a refusal that
+      # says otherwise stops a retry loop that should simply re-merge.
       for declared in declaredRoleBranches(resolved, currentRepoName):
         if pushedBranch != declared.branch: continue
-        result.failures.add(roleHistoryRewriteFailure(declared, repoLabel,
-          "manifest declares for " & currentRepoName, outgoing.remoteOldOid,
-          outgoing.headOid, orphans.len))
+        let declaredFor = "manifest declares for " & currentRepoName
+        if outgoing.remoteAdvanced:
+          result.failures.add(roleBranchAdvancedFailure(declared, repoLabel,
+            declaredFor, parsed.currentRepo, outgoing.remoteName,
+            outgoing.remoteOldOid, outgoing.lastSeenRemoteOid,
+            outgoing.headOid, orphanedCommits.len))
+        else:
+          result.failures.add(roleHistoryRewriteFailure(declared, repoLabel,
+            declaredFor, outgoing.remoteOldOid, outgoing.headOid,
+            orphans.len))
         result.exitCode = 2
         break
 
@@ -78257,11 +78315,21 @@ proc executeCheckPrePush(parsed: CheckArgs;
                 else: commitsMadeUnreachable(identity.binaryPath,
                   parsed.currentRepo, rootOutgoing.remoteOldOid,
                   rootOutgoing.headOid).len
-              result.failures.add(roleHistoryRewriteFailure(declared,
-                parsed.currentRepo, "workspace settings file " &
-                  extractFilename(settingsPath) &
-                  " declares for the workspace root repository",
-                rootOutgoing.remoteOldOid, rootOutgoing.headOid, discarded))
+              let declaredFor = "workspace settings file " &
+                extractFilename(settingsPath) &
+                " declares for the workspace root repository"
+              # As for a member (stage 2b), a push that is only behind the
+              # branch is told apart from a rewrite.
+              if rootOutgoing.remoteAdvanced:
+                result.failures.add(roleBranchAdvancedFailure(declared,
+                  parsed.currentRepo, declaredFor, parsed.currentRepo,
+                  rootOutgoing.remoteName, rootOutgoing.remoteOldOid,
+                  rootOutgoing.lastSeenRemoteOid, rootOutgoing.headOid,
+                  discarded))
+              else:
+                result.failures.add(roleHistoryRewriteFailure(declared,
+                  parsed.currentRepo, declaredFor,
+                  rootOutgoing.remoteOldOid, rootOutgoing.headOid, discarded))
               result.exitCode = 2
               break
 

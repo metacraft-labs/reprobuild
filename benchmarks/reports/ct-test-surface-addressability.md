@@ -49,19 +49,19 @@ Rendered from `ct-test-surface-addressability.json` by the script that writes it
 
 | Measure | Value |
 |---|---|
-| Surface | `ct-test`, resolved by `PATH:ct-test`, sha256 `87b4cfdbd1b0…` |
+| Surface | `ct-test`, resolved by `PATH:ct-test`, sha256 `746a73fd92f7…` |
 | Surface provenance | not declared ($CT_TEST_PROVENANCE was empty when this was measured) |
 | Command | `ct-test test discover --workspace <repo> --json` |
 | Ground truth | `benchmarks/reports/reprobuild-suite-m0-inventory-sources.json` (`staticCaseCount`) |
 | Catalogs returned | 5, from providers `assembly-fallback`, `nim-unittest`, `python-pytest`, `python-unittest` |
-| Items returned | 27,148 — 21,971 cases, 5,177 suites |
+| Items returned | 27,161 — 21,982 cases, 5,179 suites |
 | Response diagnostics | info: 1, warning: 33 (errors: 0) |
 | Tracked Nim suite sources | 3,345 |
 | …addressable through the surface | **3,337 (99.76%)** |
-| Tracked static case count | 21,127 |
-| …addressable through the surface | **20,712 (98.04%)** |
+| Tracked static case count | 21,128 |
+| …addressable through the surface | **20,713 (98.04%)** |
 | Per-source case-count agreement | 3,328 of 3,337 agree with the independent scanner |
-| Distinct case identities vs case items | 21,951 distinct for 21,971 items — **18** colliding identities |
+| Distinct case identities vs case items | 21,962 distinct for 21,982 items — **18** colliding identities |
 
 ### The 8 sources the surface cannot see, by recorded reason
 

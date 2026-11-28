@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import warnings
 from pathlib import Path
 from unittest import mock
 
@@ -10277,6 +10278,116 @@ class ShapeParityGateTests(unittest.TestCase):
         self.assertIn("parity_status", text)
         justfile = (REPO_ROOT / "Justfile").read_text(encoding="utf-8")
         self.assertIn("--check-shape-parity", justfile)
+
+
+class PythonImportScanTests(unittest.TestCase):
+    """The purity import scan reads a Python source's code, not its prose.
+
+    The defect: the scan ran the Nim import regex over
+    the raw text of a Python test, so a docstring line that began with
+    "from " was recorded as a module the file imports, and rewording that
+    prose moved the tracked inventory artifact.
+
+    No mocks: each case writes a real source into a temporary repository
+    root and runs the real `pure_unit_verdict` over it.
+    """
+
+    SOURCE = "tests/unit/test_prose_probe.py"
+
+    def verdict(self, text):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / self.SOURCE
+            path.parent.mkdir(parents=True)
+            path.write_text(text, encoding="utf-8")
+            spec = inventory.TestSpec(
+                source=self.SOURCE,
+                binary="",
+                defines=[],
+                requires_repro_binary=False,
+                target_os="soAny",
+                language="python",
+            )
+            return inventory.pure_unit_verdict(root, spec, text)
+
+    # The docstring line the issue observed, verbatim, plus the other places
+    # prose lives in a Python file: an assigned string constant (the second
+    # recorded instance, tests/unit/test_test_group_fallback.py) and a comment.
+    PROSE = (
+        '"""Regenerate the suite artifacts.\n'
+        "\n"
+        "The fixture is built\n"
+        "from a hand-built discovery response that reports exactly the inventory's\n"
+        "import surface, and nothing else.\n"
+        '"""\n'
+        "\n"
+        "import importlib.util\n"
+        "import unittest\n"
+        "\n"
+        "HELP = '''\n"
+        "from this repository per case (CPU-hours on the shared host)\n"
+        "'''\n"
+        "# from a comment that also reads like an import\n"
+    )
+
+    def test_a_docstring_line_starting_with_from_is_not_an_import(self):
+        pure, reason = self.verdict(self.PROSE)
+        self.assertFalse(pure)
+        self.assertNotIn("hand-built discovery response", reason)
+        self.assertNotIn("this repository per case", reason)
+        self.assertNotIn("a comment", reason)
+        # The reason names the first module the file really imports.
+        self.assertIn("imports `importlib.util`", reason)
+
+    def test_rewording_a_docstring_does_not_move_the_recorded_reason(self):
+        reworded = self.PROSE.replace(
+            "from a hand-built discovery response",
+            "out of a hand-built discovery response",
+        ).replace("from this repository", "out of this repository")
+        self.assertEqual(self.verdict(self.PROSE), self.verdict(reworded))
+
+    def test_real_python_import_forms_are_all_still_read(self):
+        # Every form the regex scan recognised, including an import nested in
+        # a function body, stays visible to the scan.
+        cases = {
+            "import pathlib\n": "pathlib",
+            "import os, pathlib\n": "pathlib",
+            "import pathlib as p\n": "pathlib",
+            "from __future__ import annotations\n": "__future__",
+            "from importlib import machinery\n": "importlib",
+            "def f():\n    import hashlib\n": "hashlib",
+        }
+        for text, module in cases.items():
+            with self.subTest(text=text):
+                pure, reason = self.verdict(text)
+                self.assertFalse(pure)
+                self.assertIn(f"imports `{module}`", reason)
+        # A relative import is in-package and is skipped, as before, so a
+        # source whose other imports are all allowed stays pure.
+        pure, reason = self.verdict("from . import sibling\nimport json\n")
+        self.assertTrue(pure, reason)
+
+    def test_a_source_that_does_not_parse_is_refused_not_scanned_as_text(self):
+        pure, reason = self.verdict("import json\ndef broken(:\n")
+        self.assertFalse(pure)
+        self.assertIn("cannot be parsed as Python", reason)
+
+    def test_the_verdict_does_not_depend_on_the_warnings_filter(self):
+        # `"\d"` is an invalid escape: `ast.parse` warns about it, and with
+        # warnings promoted to errors the warning becomes a SyntaxError. The
+        # recorded verdict must be the same however the interpreter was run.
+        text = "PATTERN = '\\d+'\nimport pathlib\n"
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            strict = self.verdict(text)
+        with warnings.catch_warnings(record=True) as seen:
+            warnings.simplefilter("always")
+            lenient = self.verdict(text)
+        self.assertEqual(strict, lenient)
+        self.assertIn("imports `pathlib`", strict[1])
+        self.assertEqual(
+            [w for w in seen if issubclass(w.category, SyntaxWarning)], []
+        )
 
 
 if __name__ == "__main__":
