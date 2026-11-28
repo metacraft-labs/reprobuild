@@ -498,6 +498,22 @@ type
     remoteOldOid*: string
     objectFormat*: string
     updateShape*: OutgoingUpdateShape
+    lastSeenRemoteOid*: string
+      ## For an ``ouRewrite``: the value the checkout's remote-tracking ref
+      ## for the destination branch held when the push was classified, i.e.
+      ## the remote tip this checkout last FETCHED, or "" when there is no
+      ## such ref (a push by URL, a refspec that maps no tracking ref, a ref
+      ## that is absent or not a commit). Read before the gate fetches
+      ## anything, so it is what the work being pushed was built against.
+    remoteAdvanced*: bool
+      ## For an ``ouRewrite``: the update is non-fast-forward only because
+      ## the remote branch MOVED ON since this checkout last fetched it.
+      ## ``lastSeenRemoteOid`` is an ancestor of the pushed HEAD (the work
+      ## includes everything this checkout saw there) and of ``remoteOldOid``
+      ## (the remote only grew since). The commits the update would discard
+      ## are then exactly ones this checkout never saw on that branch: the
+      ## push is out of date, not a rewrite of history it had. See
+      ## push-hook-publication-protocol.md, Invariant 4b.
     updates*: seq[PrePushRefUpdate]
       ## Every record of the (well-formed) pre-push stream, whatever the
       ## outgoing-current verdict. ``headOid`` is the independently observed
@@ -1018,6 +1034,49 @@ proc prePushProtocolEvidence*(diagnostic: string;
   if cause == ppcRepositoryObservation and observationEvidence.len > 0:
     result.add("; " & observationEvidence)
 
+proc remoteTrackingRefFor*(gitBin, repoRoot, remoteName,
+    remoteRef: string): string =
+  ## The remote-tracking ref a fetch from the configured remote
+  ## ``remoteName`` stores ``remoteRef`` under, by that remote's own
+  ## ``remote.<name>.fetch`` refspecs (https://git-scm.com/docs/git-fetch,
+  ## "CONFIGURED REMOTE-TRACKING BRANCHES"); "" when none maps it. The first
+  ## refspec that maps it wins; a negative refspec (``^src``) excludes it.
+  ## ``remoteName`` is the remote git pushed to as the pre-push hook received
+  ## it: a URL there (a push by URL) names no configured remote and maps
+  ## nothing.
+  if remoteName.len == 0 or not remoteRef.startsWith("refs/"): return
+  let specs = runGit(gitBin, repoRoot,
+    ["config", "--get-all", "remote." & remoteName & ".fetch"])
+  if specs.code != 0: return
+  proc matches(pattern, name: string): tuple[ok: bool; star: string] =
+    let at = pattern.find('*')
+    if at < 0:
+      return (pattern == name, "")
+    let prefix = pattern[0 ..< at]
+    let suffix = pattern[at + 1 .. ^1]
+    if name.len >= prefix.len + suffix.len and name.startsWith(prefix) and
+        name.endsWith(suffix):
+      return (true, name[prefix.len ..< name.len - suffix.len])
+    (false, "")
+  # Negative refspecs exclude a ref whatever order they appear in.
+  for raw in specs.output.splitLines():
+    let spec = raw.strip()
+    if spec.startsWith("^") and matches(spec[1 .. ^1], remoteRef).ok:
+      return
+  for raw in specs.output.splitLines():
+    var spec = raw.strip()
+    if spec.len == 0 or spec.startsWith("^"): continue
+    if spec.startsWith("+"): spec = spec[1 .. ^1]
+    let colon = spec.find(':')
+    if colon <= 0 or colon == spec.len - 1: continue
+    let src = spec[0 ..< colon]
+    let dst = spec[colon + 1 .. ^1]
+    let m = matches(src, remoteRef)
+    if not m.ok: continue
+    return
+      if '*' in dst: dst.replace("*", m.star)
+      else: dst
+
 proc evaluateOutgoingCurrent*(gitBin, repoRoot, refsPath, hookRemoteName,
     hookRemoteLocation, agreedRemoteName, agreedRemoteLocation: string):
     OutgoingCurrentDecision =
@@ -1110,6 +1169,23 @@ proc evaluateOutgoingCurrent*(gitBin, repoRoot, refsPath, hookRemoteName,
       result.updateShape = ouFastForward
     else:
       result.updateShape = ouRewrite
+      # Out of date, or a rewrite? Both are non-fast-forward; they differ in
+      # whether the commits the update discards are ones this checkout had
+      # seen on the branch. The remote-tracking ref says what it last saw,
+      # and it is read here, before any stage of the gate fetches.
+      let trackingRef = remoteTrackingRefFor(gitBin, repoRoot,
+        hookRemoteName, update.remoteRef)
+      if trackingRef.len > 0:
+        let seen = gitValue(gitBin, repoRoot,
+          ["rev-parse", "--verify", "--quiet", trackingRef & "^{commit}"])
+          .toLowerAscii()
+        if isHexOid(seen, parsed.oidLength):
+          result.lastSeenRemoteOid = seen
+          result.remoteAdvanced = seen != update.remoteOid.toLowerAscii() and
+            runGit(gitBin, repoRoot, ["merge-base", "--is-ancestor", seen,
+              result.headOid]).code == 0 and
+            runGit(gitBin, repoRoot, ["merge-base", "--is-ancestor", seen,
+              update.remoteOid]).code == 0
   result.branchRef = update.localRef
   result.remoteRef = update.remoteRef
   result.remoteOldOid = update.remoteOid

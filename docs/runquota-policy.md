@@ -266,6 +266,62 @@ build's diagnostic stream:
   `runquota.granted-after-retry` event with the total attempt count so
   post-hoc analysis can spot pressure hotspots.
 
+## Memory caps on actions
+
+RunQuota grants each host lease a memory cap: a factor (2 by default) times
+the largest peak a successful run of the same command id reached, a size
+declared with `runquota expect-growth`, or, while no successful run is
+recorded, the memory that was free when the lease was granted. Reprobuild
+applies it to each action it launches under a lease, as `runquota run` does
+for its command. It is off unless the host file sets `[enforcement]
+memoryCap = "advisory"` or `"kill"`, or `RUNQUOTA_MEMORY_CAP` names a mode
+or a size for the run (`off` lifts it).
+
+* **Resolved once per build**, from the environment of the process running
+  the build (for a build handed to the Reprobuild daemon, the caller's
+  environment, which the daemon installs for the request), never from an
+  action's own declared environment. With the cap off and the variable
+  unset, launching an action reads no file and touches no cgroup for it.
+* **Where it is enforced.** Linux: each capped action's process tree
+  leaves the build's own cgroup for a cgroup v2 leaf of its own under the
+  cgroup root RunQuota's launchers use (`RUNQUOTA_CGROUP_ROOT`, or the host
+  file's `[enforcement] cgroups`): `<root>/memory-capped/cap-<pid>-<n>`.
+  `memory-capped` is a sibling of RunQuota's session-group directories under
+  that root, and Reprobuild writes no CPU setting there (no `cpu.weight`,
+  no `cpu.max`), so it competes at the kernel's default weight; actions
+  with no cap stay in the build's cgroup. When the build runs inside a
+  cgroup with a limit its caller set on purpose (for example `systemd-run
+  --user --scope -p Delegate=yes -p MemoryMax=16G -- repro build`), the root
+  is that cgroup's `runquota` child, so the caller's limit and each
+  action's cap both hold. Windows: a Job Object. macOS: a walk of the
+  tree's memory footprint. An engine that
+  itself runs inside a leased tree (`RUNQUOTA_PARENT_LEASE` set) applies
+  no cap: its own launcher's cap already covers its actions.
+* **A killed action fails**, with the reason `memory cap exceeded` and a
+  report on its stderr: the cap and how it was computed, the peak, both ways
+  to declare that the growth is expected (`RUNQUOTA_MEMORY_CAP=off` for one
+  run, `runquota expect-growth <id> --to <size>` from then on), and the
+  suggestion to report it to the project that owns the action. The engine
+  never retries it and publishes none of its outputs. A cap computed from
+  the free memory says that it is not a regression.
+* **A cap reached without a kill, or passed in advisory mode**, on an
+  action that otherwise succeeded, is a warning in the build output and in
+  the run report (`runQuota.reprobuildActionsMemoryCap.warnings`).
+* **A cap that applies but is not enforced** (on Linux, no cgroup root) is
+  said once per build, not once per action. The build header states the
+  cap's state for Reprobuild's actions either way, and says it "will be"
+  enforced until an action has run with it in place.
+* **An invalid `RUNQUOTA_MEMORY_CAP`** refuses the build at its first
+  leased process launch, before any lease is asked for. A build that runs
+  its actions without RunQuota (`--no-runquota`, or the fallback when no
+  daemon is reachable) has no grant and so no cap: it ignores the variable,
+  and its header says the cap does not apply.
+* **The RunQuota helper** (the launch path that starts `repro internal
+  runquota-helper` per action) gets the build's resolved policy on its
+  command line (`--memory-cap`); a helper image older than the engine
+  rejects that option as an unknown flag, and each action's failure then
+  says so. Any other helper failure is reported in the helper's own words.
+
 ## Test surface
 
 Tests that assert a denied lease causes an `asFailed` ActionResult are

@@ -80,7 +80,7 @@
 #   1 -- one or both are stale; stderr names the sources that moved and the
 #        exact command that regenerates each.
 #
-# ALL FOUR checks always run. A later one is not skipped when an earlier one
+# ALL FIVE checks always run. A later one is not skipped when an earlier one
 # fails: they name different things for different reasons, and a contributor
 # who has to build to fix one of them wants to know that on the first attempt
 # rather than after regenerating another and pushing again.
@@ -104,10 +104,15 @@
 # A candidate that is not a commit in this repository is skipped, not used.
 #
 # Wired in four places, deliberately:
-#   - flake.nix's `pre-commit-check`, at the `pre-push` stage (this hook);
+#   - the `pre-push` hook of the committed .pre-commit-config.yaml, through
+#     scripts/pre_push_suite_checks.sh, which runs it on the pushed commit in
+#     the dev shell. (flake.nix's `pre-commit-check` declares the same
+#     pre-push hook, but that set is never installed: until 2026-11-27 the
+#     committed config asked for no pre-push hook type, and no checkout ran
+#     this script at the push at all);
 #   - .github/workflows/suite-case-counts.yml, its own uncancellable job;
 #   - .github/workflows/ci.yml, as an early step of the lint job;
-#   - `just lint`, via the same two underlying flags.
+#   - `just lint`, via the same underlying flags.
 set -euo pipefail
 
 repo_root="${1:-}"
@@ -210,9 +215,22 @@ sources_status=0
 # one generated file and no tree at all.
 parity_status=0
 "${python_bin}" "${inventory}" --check-shape-parity || parity_status=$?
+# The fifth check holds the `ct test` addressability ledger to the inventory
+# above. The ledger is a measurement the surface produces, so only the
+# integration test t_ct_test_surface_case_addressability used to read it, and
+# a source enrolled without regenerating it failed THAT test at the next,
+# unrelated change, more than once. This side of it
+# is build-free: it refuses a ledger that never measured a source the
+# inventory tracks, one computed against an older inventory, and a markdown
+# companion whose figures no longer match the JSON. Its remedy needs the
+# dev shell's `ct-test`, and it prints it.
+ledger="scripts/ct_test_surface_addressability.py"
+ledger_status=0
+"${python_bin}" scripts/ct_test_surface_addressability.py --check || ledger_status=$?
 
 if [ "${counts_status}" -eq 0 ] && [ "${entries_status}" -eq 0 ] &&
-   [ "${sources_status}" -eq 0 ] && [ "${parity_status}" -eq 0 ]; then
+   [ "${sources_status}" -eq 0 ] && [ "${parity_status}" -eq 0 ] &&
+   [ "${ledger_status}" -eq 0 ]; then
   exit 0
 fi
 
@@ -234,6 +252,17 @@ fi
       echo "  SUITE_CASE_COUNTS_BASE=<rev> (e.g. the branch you started from),"
       echo "  or give this branch an upstream."
     fi
+  fi
+  if [ "${counts_status}" -ne 0 ] || [ "${entries_status}" -ne 0 ] ||
+     [ "${sources_status}" -ne 0 ]; then
+    echo
+    echo "  The tree-derived suite artifacts are regenerated together, with"
+    echo "  the change that altered the tree:"
+    echo "    just regen-suite-artifacts"
+    echo "  Commit them in the same commit as that change. When the drift was"
+    echo "  already on the branch you rebased onto (see the attribution above),"
+    echo "  commit the regeneration as a chore(tests) commit of its own, never"
+    echo "  folded into an unrelated change. Each artifact, singly:"
   fi
   if [ "${counts_status}" -ne 0 ]; then
     echo
@@ -265,6 +294,13 @@ fi
     echo "  gate_accepts_source in ${inventory} -- and regenerate the"
     echo "  recorded verdicts:"
     echo "    ${regenerate_edges}"
+  fi
+  if [ "${ledger_status}" -ne 0 ]; then
+    echo
+    echo "  benchmarks/reports/ct-test-surface-addressability.{json,md}"
+    echo "  Regenerate them AFTER the inventory, from the dev shell (it needs"
+    echo "  the \`ct-test\` surface, which the dev shell puts on PATH):"
+    echo "    python3 ${ledger}"
   fi
 } >&2
 exit 1

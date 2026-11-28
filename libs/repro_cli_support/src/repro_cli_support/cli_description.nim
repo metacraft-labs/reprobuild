@@ -2015,6 +2015,8 @@ proc runquotaHelperParams(): NimNode {.compileTime.} =
       help = "A `NAME=VALUE` entry of the command's environment"
     boolFlag isolatedEnv is bool,
       help = "Give the command only the `--env` entries"
+    flag memoryCap is string,
+      help = "The build's memory-cap policy, as the engine resolved it"
     pos command is seq[string], afterSeparator = true,
       help = "The command to run, after `--`"
 

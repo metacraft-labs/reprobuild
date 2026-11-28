@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import warnings
 from pathlib import Path
 from unittest import mock
 
@@ -741,7 +742,26 @@ class SuiteCaseCountPushGateTests(unittest.TestCase):
     printed something" but "the remote ref did not move" -- a gate that
     reports a failure and lets the push through would be indistinguishable
     from no gate at all, and only a real push can tell the two apart.
+
+    The gate's fifth check holds the `ct test` addressability ledger to the
+    entry set, and measuring that ledger needs a CodeTracer `ct-test` build,
+    which this build-free tree must not need. So the one stand-in in this
+    class is `refresh_ledger`: it runs the ledger script's real producer
+    (`measure`, `write_ledger`) over a hand-built discovery response in which
+    the surface reports exactly the inventory's cases for every source. What
+    these cases test is the push boundary; the ledger check's own verdicts are
+    tested in `tests/unit/test_ct_test_surface_addressability.py`. The check
+    itself runs for real, from the copied script, in every push below.
     """
+
+    # The ledger script and the two files its check reads. Copied as they are
+    # in this checkout, so the fixture starts with a ledger that is current
+    # with the copied inventory, exactly as the real tree must.
+    LEDGER_SCRIPT = Path("scripts/ct_test_surface_addressability.py")
+    LEDGER_FILES = (
+        Path("benchmarks/reports/ct-test-surface-addressability.json"),
+        Path("benchmarks/reports/ct-test-surface-addressability.md"),
+    )
 
     # The hook body git itself invokes. It drains the ref list git streams
     # to a pre-push hook's stdin and then delegates, which is exactly the
@@ -801,7 +821,9 @@ class SuiteCaseCountPushGateTests(unittest.TestCase):
         body is nothing but imports, so the scan reads THEM), and the two
         scripts under test. The scan is a pure function of exactly these
         files, so this is the whole input -- no build directory, no
-        binaries, nothing compiled.
+        binaries, nothing compiled. The addressability ledger's script, JSON
+        and markdown are copied too, because the gate checks them against
+        the inventory (see the class docstring).
 
         The gate now also checks the tracked entry-set artifact, so its inputs
         are here too, and they are inputs rather than decoration:
@@ -855,6 +877,8 @@ class SuiteCaseCountPushGateTests(unittest.TestCase):
             # are copied here verbatim. `regenerate()` below therefore still
             # runs only the two commands the refusal actually prints.
             inventory.SHAPE_PARITY_PATH,
+            self.LEDGER_SCRIPT,
+            *self.LEDGER_FILES,
         ]
         wanted.extend(Path(source) for source in recorded)
         for source in recorded:
@@ -909,6 +933,43 @@ class SuiteCaseCountPushGateTests(unittest.TestCase):
                 + result.stdout
                 + result.stderr,
             )
+
+    def refresh_ledger(self, work):
+        """Re-measure the addressability ledger against the current inventory.
+
+        The stand-in the class docstring justifies: the real producer and
+        writer, loaded from the scratch tree's own copy of the script, fed a
+        discovery response that reports every tracked Nim source with exactly
+        its inventory case count, in place of a `ct-test` run.
+        """
+        spec = importlib.util.spec_from_file_location(
+            "ledger_under_test", work / self.LEDGER_SCRIPT
+        )
+        ledger = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(ledger)
+        tracked = json.loads(
+            (work / inventory.SOURCE_INVENTORY_PATH).read_text(encoding="utf-8")
+        )
+        items = []
+        for entry in tracked["tests"]:
+            if entry.get("language") != "nim":
+                continue
+            source = entry["source"]
+            items.append({"kind": "suite", "file": source,
+                          "id": source + "::s", "range": {"startLine": 1}})
+            items += [
+                {"kind": "case", "file": source, "id": f"{source}::s::c{i}",
+                 "range": {"startLine": i + 2}}
+                for i in range(entry.get("staticCaseCount", 0))
+            ]
+        surface = work.parent / "ct-test"
+        surface.write_bytes(b"stand-in surface")
+        response = {"catalogs": [{"provider": {"id": "nim-unittest"},
+                                  "items": items}]}
+        ledger.write_ledger(
+            work, ledger.measure(work, str(surface), "environment", response)
+        )
+        self.assertEqual(ledger.check(work), [])
 
     def test_a_stale_baseline_cannot_reach_the_remote(self):
         """Fresh baseline pushes; stale baseline is refused; regenerate fixes it.
@@ -1142,6 +1203,32 @@ class SuiteCaseCountPushGateTests(unittest.TestCase):
             self.regenerate(work)
             self.git(work, "commit", "-am", "record the enrolled source")
 
+            # The entry set is current now, and the push is still refused: the
+            # `ct test` addressability ledger never measured the new source.
+            # This is the failure that used to surface only in the surface-
+            # driven integration test, at the next unrelated change.
+            unmeasured = self.git(work, "push", "origin", "main", check=False)
+            transcript = unmeasured.stdout + unmeasured.stderr
+            self.assertNotEqual(
+                unmeasured.returncode,
+                0,
+                "a source the addressability ledger never measured must "
+                "refuse the push:\n" + transcript,
+            )
+            self.assertIn("never measured", transcript)
+            self.assertIn(added, transcript)
+            self.assertNotIn(
+                inventory.SOURCE_INVENTORY_REGENERATE_COMMAND, transcript
+            )
+            self.assertEqual(
+                self.head_of(remote, "refs/heads/main"),
+                published,
+                "the remote advanced despite the refusal",
+            )
+
+            self.refresh_ledger(work)
+            self.git(work, "commit", "-am", "measure the enrolled source")
+
             fresh = self.git(work, "push", "origin", "main", check=False)
             self.assertEqual(
                 fresh.returncode,
@@ -1306,6 +1393,13 @@ class SuiteCaseCountPushGateTests(unittest.TestCase):
             str(inventory.STATIC_CASE_COUNTS_PATH), result.stdout
         )
         self.assertIn(str(inventory.SOURCE_INVENTORY_PATH), result.stdout)
+        # The addressability ledger's check, which reads the ledger, the
+        # inventory and the markdown and runs no `ct-test`.
+        self.assertIn(
+            f"{self.LEDGER_FILES[0]}: current with "
+            f"{inventory.SOURCE_INVENTORY_PATH}",
+            result.stdout,
+        )
 
 
 class SourceInventoryArtifactTests(unittest.TestCase):
@@ -10184,6 +10278,117 @@ class ShapeParityGateTests(unittest.TestCase):
         self.assertIn("parity_status", text)
         justfile = (REPO_ROOT / "Justfile").read_text(encoding="utf-8")
         self.assertIn("--check-shape-parity", justfile)
+
+
+class PythonImportScanTests(unittest.TestCase):
+    """The purity import scan reads a Python source's code, not its prose.
+
+    Issue reprobuild-pm/issues/2026-11-26-suite-inventory-reads-a-python-
+    docstring-line-as-an-import.md: the scan ran the Nim import regex over
+    the raw text of a Python test, so a docstring line that began with
+    "from " was recorded as a module the file imports, and rewording that
+    prose moved the tracked inventory artifact.
+
+    No mocks: each case writes a real source into a temporary repository
+    root and runs the real `pure_unit_verdict` over it.
+    """
+
+    SOURCE = "tests/unit/test_prose_probe.py"
+
+    def verdict(self, text):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / self.SOURCE
+            path.parent.mkdir(parents=True)
+            path.write_text(text, encoding="utf-8")
+            spec = inventory.TestSpec(
+                source=self.SOURCE,
+                binary="",
+                defines=[],
+                requires_repro_binary=False,
+                target_os="soAny",
+                language="python",
+            )
+            return inventory.pure_unit_verdict(root, spec, text)
+
+    # The docstring line the issue observed, verbatim, plus the other places
+    # prose lives in a Python file: an assigned string constant (the second
+    # recorded instance, tests/unit/test_test_group_fallback.py) and a comment.
+    PROSE = (
+        '"""Regenerate the suite artifacts.\n'
+        "\n"
+        "The fixture is built\n"
+        "from a hand-built discovery response that reports exactly the inventory's\n"
+        "import surface, and nothing else.\n"
+        '"""\n'
+        "\n"
+        "import importlib.util\n"
+        "import unittest\n"
+        "\n"
+        "HELP = '''\n"
+        "from this repository per case (CPU-hours on the shared host)\n"
+        "'''\n"
+        "# from a comment that also reads like an import\n"
+    )
+
+    def test_a_docstring_line_starting_with_from_is_not_an_import(self):
+        pure, reason = self.verdict(self.PROSE)
+        self.assertFalse(pure)
+        self.assertNotIn("hand-built discovery response", reason)
+        self.assertNotIn("this repository per case", reason)
+        self.assertNotIn("a comment", reason)
+        # The reason names the first module the file really imports.
+        self.assertIn("imports `importlib.util`", reason)
+
+    def test_rewording_a_docstring_does_not_move_the_recorded_reason(self):
+        reworded = self.PROSE.replace(
+            "from a hand-built discovery response",
+            "out of a hand-built discovery response",
+        ).replace("from this repository", "out of this repository")
+        self.assertEqual(self.verdict(self.PROSE), self.verdict(reworded))
+
+    def test_real_python_import_forms_are_all_still_read(self):
+        # Every form the regex scan recognised, including an import nested in
+        # a function body, stays visible to the scan.
+        cases = {
+            "import pathlib\n": "pathlib",
+            "import os, pathlib\n": "pathlib",
+            "import pathlib as p\n": "pathlib",
+            "from __future__ import annotations\n": "__future__",
+            "from importlib import machinery\n": "importlib",
+            "def f():\n    import hashlib\n": "hashlib",
+        }
+        for text, module in cases.items():
+            with self.subTest(text=text):
+                pure, reason = self.verdict(text)
+                self.assertFalse(pure)
+                self.assertIn(f"imports `{module}`", reason)
+        # A relative import is in-package and is skipped, as before, so a
+        # source whose other imports are all allowed stays pure.
+        pure, reason = self.verdict("from . import sibling\nimport json\n")
+        self.assertTrue(pure, reason)
+
+    def test_a_source_that_does_not_parse_is_refused_not_scanned_as_text(self):
+        pure, reason = self.verdict("import json\ndef broken(:\n")
+        self.assertFalse(pure)
+        self.assertIn("cannot be parsed as Python", reason)
+
+    def test_the_verdict_does_not_depend_on_the_warnings_filter(self):
+        # `"\d"` is an invalid escape: `ast.parse` warns about it, and with
+        # warnings promoted to errors the warning becomes a SyntaxError. The
+        # recorded verdict must be the same however the interpreter was run.
+        text = "PATTERN = '\\d+'\nimport pathlib\n"
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            strict = self.verdict(text)
+        with warnings.catch_warnings(record=True) as seen:
+            warnings.simplefilter("always")
+            lenient = self.verdict(text)
+        self.assertEqual(strict, lenient)
+        self.assertIn("imports `pathlib`", strict[1])
+        self.assertEqual(
+            [w for w in seen if issubclass(w.category, SyntaxWarning)], []
+        )
 
 
 if __name__ == "__main__":

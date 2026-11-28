@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 36,
-    "nimTestBinaries": 3339,
+    "nimTestBinaries": 3344,
     "pureUnitConsolidationGroups": 97,
-    "pureUnitTests": 860,
+    "pureUnitTests": 861,
     "staticallyDetectedRuntimeCompilerFlowTests": 165,
-    "testEntries": 3400
+    "testEntries": 3405
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -156,13 +156,14 @@
       "targetOs": "soAny"
     },
     {
-      "count": 2,
+      "count": 3,
       "defines": [],
       "dependencyShape": [
         "repro_cargo_edge"
       ],
       "owner": "libs/repro_cargo_edge",
       "sources": [
+        "libs/repro_cargo_edge/tests/t_build_script_edges.nim",
         "libs/repro_cargo_edge/tests/t_record_mode.nim",
         "libs/repro_cargo_edge/tests/t_rqe_cg3_cargo_edge.nim"
       ],
@@ -1874,10 +1875,10 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 30,
-      "integration": 1901,
+      "integration": 1903,
       "platform/destructive": 207,
-      "pure unit": 860,
-      "unclassified": 402
+      "pure unit": 861,
+      "unclassified": 404
     },
     "graphOwnedTestArtifacts": [
       {
@@ -2097,9 +2098,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 3339,
+    "nimTestBinaryCount": 3344,
     "pythonTestFileCount": 61,
-    "testEntryCount": 3400
+    "testEntryCount": 3405
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -10570,6 +10571,24 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_addon_evidence_round28",
+      "class": "unclassified",
+      "classificationReason": "imports `posix`, which grants out-of-process reach",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_addon",
+        "repro_core"
+      ],
+      "owner": "libs/repro_addon",
+      "requiresReproBinary": false,
+      "source": "libs/repro_addon/tests/t_addon_evidence_round28.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 11,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_addon_evidence_ship_confinement",
       "class": "platform/destructive",
       "classificationReason": "platform path, target OS, VM, privileged, or host mutation signal",
@@ -11245,7 +11264,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_addon/tests/t_addon_legacy_move_round27.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 8,
+      "staticCaseCount": 7,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -15078,6 +15097,40 @@
       "source": "libs/repro_bundle/tests/t_repro_bundle_halves.nim",
       "sourceSuiteCount": 19,
       "staticCaseCount": 43,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_build_script_edges",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_cargo_edge"
+      ],
+      "owner": "libs/repro_cargo_edge",
+      "requiresReproBinary": false,
+      "source": "libs/repro_cargo_edge/tests/t_build_script_edges.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_build_script_output",
+      "class": "unclassified",
+      "classificationReason": "mutates the process environment",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_cargo_edge"
+      ],
+      "owner": "libs/repro_cargo_edge",
+      "requiresReproBinary": false,
+      "source": "libs/repro_cargo_edge/tests/t_build_script_output.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 13,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -50828,7 +50881,7 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_force_push_of_any_declared_role_is_refused.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 4,
+      "staticCaseCount": 5,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -59715,6 +59768,27 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_rqe_cg5_build_script_cfg_and_links",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_build_engine",
+        "repro_cargo_edge",
+        "repro_core",
+        "repro_lock",
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_rqe_cg5_build_script_cfg_and_links.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_rqe_cg5_no_mixed_rlibs",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -59753,7 +59827,7 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_rqe_cg5_plan_completes_to_cargos_argv.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 3,
+      "staticCaseCount": 4,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -59932,6 +60006,28 @@
       "source": "tests/integration/t_rqe_m15_recorder_cargo_edge_bounded.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_rqm_reprobuild_memory_cap",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_build_engine",
+        "repro_cli_support",
+        "repro_core",
+        "repro_depfile",
+        "repro_runquota",
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_rqm_reprobuild_memory_cap.nim",
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 9,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -60117,6 +60213,7 @@
       "localDependencyShape": [
         "repro_build_engine",
         "repro_cli_support",
+        "repro_runquota",
         "repro_test_support"
       ],
       "owner": "tests/integration",
@@ -70532,7 +70629,7 @@
     {
       "binary": "",
       "class": "unclassified",
-      "classificationReason": "imports ``nix log``, which this scan does not recognize; refusing to call it pure rather than assuming it is",
+      "classificationReason": "imports `__future__`, which this scan does not recognize; refusing to call it pure rather than assuming it is",
       "defines": [],
       "language": "python",
       "localDependencyShape": [],
@@ -70652,7 +70749,7 @@
     {
       "binary": "",
       "class": "unclassified",
-      "classificationReason": "imports `importlib.util`, which this scan does not recognize; refusing to call it pure rather than assuming it is",
+      "classificationReason": "imports `contextlib`, which this scan does not recognize; refusing to call it pure rather than assuming it is",
       "defines": [],
       "language": "python",
       "localDependencyShape": [],
@@ -70660,7 +70757,7 @@
       "requiresReproBinary": false,
       "source": "tests/unit/test_ct_test_surface_addressability.py",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 14,
+      "staticCaseCount": 29,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -71050,7 +71147,7 @@
       "requiresReproBinary": false,
       "source": "tests/unit/test_release_native_packages.py",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 29,
+      "staticCaseCount": 34,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -71155,7 +71252,7 @@
       "requiresReproBinary": false,
       "source": "tests/unit/test_reprobuild_suite_inventory.py",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 117,
+      "staticCaseCount": 122,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -71207,7 +71304,7 @@
     {
       "binary": "",
       "class": "unclassified",
-      "classificationReason": "imports `this repository per case (CPU-hours on the shared host)`, which this scan does not recognize; refusing to call it pure rather than assuming it is",
+      "classificationReason": "imports `__future__`, which this scan does not recognize; refusing to call it pure rather than assuming it is",
       "defines": [],
       "language": "python",
       "localDependencyShape": [],

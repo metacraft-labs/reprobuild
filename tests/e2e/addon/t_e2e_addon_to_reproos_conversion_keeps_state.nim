@@ -2614,6 +2614,7 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
         "/system_next.nim --host " & AgentTarget & " --no-preview",
         timeoutSec = 3600)
       let reqsAgain = nw.exec(reqsCmd).stdout.strip()
+      # The carried state's restore requirement is back (§13 decision 195).
       step("decision 195: the protection installed again for the boot-path " &
            "steps (install-unit, then an apply)",
            back1.exitCode == 0 and reinst.exitCode == 0 and

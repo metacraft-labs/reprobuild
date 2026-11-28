@@ -66,11 +66,11 @@
       # ``nixos-modules`` follows ours so runquota's package set is this
       # flake's package set — one nixpkgs evaluation, not two.
       inputs.nixos-modules.follows = "nixos-modules";
-      # runquota's release dev shell takes reprobuild's packaging sources as
-      # ``release-packaging-src``, pinned to SOME reprobuild revision. Inside
-      # this flake that is a second, competing reprobuild pin (and an identity
-      # with no recorded visibility); point it at this flake itself instead.
-      inputs.release-packaging-src.follows = "";
+      # runquota reads the organisation's tool pins (among them the
+      # reprobuild revision its release packaging compiles against) from
+      # ``metacraft-github-actions``. Follow this flake's copy, so the closure
+      # has one pin set rather than a second, competing one.
+      inputs.metacraft-github-actions.follows = "metacraft-github-actions";
     };
     io-mon-src = {
       # io-mon ships the ``io_mon`` Nim package (the byte-identical wire-format
@@ -1583,6 +1583,14 @@
               pass_filenames = false;
             };
             # The suite case-count baseline gate, at the PUSH boundary.
+            #
+            # NOT what a checkout runs at the push: this git-hooks.nix set is
+            # evaluated by `nix flake check` and never installed. The push-time
+            # hook is the `suite-description` hook of the committed
+            # .pre-commit-config.yaml (scripts/pre_push_suite_checks.sh), which
+            # the shellHook below installs. While this declaration was the only
+            # one, no push ran the check, and commits that added test cases
+            # without regenerating reached `agents` (2026-11-26, 2026-11-27).
             #
             # `just lint` already runs this check, but `just lint` is a
             # multi-minute whole-tree compile, so it sits at the pre-commit

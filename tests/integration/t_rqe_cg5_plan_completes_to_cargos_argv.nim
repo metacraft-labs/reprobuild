@@ -74,10 +74,28 @@
 ## their slots: the plan's side without its slot tokens, the real side
 ## without the values the fixture's build scripts printed.
 ##
-## WHAT IS LEFT for later deliverables: completing the fed units (the slots
-## filled from the build-script run edges' output by the launcher), the
-## directive table's real values with `OUT_DIR` paths, `DEP_*` reaching the
-## direct and not the transitive dependent, and the order of slots.
+## THE FOURTH CASE, the build scripts. The first case's workspace again,
+## its build scripts now as edges (`build_script_edges`): the plan as a whole
+## is refused, naming exactly `mid`'s compile (fed by `bdep`'s run) and run
+## (fed by `bdep`'s, and receiving `sysdep`'s `links` metadata), which later
+## changes build. Every other build script (`app`, `sysdep`, `bdep` and the
+## registry crate `regbs`) becomes a compile and a run edge; each compile
+## edge's argv, working directory and environment, mapped back, equal the
+## real build's, with the registry crate's remap as the one difference; and
+## all of them build through the real engine and monitor. Then every fed
+## unit whose every feeding run is among them (the libraries of `sysdep`,
+## `bdep` and `regbs`) is completed from the run edges' interpreted files
+## and compared with the real build's command line and environment WITHOUT
+## hiding anything: the build scripts' printed values included. The
+## completion here is the test's own, a stand-in for the launcher a later
+## change adds: each slot token is replaced by its kind's values in the
+## order the record holds them, as the flags cargo emits for that kind, and
+## each `rustc-env` value is added to the environment.
+##
+## WHAT IS LEFT for later deliverables: the launcher that completes the fed
+## units at execution, the directive table's real values with `OUT_DIR`
+## paths in a fed unit, `DEP_*` reaching the direct and not the transitive
+## dependent, and the order of slots.
 ##
 ## REGISTRY CRATES. Both workspaces depend on crates.io crates in a store
 ## root (`setupRegistry`); the first on one with a build script. The record
@@ -101,7 +119,9 @@
 ## toolchain's variables out of the launch fails its environment checks;
 ## dropping the registry crates' remap from the convention's edges (passing
 ## `cargoArgv` instead of the edge's argv) fails the third case's argv
-## check.
+## check; writing no `rustc-check-cfg` values from a run edge fails the
+## fourth case's completed argv; dropping the remap from a registry crate's
+## build-script compile fails its fourth-case argv check.
 ##
 ## NO MOCKS: real cargo and rustc, the real wrapper, the real engine and
 ## monitor. The logging wrapper runs the real compiler with the arguments it
@@ -112,7 +132,8 @@ import std/[algorithm, json, os, osproc, sequtils, sets, strutils, tables,
 
 import repro_build_engine
 import repro_build_engine/embedded_root_scan
-import repro_cargo_edge/[cargo_plan, plan_run, plan_units, record_mode]
+import repro_cargo_edge/[build_script_edges, build_script_output, cargo_plan,
+                         plan_run, plan_units, record_mode]
 import repro_project_dsl
 import repro_test_support
 import repro_standard_provider/conventions/rust_plan_mode
@@ -747,3 +768,184 @@ suite "the plan of a record run":
         options = {})
       checkpoint "edges: " & ours & "cargo: " & theirs
       check ours == theirs
+
+  test "test_rqe_cg5_plan_completes_to_cargos_argv: build scripts become " &
+      "compile and run edges, and the units they feed, completed from the " &
+      "run edges' output, are cargo's":
+    let t = findTools()
+    let repoRoot = currentSourcePath().parentDir.parentDir.parentDir
+    let work = createTempDir("cg5-plan-scripts-", "")
+    defer: removeTestTree(work)
+    let ws = work / "ws"
+    writePlanWorkspace(ws, smReal, registry = true)
+    let reg = setupRegistry(work, smReal)
+    let devEnv = @[("PATH", storeOnlyPath()),
+      ("TMPDIR", getEnv("TMPDIR", work))]
+    let plan = recordPlan(t, ws, reg, reg.crates, devEnv, work)
+    let oracle = oracleBuild(t, ws, reg, devEnv, work)
+    let matched = matchUnits(plan, oracle)
+    let outRoot = work / "edges-out"
+    let tcBin = work / "toolchain-bin"
+    createDir(tcBin)
+    let cc = findExe("cc")
+    let cxx = findExe("c++")
+    let ar = findExe("ar")
+    require cc.len > 0 and cxx.len > 0 and ar.len > 0
+    createSymlink(cc, tcBin / "cc")
+    let toolchain = @["PATH=" & tcBin & ":" & storeOnlyPath()]
+    let cfg = BuildScriptEdgesConfig(
+      units: PlanUnitsConfig(governingLockIdentity:
+        lockIdentityOutsideSolvedGraph(), projectRoot: ws, storeRoot: reg.store,
+        outRoot: outRoot, registryCrates: reg.rows, toolchainEnv: toolchain),
+      devEnv: devEnv.mapIt(it[0] & "=" & it[1]), rustc: t.rustc,
+      cToolchain: CToolchain(cc: cc, cxx: cxx, ar: ar, binDir: tcBin),
+      interpreter: t.wrapper)
+
+    # The plan as a whole: refused for mid's compile and run only.
+    var midRun: PlanRun
+    for r in plan.runs:
+      if r.package == "mid": midRun = r
+    require midRun.id.len > 0
+    try:
+      discard buildScriptEdges(plan, cfg)
+      checkpoint "the plan was not refused"
+      check false
+    except BuildScriptRefusal as err:
+      checkpoint err.msg
+      check err.refused.mapIt(it[0]).sorted ==
+        @[midRun.compileUnit, midRun.id, midRun.id].sorted
+      for (id, why) in err.refused:
+        if id == midRun.compileUnit: check "fed by a build script" in why
+    check not dirExists(outRoot)
+
+    # Every other build script: a compile and a run edge.
+    var edges: seq[BuildScriptEdge]
+    for r in plan.runs:
+      if r.id != midRun.id: edges.add buildScriptEdgesOf(plan, r.id, cfg)
+    var packages: seq[string]
+    for e in edges: packages.add e.run.package
+    check packages.sorted == @["app", "bdep", "regbs", "sysdep"]
+    let mp = mapper(plan, oracle, reg, ws, outRoot = outRoot,
+      storeRoot = reg.store)
+    for e in edges:
+      let u = e.compileUnit
+      checkpoint "compile edge " & e.compile.id
+      check e.compile.argv == e.compileCargoArgv & e.compileArgvDifference
+      if e.registry:
+        check u.package == "regbs"
+        check e.compileArgvDifference.len == 1 and
+          e.compileArgvDifference[0].startsWith("--remap-path-prefix=" &
+            reg.store & "/prefixes/regbs/") and
+          e.compileArgvDifference[0].endsWith("=regbs-0.1.0")
+      else:
+        check e.compileArgvDifference.len == 0
+      check e.compile.isolateHostEnvironment
+      check e.compile.env.sorted == (e.compileEnv & toolchain).sorted
+      var closureDirs: seq[string]
+      for c in u.closure: closureDirs.add outRoot / c
+      closureDirs.sort()
+      compareToOracle(e.compileCargoArgv, e.compile.cwd,
+        envPairsOf(e.compileEnv), closureDirs, false, matched[u.id], oracle,
+        mp, edge = true)
+
+    # Through the real engine and monitor.
+    let tools = prepareMonitorTools(repoRoot, work / "monitor",
+      "cg5-plan-scripts")
+    putEnv("REPRO_MONITOR_SHIM_LIB", tools.shim)
+    let config = BuildEngineConfig(
+      cacheRoot: work / "engine-cache",
+      runQuotaCliPath: tools.monitorCliPath,
+      monitorCliPath: tools.monitorCliPath,
+      monitorCliArgs: tools.monitorCliArgs,
+      maxParallelism: 1'u32,
+      stdoutLimit: 1024 * 1024,
+      stderrLimit: 1024 * 1024,
+      bypassRunQuota: true)
+    var actions: seq[BuildAction]
+    for e in edges: actions.add [e.compile, e.runAction]
+    let run = runBuild(graph(actions), config)
+    check run.results.len == actions.len
+    for r in run.results:
+      checkpoint r.id & ": " & $r.status & " " & r.reason &
+        (if r.stderr.len > 0: "\nstderr: " & r.stderr else: "")
+      check r.status == asSucceeded
+
+    # The fed units every feeding run of which is an edge here, completed
+    # from the interpreted files (the test's stand-in for the launcher).
+    var byRun = initTable[string, int]()
+    for i, e in edges: byRun[e.run.id] = i
+    let planRootsHere = planRoots(cfg.units)
+    proc expandPlan(text: string): string = expandRecorded(planRootsHere, text)
+    proc values(runId, kind: string): seq[string] =
+      ## The run's values of `kind`, expanded on this host as the launcher
+      ## expands them: `${OUT_DIR}` as that run's OUT_DIR, every other token
+      ## as its root.
+      let e = edges[byRun[runId]]
+      let roots = parseRecordRoots(OutDirRootLabel & "=" & e.outDir) &
+        planRootsHere
+      for v in readDirectiveRecord(directivePath(e.directivesDir,
+          kind)).values:
+        result.add expandRecorded(roots, v)
+    proc searchPath(v: string): string =
+      ## A `rustc-link-search` value's path, without its `KIND=`.
+      let eq = v.find('=')
+      if eq > 0 and v[0 ..< eq] in ["dependency", "crate", "native",
+          "framework", "all"]: v[eq + 1 .. ^1]
+      else: v
+    proc slotOf(token: string): (string, string, string) =
+      let parts = token["${slot:".len ..< token.len - 1].split(':')
+      (parts[0], parts[1], (if parts.len > 2: parts[2] else: ""))
+    var completed: seq[string]
+    for u in plan.units:
+      if not u.isFed or u.buildScriptCompile: continue
+      var feeders = u.fedBy
+      if u.outDirRun.len > 0: feeders.add u.outDirRun
+      for s in u.envSlots: feeders.add s.run
+      if not feeders.allIt(it in byRun): continue
+      completed.add u.crateName
+      checkpoint "completed unit " & u.id
+      var argv: seq[string]
+      for a in u.argv:
+        if not a.startsWith("${slot:"):
+          argv.add expandPlan(a)
+          continue
+        let (kind, runId, bin) = slotOf(a)
+        for v in values(runId, kind):
+          case kind
+          of "rustc-cfg": argv.add ["--cfg", v]
+          of "rustc-check-cfg": argv.add ["--check-cfg", v]
+          of "rustc-link-lib": argv.add ["-l", v]
+          of "rustc-link-search-in-out-dir": argv.add ["-L", v]
+          of "rustc-link-search-outside-out-dir": argv.add ["-L", v]
+          of "rustc-link-arg-bin":
+            let eq = v.find('=')
+            if v[0 ..< eq] == bin: argv.add ["-C", "link-arg=" & v[eq + 1 .. ^1]]
+          else: argv.add ["-C", "link-arg=" & v]
+      var env: seq[(string, string)]
+      for (name, value) in u.env:
+        if SlotTokenPrefix notin value:
+          env.add (name, expandPlan(value))
+          continue
+        # A path list with slots: only a search path inside an OUT_DIR is on
+        # a dynamic-library path; the other kind never is.
+        var parts: seq[string]
+        for entry in value.split(':'):
+          if not entry.startsWith("${slot:"):
+            parts.add expandPlan(entry)
+            continue
+          let (kind, runId, _) = slotOf(entry)
+          check kind == "rustc-link-search-in-out-dir"
+          for v in values(runId, kind): parts.add searchPath(v)
+        env.add (name, parts.join(":"))
+      for s in u.envSlots:
+        for v in values(s.run, "rustc-env"):
+          let eq = v.find('=')
+          env.add (v[0 ..< eq], v[eq + 1 .. ^1])
+      env.sort(proc (a, b: (string, string)): int = cmp(a[0], b[0]))
+      var closureDirs: seq[string]
+      for c in u.closure: closureDirs.add outRoot / c
+      closureDirs.sort()
+      compareToOracle(argv, expandPlan(u.cwd), env, closureDirs, false,
+        matched[u.id], oracle, mp)
+    completed.sort()
+    check completed == @["bdep", "regbs", "sysdep"]
