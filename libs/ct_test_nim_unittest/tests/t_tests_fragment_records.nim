@@ -10,7 +10,8 @@
 ## what it does with each answer, not the tests entry itself. A real
 ## nim-entrypoints binary is listed and run per test by
 ## ``tests/integration/test_cs_m14_repro_collects_tests_per_entry.nim``, and
-## ``ct_test_unittest_parallel`` binaries (and a plain ``std/unittest`` one)
+## ``ct_test_unittest_parallel`` binaries and a plain ``std/unittest`` one
+## (whose ``std/unittest``, the pinned Nim fork's, answers the entry itself)
 ## by ``tests/integration/test_cs_m14_shim_answers_tests_entry.nim``.
 
 import std/[json, os, strutils, tempfiles, unittest]
@@ -397,10 +398,11 @@ when defined(posix):
     test "a binary without the tests entry is run as a whole, not listed":
       let dir = createTempDir("tests-fragment-whole-", "")
       defer: removeDir(dir)
-      # Like a plain std/unittest binary of the protocol-carrying fork: it
-      # prints test names for `--entrypoint=tests --list` (taking `--list`
-      # as its own), and for `--entrypoint=list` it runs its suites, with
-      # the selector as a filter that matches nothing, and exits 0.
+      # Like a plain std/unittest binary of the codetracer Nim fork before
+      # it answered the entry (4fda9ccd): it prints test names for
+      # `--entrypoint=tests --list` (taking `--list` as its own), and for
+      # `--entrypoint=list` it runs its suites, with the selector as a filter
+      # that matches nothing, and exits 0.
       let binary = script(dir, "plain",
         "if [ \"$1\" = \"--entrypoint=list\" ]; then " &
         "printf '\\n[Suite] s\\n'; exit 0; fi\n" &

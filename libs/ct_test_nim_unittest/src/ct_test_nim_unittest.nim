@@ -650,7 +650,8 @@ proc runPerTest*(self: NimUnittestBinary;
   ## but no ``tests`` entry, lists no tests, or lists a name twice (two tests
   ## with one name cannot be run one at a time). A binary with no entries at
   ## all (``--entrypoint=list`` exits 0 without an ``entrypoints/1``
-  ## document: a plain ``std/unittest`` binary, say) is not listed: the
+  ## document: a ``std/unittest`` binary built with a Nim whose
+  ## ``std/unittest`` does not answer the entry, say) is not listed: the
   ## fragment creates one run of the whole binary,
   ## ``<actionId>.whole-binary``, because its answer to ``--entrypoint=tests
   ## --list`` cannot be trusted to mean the entry (see

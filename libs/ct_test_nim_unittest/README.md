@@ -18,8 +18,12 @@ A test binary built with
 [nim-entrypoints](https://github.com/metacraft-labs/nim-entrypoints)
 (`import entrypoints/tests`, `testCase`s and a `main:`) answers its `tests`
 entry: `--entrypoint=tests --list` names its tests and
-`--entrypoint=tests --run-exact=<name>` runs one of them. `runPerTest` turns
-that into the build graph:
+`--entrypoint=tests --run-exact=<name>` runs one of them. So does a binary
+that links `ct_test_unittest_parallel`, and a plain `std/unittest` binary
+built with the codetracer Nim fork reprobuild pins (from `metacraft-labs/nim`
+`4fda9ccd` on). A binary whose `--entrypoint=list` prints no entry list, such
+as a `std/unittest` binary built with upstream Nim, is run as a whole, in one
+action. `runPerTest` turns that into the build graph:
 
 ```nim
 let edge = buildNimUnittest.build(

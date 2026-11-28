@@ -969,8 +969,24 @@
     # repository. Before it, `just format` refused 24 of them and was not
     # idempotent on 23 more.
     # Riding along: nimsuggest runs a NimScript config once.
+    #
+    # Advanced from 0d9a9dcf to 4fda9ccd: a plain `std/unittest` binary
+    # answers nim-entrypoints' run-time `tests` entry itself, as
+    # `libs/ct_test_unittest_parallel` does for a binary linked with it.
+    # `--entrypoint=list` names a `tests` entry listing every test,
+    # `--entrypoint=tests --list` prints one name per line on stdout, and
+    # `--entrypoint=tests --run-exact=<name>` runs exactly that test (an
+    # unknown name exits 64). Before it, the binary read the arguments after
+    # the selector as its own flags and filters, so `--run-exact` ran no test
+    # and passed; `repro test` now collects such a binary per test instead
+    # of as one `.whole-binary` run. The fork stands down where
+    # nim-entrypoints or the shim owns the entry. Riding along: the
+    # compiler drops two redundant conversions that stopped a
+    # `-d:nimStrictMode` boot, with a strict-mode test (499ee2d3); the rest
+    # is the fork's CI and its own `repro.lock` / `repro.nim` pins, no
+    # compiler or stdlib source.
     nim-fork-src = {
-      url = "git+https://github.com/metacraft-labs/nim?ref=codetracer&rev=0d9a9dcf2b88c30a69ede9978481e23d2c89ce87";
+      url = "git+https://github.com/metacraft-labs/nim?ref=codetracer&rev=4fda9ccd07644eec855b3e645343b2a23a05c27b";
       flake = false;
     };
     nim-csources-src = {
