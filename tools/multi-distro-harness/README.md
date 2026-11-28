@@ -975,11 +975,11 @@ repro multi-distro: 1/1 distros passed
 
 ## Sandbox-MVP (Linux-Third-Party-Sandbox-MVP M0)
 
-A second campaign reuses this harness for the Tier-3 FHS-view wrapper.
-See
-[`Linux-Third-Party-Sandbox-MVP.milestones.org`](../../../reprobuild-specs/Linux-Third-Party-Sandbox-MVP.milestones.org)
-for the full spec. The M0 deliverable is two probes, both POSIX-sh,
-sitting alongside the Recipe-Validation tests:
+A second campaign reuses this harness for the Tier-3 FHS-view wrapper,
+which runs third-party Linux binaries under bubblewrap in a standard
+filesystem layout (FHS) composed from realized packages. The M0
+deliverable is two probes, both POSIX-sh, sitting alongside the
+Recipe-Validation tests:
 
 | Test                          | Purpose                                                                  |
 | ----------------------------- | ------------------------------------------------------------------------ |
@@ -1107,11 +1107,10 @@ content-addressed by upstream BYTES, so the three realize into three
 distinct `sha256-<...>-libc6` / `sha256-<...>-glibc` prefixes. This is
 correct behaviour and matches Nix (a glibc derivation built via apt is
 a different store path from one built via dnf even when both are
-"logically glibc 2.36"). Cross-distro shared store paths are the
-[`Linux-Distro-Recipe-Validation.milestones.org`](../../../reprobuild-specs/Linux-Distro-Recipe-Validation.milestones.org)
-M5 problem space and require either Realize-Closure-style toolchain
-pinning or per-toolchain-tier keying — both out-of-scope for the
-Tier 3 sandbox consumption story.
+"logically glibc 2.36"). Cross-distro shared store paths are a separate,
+later problem (M5 of the recipe-validation campaign) and require
+either Realize-Closure-style toolchain pinning or per-toolchain-tier
+keying — both out-of-scope for the Tier 3 sandbox consumption story.
 
 **Peer-cache integration verdict (blocked):**
 

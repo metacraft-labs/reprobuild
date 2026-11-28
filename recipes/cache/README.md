@@ -1,12 +1,10 @@
 # Reprobuild binary-cache operator handbook
 
 > **Status:** ReproOS-Generations-And-Foreign-Packages A2 — v1
-> implementation of the Layer-3 plane defined in
-> [`Binary-Caches.md`][bcs] §"Overview". Companion to
-> [`THREE-LAYER-TAXONOMY.md`](./THREE-LAYER-TAXONOMY.md) and
+> implementation of the Layer-3 plane (the package-level binary cache)
+> described in [`THREE-LAYER-TAXONOMY.md`](./THREE-LAYER-TAXONOMY.md).
+> Companion to
 > [`BINARY-CACHE-IMPL-GAP-2026-06-14.md`](./BINARY-CACHE-IMPL-GAP-2026-06-14.md).
-
-[bcs]: ../../../reprobuild-specs/Binary-Caches.md
 
 This document is the single audit-grade entry point for an operator
 running the `repro-cache` distro on a workstation. It covers:

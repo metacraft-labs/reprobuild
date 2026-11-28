@@ -1,22 +1,17 @@
 # Binary-Cache Implementation Gap Matrix — 2026-06-14
 
-> **Status:** A1 deliverable for the
-> [ReproOS-Generations-And-Foreign-Packages campaign][campaign].
-> Section-by-section walk of [`Binary-Caches.md`][binary-caches] against
-> the existing reprobuild codebase, with the A2/A2.5/A3/A4 deliverable
-> names that fill each gap. Companion to
+> **Status:** A1 deliverable of the ReproOS generations and
+> foreign-packages work. Section-by-section walk of the binary-cache
+> design (the Layer 3 plane) against the existing reprobuild
+> codebase, with the A2/A2.5/A3/A4 deliverable names that fill each
+> gap. Companion to
 > [`THREE-LAYER-TAXONOMY.md`](./THREE-LAYER-TAXONOMY.md).
-
-[campaign]: ../../../reprobuild-specs/ReproOS-Generations-And-Foreign-Packages.milestones.org
-[binary-caches]: ../../../reprobuild-specs/Binary-Caches.md
-[peer-cache]: ../../../reprobuild-specs/Peer-Cache.md
-[cache-arch]: ../../../reprobuild-specs/Caching-Architecture.md
 
 ---
 
 ## How to read this document
 
-For each section of [`Binary-Caches.md`][binary-caches], we record:
+For each section of the binary-cache design, we record:
 
 - **Requires** — what the spec mandates.
 - **Today** — what already exists in reprobuild that's relevant. The
@@ -89,9 +84,8 @@ For each section of [`Binary-Caches.md`][binary-caches], we record:
 ### Gap
 - Domain-type tagging for the two acquisition classes so the
   closure walker can distinguish them.
-- An "External Installation Receipt" subsystem (per
-  [Binary-Caches.md][binary-caches] §"External Installation
-  Receipts") — a local fast-idempotence record for external
+- An "External Installation Receipt" subsystem — a local
+  fast-idempotence record for external
   installs. **Out of scope for Phase A**; this campaign's Phase C
   (foreign packages) is the natural home for the receipts work.
 
@@ -263,8 +257,8 @@ For each section of [`Binary-Caches.md`][binary-caches], we record:
   `libs/repro_domain_types/`.
 
 ### Gap
-- Manifest record SSZ schema for Layer 3 (the eight fields listed
-  in [Binary-Caches.md][binary-caches] §"Manifest").
+- Manifest record SSZ schema for Layer 3 (the eight fields the
+  design lists for a manifest).
 - Version-tagging envelope shape for the binary-cache format
   version (so a future v2 format can coexist with v1 entries in the
   same cache).
