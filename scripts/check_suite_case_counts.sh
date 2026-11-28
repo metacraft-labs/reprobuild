@@ -104,7 +104,12 @@
 # A candidate that is not a commit in this repository is skipped, not used.
 #
 # Wired in four places, deliberately:
-#   - flake.nix's `pre-commit-check`, at the `pre-push` stage (this hook);
+#   - the `pre-push` hook of the committed .pre-commit-config.yaml, through
+#     scripts/pre_push_suite_checks.sh, which runs it on the pushed commit in
+#     the dev shell. (flake.nix's `pre-commit-check` declares the same
+#     pre-push hook, but that set is never installed: until 2026-11-27 the
+#     committed config asked for no pre-push hook type, and no checkout ran
+#     this script at the push at all);
 #   - .github/workflows/suite-case-counts.yml, its own uncancellable job;
 #   - .github/workflows/ci.yml, as an early step of the lint job;
 #   - `just lint`, via the same underlying flags.
@@ -247,6 +252,17 @@ fi
       echo "  SUITE_CASE_COUNTS_BASE=<rev> (e.g. the branch you started from),"
       echo "  or give this branch an upstream."
     fi
+  fi
+  if [ "${counts_status}" -ne 0 ] || [ "${entries_status}" -ne 0 ] ||
+     [ "${sources_status}" -ne 0 ]; then
+    echo
+    echo "  The tree-derived suite artifacts are regenerated together, with"
+    echo "  the change that altered the tree:"
+    echo "    just regen-suite-artifacts"
+    echo "  Commit them in the same commit as that change. When the drift was"
+    echo "  already on the branch you rebased onto (see the attribution above),"
+    echo "  commit the regeneration as a chore(tests) commit of its own, never"
+    echo "  folded into an unrelated change. Each artifact, singly:"
   fi
   if [ "${counts_status}" -ne 0 ]; then
     echo

@@ -1584,6 +1584,14 @@
             };
             # The suite case-count baseline gate, at the PUSH boundary.
             #
+            # NOT what a checkout runs at the push: this git-hooks.nix set is
+            # evaluated by `nix flake check` and never installed. The push-time
+            # hook is the `suite-description` hook of the committed
+            # .pre-commit-config.yaml (scripts/pre_push_suite_checks.sh), which
+            # the shellHook below installs. While this declaration was the only
+            # one, no push ran the check, and commits that added test cases
+            # without regenerating reached `agents` (2026-11-26, 2026-11-27).
+            #
             # `just lint` already runs this check, but `just lint` is a
             # multi-minute whole-tree compile, so it sits at the pre-commit
             # stage where it is routinely bypassed -- and in CI it only

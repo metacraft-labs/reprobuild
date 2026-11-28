@@ -73,6 +73,15 @@
 
 minimum_pre_commit_version: '3.0.0'
 
+# The hook types scripts/install-git-hooks.sh installs. pre-commit's own
+# default is `pre-commit` alone, and with that default the `pre-push` hook
+# below is declared and never run: no checkout had a pre-push slot for it, so
+# commits that added test cases without `just regen-suite-artifacts` reached
+# `agents` unrefused (reprobuild `3452e1bc4`, `24b330f23`, 2026-11-26/27).
+# Under a Reprobuild dispatcher the installer writes `pre-push.repro-local`,
+# which the dispatcher runs before its own publication gate.
+default_install_hook_types: [pre-commit, pre-push]
+
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v6.0.0
@@ -81,6 +90,11 @@ repos:
       # the argument silently halves the ceiling.
       - id: check-added-large-files
         args: ['--maxkb=1024']
+        # Commit only. Both committed-binaries hooks judge what a commit
+        # ADDS (the staged diff), which a push has none of. The upstream
+        # manifest also lists `pre-push`, and pre-push hooks are installed
+        # here (default_install_hook_types), so the stage is stated.
+        stages: [pre-commit]
 
   - repo: https://github.com/metacraft-labs/devops-modules
     # Pinned to a sha, never to a branch: a hook set that changes under a repo
@@ -88,6 +102,7 @@ repos:
     rev: 6ba34072850f7348e1669a6daf8a0acb79669434
     hooks:
       - id: ban-added-ct-recordings
+        stages: [pre-commit]
 
   # `just lint`, the repository's own gate, on every commit and inside the dev
   # shell. flake.nix's `just-lint` git-hooks entry runs the same recipe under
@@ -109,3 +124,19 @@ repos:
         pass_filenames: false
         always_run: true
         stages: [pre-commit]
+
+      # The suite-description gates at the PUSH, on the pushed commit and
+      # inside the dev shell. `just lint` runs the same checks, but `agents`
+      # has no CI and the hour-long commit-time lint is the hook that gets
+      # bypassed, so a stale case-count baseline or inventory reached
+      # `agents` and every later pusher inherited it. These are source scans
+      # (about two minutes, no build), so they are affordable at every push.
+      # scripts/pre_push_suite_checks.sh says what is checked and why the
+      # pushed commit rather than the working tree.
+      - id: suite-description
+        name: suite description matches the pushed tree (in the dev shell)
+        entry: scripts/pre_push_suite_checks.sh
+        language: script
+        pass_filenames: false
+        always_run: true
+        stages: [pre-push]

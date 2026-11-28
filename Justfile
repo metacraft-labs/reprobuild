@@ -364,11 +364,14 @@ list-standalone-gates:
 # Enters the dev shell repeatedly and lints twice, so it is not part of
 # `just test`. The commit hook's shell holds a permanent GC root for its
 # closure (a local probe shell; `just lint` runs only its wiring check).
+# A push of a commit whose tree-derived suite artifacts are stale is refused
+# by the installed pre-push hook, which judges the pushed commit.
 dev-shell-hooks:
     bash ./tests/test_dev_shell_entry_roots_its_closure.sh
     bash ./tests/test_dev_shell_writes_nothing_elsewhere.sh
     bash ./tests/test_dev_shell_hooks_warning_names_the_command_it_ran.sh
     bash ./tests/test_pre_commit_runs_lint_in_dev_shell.sh
+    bash ./tests/test_pre_push_refuses_stale_suite_artifacts.sh
 
 # The test runner uses the host's RunQuota daemon, and keeps a private
 # per-user endpoint only where no host service answers. Needs `runquota` and
