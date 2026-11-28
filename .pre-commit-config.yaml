@@ -125,16 +125,17 @@ repos:
         always_run: true
         stages: [pre-commit]
 
-      # The suite-description gates at the PUSH, on the pushed commit and
-      # inside the dev shell. `just lint` runs the same checks, but `agents`
-      # has no CI and the hour-long commit-time lint is the hook that gets
-      # bypassed, so a stale case-count baseline or inventory reached
-      # `agents` and every later pusher inherited it. These are source scans
+      # The suite-description and generated-docs gates at the PUSH, on the
+      # pushed commit and inside the dev shell. `just lint` runs the same
+      # checks, but `agents` has no CI and the hour-long commit-time lint is
+      # the hook that gets bypassed, so a stale case-count baseline, inventory
+      # or generated command table reached `agents` and every later pusher
+      # inherited it. These are source scans
       # (about two minutes, no build), so they are affordable at every push.
       # scripts/pre_push_suite_checks.sh says what is checked and why the
       # pushed commit rather than the working tree.
       - id: suite-description
-        name: suite description matches the pushed tree (in the dev shell)
+        name: suite description and generated docs match the pushed tree (in the dev shell)
         entry: scripts/pre_push_suite_checks.sh
         language: script
         pass_filenames: false
