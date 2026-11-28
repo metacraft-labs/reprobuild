@@ -74,7 +74,7 @@ That single command:
    to produce the active activity set.
 3. For each `package(<id>, "<version>")`, selects a realization of the
    package's canonical definition exactly as a recipe's `uses:` would
-   (see Provisioning-Contributions.md, "Profile Package References"):
+   (see [Profiles](../users/content/reference/dsl.md#profiles)):
    the selection policy is your profile's `adapterPreference:` entry for
    the platform, else `tarball, nix, scoop, path` on every platform. Every
    package in the reference profile has a `tarball` realization for

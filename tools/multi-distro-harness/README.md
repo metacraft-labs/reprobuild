@@ -245,7 +245,7 @@ action cache (where the source-to-output digest mapping lives) is
 `~/.cache/repro/action-cache/cas/`. NOTE: this is the production
 layout as of 2026-06; it does NOT match the spec wording
 `$REPRO_STORE_ROOT/<algo>-<digest>-<name>/` from
-`Linux-Distro-Recipe-Validation.milestones.org` M1 verification clause.
+the distro-recipe validation plan's M1 verification clause.
 The content-addressability guarantee (same input -> same digest) holds
 under the actual layout but the surface name + per-output prefix
 convention is yet to be implemented.
@@ -1155,7 +1155,5 @@ host measures.
 - M8: multi-output package realize (blocked on a cross-campaign
   Reprobuild-Development milestone — DSL, build graph, and
   content-addressed store do not yet partition a package's
-  outputs into independently-realized prefixes; see the
-  `Linux-Distro-Recipe-Validation.milestones.org` M8 "Blocker
-  Investigation" + "Cross-Campaign Dependency" sections for the
-  layer-by-layer gap analysis).
+  outputs into independently-realized prefixes, and each of
+  those layers needs its own change before M8 can land).
