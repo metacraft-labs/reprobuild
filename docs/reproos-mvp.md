@@ -1,8 +1,7 @@
 # ReproOS D1 MVP — user-facing walkthrough
 
-This document is the D1 deliverable for the
-[ReproOS-Generations-And-Foreign-Packages](../../reprobuild-specs/ReproOS-Generations-And-Foreign-Packages.milestones.org)
-campaign. It describes the **5-foreign-package MVP**: a bootable
+This document is the D1 deliverable of the ReproOS generations and
+foreign-packages work. It describes the **5-foreign-package MVP**: a bootable
 ReproOS image whose package set comes from a pinned
 `snapshot.debian.org` mirror via the C3 bind-mount sandbox launcher,
 plus the reprobuild build driver that produces it.
@@ -335,9 +334,8 @@ Plus parser unit tests under `libs/repro_dsl_stdlib/tests/`:
 
 3. **Reproducibility of the ISO carries the R9 Path A caveats**:
    glibc 2.35 from the host vs 2.42 from R6; libpam pulls audit-stub
-   from host even with `-Daudit=disabled`. See the
-   [ReproOS-MVP spec](../../reprobuild-specs/ReproOS-MVP.milestones.org)
-   R9-1 / R9-2 entries.
+   from host even with `-Daudit=disabled`. Both come from the
+   build host, so ISOs built on two different hosts can differ.
 
 4. **Windows path translation bug surfaced by D1.** The build
    driver passes Windows-native paths to every Nim binary it invokes

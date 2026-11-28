@@ -834,6 +834,13 @@ lint:
     # count may fall (the baseline is rewritten smaller) but never rise. Pure
     # git grep over tracked files, no build needed.
     python3 ./scripts/check_private_pm_references.py 2>&1 | tee -a test-logs/lint.log
+    # Its Markdown-link counterpart, and zero-tolerance rather than a ratchet:
+    # a relative link that resolves outside this repository works only in a
+    # checkout that has that sibling directory, and when the sibling is
+    # private it points a public reader somewhere they cannot go. Link to a
+    # public URL or state the fact in the document. Pure Python over tracked
+    # Markdown, no build needed.
+    python3 ./scripts/check_markdown_links_stay_in_repo.py 2>&1 | tee -a test-logs/lint.log
     # Distributed-Execution M7 (deployment-security-architecture.md CONF-1,
     # CONF-3, CONF-4): the worker unit carries the confinement floor (every
     # omission argued in the unit), its syscall additions are the derived

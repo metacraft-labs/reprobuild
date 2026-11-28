@@ -1,6 +1,6 @@
 # reproos-image — NixOS-style build-artifact ReproOS image recipe
 
-**M9.R.50.2.** Spec: [`reprobuild-specs/ReproOS-Image-Recipe.md`](../../../reprobuild-specs/ReproOS-Image-Recipe.md).
+**M9.R.50.2.**
 
 Produces a fully-installed `reproos-installed.qcow2` as a build
 artifact, on the host, with no boot-time installer step. The

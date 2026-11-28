@@ -1,8 +1,10 @@
 # repro_peer_cache
 
 Peer-cache plane for Reprobuild — a LAN-fabric extension of the local
-content-addressed action cache. Implements the wire protocol described in
-[`reprobuild-specs/Peer-Cache.md`](../../../reprobuild-specs/Peer-Cache.md).
+content-addressed action cache. A node asks the peers on its network for an
+output blob by its BLAKE3-256 content digest before it falls back to the
+central remote cache or rebuilds. The frame shape is documented at the top
+of `src/repro_peer_cache/codec.nim`.
 
 ## Status
 
@@ -79,9 +81,7 @@ and TLS-context surfaces; the M1/M2/M3 milestones consume the
 binding from `auth.nim`, `pki.nim`, and `tls.nim`. The asymmetric
 primitive is **ECDSA-P256** (not Ed25519 as originally drafted —
 BearSSL does not ship EdDSA; see the M0 smoke test header for the
-discovery notes). See
-[`Peer-Cache-BearSSL.md`](../../../reprobuild-specs/Peer-Cache-BearSSL.md)
-for the spec amendment.
+discovery notes).
 
 ## Tests
 

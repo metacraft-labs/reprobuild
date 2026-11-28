@@ -1,12 +1,10 @@
 # Reprobuild binary-cache operator handbook
 
 > **Status:** ReproOS-Generations-And-Foreign-Packages A2 — v1
-> implementation of the Layer-3 plane defined in
-> [`Binary-Caches.md`][bcs] §"Overview". Companion to
-> [`THREE-LAYER-TAXONOMY.md`](./THREE-LAYER-TAXONOMY.md) and
+> implementation of the Layer-3 plane (the package-level binary cache)
+> described in [`THREE-LAYER-TAXONOMY.md`](./THREE-LAYER-TAXONOMY.md).
+> Companion to
 > [`BINARY-CACHE-IMPL-GAP-2026-06-14.md`](./BINARY-CACHE-IMPL-GAP-2026-06-14.md).
-
-[bcs]: ../../../reprobuild-specs/Binary-Caches.md
 
 This document is the single audit-grade entry point for an operator
 running the `repro-cache` distro on a workstation. It covers:
@@ -15,8 +13,8 @@ running the `repro-cache` distro on a workstation. It covers:
 2. Threat model (single-tenant; user-owned ECDSA key).
 3. Provisioning recipe.
 4. Rotation + recovery policy.
-5. Reference to Binary-Caches.md sections this implementation
-   maps to.
+5. Map from the binary-cache design's sections to the code that
+   implements them.
 
 ---
 
@@ -126,8 +124,8 @@ manifest it serves has the same `producerPubKey` field).
   can read the producer key off disk regardless of cipher.
 - Supply-chain compromise of a producer's *toolchain*: the cache
   server faithfully publishes whatever was realized, signed or not.
-  The `Binary-Caches.md` § "Preferred Publishing Model" stricter
-  hermeticity policy is the producer's responsibility; A3 surfaces it
+  The binary-cache design's stricter hermeticity policy for
+  publishing is the producer's responsibility; A3 surfaces it
   at the publish boundary.
 
 ---
@@ -276,9 +274,9 @@ roll back to a known-good earlier snapshot.
 
 ---
 
-## 5 — Map to Binary-Caches.md sections
+## 5 — Map to the binary-cache design
 
-| § in Binary-Caches.md            | Implementation                                                                                                                                       |
+| Binary-cache design section      | Implementation                                                                                                                                       |
 | -------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
 | § Cache Entry Identity           | [`key.nim`](../../libs/repro_binary_cache_server/src/repro_binary_cache_server/key.nim) — canonical encoder + BLAKE3 digest                            |
 | § Binary Cache Entry Contents    | [`types.nim`](../../libs/repro_binary_cache_server/src/repro_binary_cache_server/types.nim) `BinaryCacheManifest` / `PayloadObject`                    |

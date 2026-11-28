@@ -40244,6 +40244,7 @@ const pythonTestPaths*: seq[string] = @[
   "tests/unit/test_build_apps_width.py",
   "tests/unit/test_build_report_attribution.py",
   "tests/unit/test_bump_version.py",
+  "tests/unit/test_check_markdown_links_stay_in_repo.py",
   "tests/unit/test_check_private_pm_references.py",
   "tests/unit/test_check_superseded_doc_pointers.py",
   "tests/unit/test_ci_bootstrap_logs.py",

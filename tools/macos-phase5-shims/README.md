@@ -2,9 +2,8 @@
 
 > **Audience 1, M6 Phase-5 scaffolding.** Sister to
 > [`tools/wsl-m69-posix/`](../wsl-m69-posix/) and
-> [`tools/sandbox-m69-system/`](../sandbox-m69-system/). See the M6
-> milestone in
-> [`reprobuild-specs/Multi-OS-VM-Automation-Campaign.milestones.org`](../../../reprobuild-specs/Multi-OS-VM-Automation-Campaign.milestones.org).
+> [`tools/sandbox-m69-system/`](../sandbox-m69-system/), all part of the
+> multi-OS VM automation work.
 
 ## What this directory is
 

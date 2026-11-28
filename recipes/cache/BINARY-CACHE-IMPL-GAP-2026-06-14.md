@@ -1,22 +1,17 @@
 # Binary-Cache Implementation Gap Matrix — 2026-06-14
 
-> **Status:** A1 deliverable for the
-> [ReproOS-Generations-And-Foreign-Packages campaign][campaign].
-> Section-by-section walk of [`Binary-Caches.md`][binary-caches] against
-> the existing reprobuild codebase, with the A2/A2.5/A3/A4 deliverable
-> names that fill each gap. Companion to
+> **Status:** A1 deliverable of the ReproOS generations and
+> foreign-packages work. Section-by-section walk of the binary-cache
+> design (the Layer 3 plane) against the existing reprobuild
+> codebase, with the A2/A2.5/A3/A4 deliverable names that fill each
+> gap. Companion to
 > [`THREE-LAYER-TAXONOMY.md`](./THREE-LAYER-TAXONOMY.md).
-
-[campaign]: ../../../reprobuild-specs/ReproOS-Generations-And-Foreign-Packages.milestones.org
-[binary-caches]: ../../../reprobuild-specs/Binary-Caches.md
-[peer-cache]: ../../../reprobuild-specs/Peer-Cache.md
-[cache-arch]: ../../../reprobuild-specs/Caching-Architecture.md
 
 ---
 
 ## How to read this document
 
-For each section of [`Binary-Caches.md`][binary-caches], we record:
+For each section of the binary-cache design, we record:
 
 - **Requires** — what the spec mandates.
 - **Today** — what already exists in reprobuild that's relevant. The
@@ -89,9 +84,8 @@ For each section of [`Binary-Caches.md`][binary-caches], we record:
 ### Gap
 - Domain-type tagging for the two acquisition classes so the
   closure walker can distinguish them.
-- An "External Installation Receipt" subsystem (per
-  [Binary-Caches.md][binary-caches] §"External Installation
-  Receipts") — a local fast-idempotence record for external
+- An "External Installation Receipt" subsystem — a local
+  fast-idempotence record for external
   installs. **Out of scope for Phase A**; this campaign's Phase C
   (foreign packages) is the natural home for the receipts work.
 
@@ -100,7 +94,7 @@ For each section of [`Binary-Caches.md`][binary-caches], we record:
   package recipes the R4–R9 chain produces (all native).
 - **Out of campaign scope** — external installation receipts; see
   Phase C's foreign-package work and the
-  `Linux-Third-Party-Distro-Packages.md` design.
+  third-party distro packages design.
 
 ---
 
@@ -155,13 +149,13 @@ For each section of [`Binary-Caches.md`][binary-caches], we record:
 ### Today
 - R4 `tools/bootstrap-cache/` keys by `output_sha256` (the realized
   binary's SHA-256). That's *output identity*, NOT *cache entry
-  identity* in the Binary-Caches.md sense — collapses options /
+  identity* in the binary-cache design's sense — collapses options /
   target / toolchain / closure into the realized bytes.
 - The existing local-store realization receipt
   (`computeRealizationHash` in
   `libs/repro_local_store/src/repro_local_store/store.nim` line 486)
   has a structurally similar tuple but is internal to Layer 1 and
-  doesn't include all the Binary-Caches.md fields (notably
+  doesn't include all the binary-cache design's fields (notably
   dep-closure identity is implicit, provider revision is
   unrecorded).
 - The R4 chain *does* record `stagex_commit` + `stagex_release` +
@@ -169,7 +163,7 @@ For each section of [`Binary-Caches.md`][binary-caches], we record:
   per-step `deps[]` (a coarse closure identity), and architecture
   via the chain filename (e.g., `chain-amd64.json` for the AMD64
   variant). These are close to the right shape but not
-  Binary-Caches.md-conformant.
+  conformant to the binary-cache design.
 - The R8 commit `5c30234` caveat ("byte stability is conditional on
   host gcc 11.x") confirms the toolchain-identity / host-ABI
   component is real: a gcc-15.2.0 built under Ubuntu 22.04 (host
@@ -177,7 +171,7 @@ For each section of [`Binary-Caches.md`][binary-caches], we record:
   have different cache keys.
 
 ### Gap
-- Canonical encoding of the full Binary-Caches.md identity tuple.
+- Canonical encoding of the full binary-cache identity tuple.
 - Field-by-field derivation rules for each R4–R9 toolchain output.
 - Host-platform / host-ABI / host-toolchain identity capture for the
   toolchain-identity field (this is what R8's
@@ -188,7 +182,7 @@ For each section of [`Binary-Caches.md`][binary-caches], we record:
 
 ### Fills it
 - **A3** — `libs/repro_binary_cache_client/src/repro_binary_cache_client/cache_key.nim`
-  with the canonical Binary-Caches.md identity-tuple encoding.
+  with the canonical binary-cache identity-tuple encoding.
 - **A3** — `recipes/cache/CACHE-KEY-SCHEMA.md` documenting the
   derivation rules for every R4–R9 output.
 - **A3** — `t_a3_compat_isolation.sh` integration test verifying
@@ -216,10 +210,10 @@ For each section of [`Binary-Caches.md`][binary-caches], we record:
 ### Gap
 - The four-piece structure (manifest / payload objects / realization
   metadata / trust+signature) is not formalized.
-- R4's manifest is JSON; Binary-Caches.md mandates CBOR/SSZ +
+- R4's manifest is JSON; the binary-cache design mandates CBOR/SSZ +
   version-tagged envelopes (the "binary-first" encoding policy
   shared with Layer 1's persistent records).
-- Payload-object multiplicity: a Binary-Caches.md entry may carry
+- Payload-object multiplicity: a binary-cache entry may carry
   multiple payload objects (prefix archive + tree fragments +
   launchers + metadata files). R4 entries carry exactly one blob.
 
@@ -263,8 +257,8 @@ For each section of [`Binary-Caches.md`][binary-caches], we record:
   `libs/repro_domain_types/`.
 
 ### Gap
-- Manifest record SSZ schema for Layer 3 (the eight fields listed
-  in [Binary-Caches.md][binary-caches] §"Manifest").
+- Manifest record SSZ schema for Layer 3 (the eight fields the
+  design lists for a manifest).
 - Version-tagging envelope shape for the binary-cache format
   version (so a future v2 format can coexist with v1 entries in the
   same cache).
@@ -411,7 +405,7 @@ avoids.
 - Layer 1 verifies BLAKE3-256 of CAS reads (`verifyCasBlob` in
   `libs/repro_local_store/src/repro_local_store/store.nim` line 729).
 - Layer 2 verifies BLAKE3-256 of received blob payloads against the
-  requested digest (per `Peer-Cache.md` §"Fetch semantics" step 3).
+  requested digest (per the peer-cache fetch semantics).
 - Layer 2 has CIDR allowlist + ECDSA-P256 + TLS handshake — but
   those are Layer-2 trust mechanisms, not package-instance
   compatibility.
@@ -424,7 +418,7 @@ avoids.
 - Store-layout matcher (the realized-prefix directory shape Layer 3
   expects vs what the consumer's local store enforces).
 - Provider-revision matcher (the recipe-body fingerprint per
-  Caching-Architecture.md needs to match for entries to be
+  the caching architecture needs to match for entries to be
   interchangeable).
 - Dep-closure walker that catches missing closure members before
   materialization.
@@ -461,8 +455,8 @@ avoids.
     (`realizePrefix` via `moveFile` + `INSERT OR IGNORE INTO prefixes`)
   - GC roots (`registerRoot` / `attachPrefixToRoot` /
     `deleteRoot` / `gc`)
-- This is exactly the substrate Binary-Caches.md §"Interaction With
-  The Store" mandates.
+- This is exactly the substrate the binary-cache design's
+  "Interaction With The Store" section mandates.
 
 ### Gap
 - A thin Layer-3 ingestion adapter that, on a successful payload
@@ -608,7 +602,7 @@ is mostly wiring. Use the existing modules:
 - **Envelope shape**. JSON manifest + signed `.sig` sidecar + per-blob
   SHA-256 addressing + chain-walk verifier — this is the conceptual
   template. A3 lifts the schema and re-encodes it in the
-  Binary-Caches.md format (SSZ fixed records + CBOR dynamic blocks
+  binary-cache format (SSZ fixed records + CBOR dynamic blocks
   + version-tagged envelope) while preserving the ed25519 signing
   identity.
 - **Chain walk**. `tools/bootstrap-cache/test_chain_walk.sh` is the
@@ -673,7 +667,7 @@ Of the work A2 + A2.5 + A3 + A4 lands, roughly:
   code: the `bakBinaryCacheSubstitute` enum variant + a dispatcher
   hook (~20 lines).
 - **Codec pattern**: lift from peer-cache `codec.nim`. New code: the
-  Binary-Caches.md-specific manifest record shape + CBOR dynamic
+  binary-cache-specific manifest record shape + CBOR dynamic
   blocks.
 - **HTTP + streaming + decompression**: net new (libcurl + libzstd
   wrappers).
@@ -688,15 +682,16 @@ already exist and are layer-agnostic enough to reuse.
 
 ## Out-of-scope items captured here for traceability
 
-- **External installation receipts** (Binary-Caches.md
+- **External installation receipts** (binary-cache design,
   §"External Installation Receipts" through §"Weak External
   Installers"). The receipts subsystem is its own design — Phase C
   (foreign-package work) is the natural home. Phase A doesn't touch
   it.
 - **Curator-published cross-distro snapshots** that contain external
-  imported nodes (Binary-Caches.md §"Mirror And Snapshot Boundary").
+  imported nodes (the binary-cache design, §"Mirror And Snapshot
+  Boundary").
   Same — Phase C / Phase D, not Phase A.
-- **Open Questions** in Binary-Caches.md §"Open Questions". Phase A
+- **Open Questions** of the binary-cache design. Phase A
   resolves the first three (manifest format, payload format,
   signing policy) by construction; the last two (repack/export for
   strong external installers; anchor-validation defaults for weak

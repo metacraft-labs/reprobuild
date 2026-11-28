@@ -1,8 +1,8 @@
 # DE-H1: Hyprland on ReproOS (Wayland-DEs PoC — Phase DE-H)
 
-**Status.** DE-H1 architecture decision — Phase DE-H of the
-[`ReproOS-Wayland-DEs-PoC`](../../reprobuild-specs/ReproOS-Wayland-DEs-PoC.milestones.org)
-campaign. Companion to [`multi-os-windows-runtime.md`](multi-os-windows-runtime.md) (W1),
+**Status.** DE-H1 architecture decision — Phase DE-H (Hyprland) of the
+Wayland desktop-environments proof of concept for ReproOS. Companion to
+[`multi-os-windows-runtime.md`](multi-os-windows-runtime.md) (W1),
 [`multi-os-macos-runtime.md`](multi-os-macos-runtime.md) (D1), and the
 existing DE0 documents at [`recipes/catalog/linux/SCHEMA.md`](../recipes/catalog/linux/SCHEMA.md).
 
