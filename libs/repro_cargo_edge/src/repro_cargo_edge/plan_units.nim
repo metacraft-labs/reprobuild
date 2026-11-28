@@ -77,6 +77,7 @@
 import std/[algorithm, os, sets, strutils, tables]
 
 import repro_build_engine
+import repro_lock/identity
 import repro_cargo_fetch/[crate_compile, crate_rows]
 
 import ./[cargo_plan, record_mode]
@@ -115,6 +116,17 @@ type
     toolchainEnv*: seq[string]
       ## `NAME=value` variables every edge is given besides cargo's, for the
       ## toolchain itself (the `PATH` that finds the linker).
+    deferOutputDirs*: bool
+      ## Leave the units' output directories to the engine, which creates an
+      ## action's output parents before it runs (`ensureOutputParents`):
+      ## the units edge writes the edges' records and must create nothing
+      ## else. False (the default) creates them here.
+    governingLockIdentity*: LockIdentity
+      ## The lock identity the edges are built under. When they are created
+      ## from the units edge's fragment, the engine gives each the identity
+      ## of the fragment's producer (Named-Lock-Files §4.1), so a caller that
+      ## wants the keys the engine will compute passes that one. Required:
+      ## an empty identity is refused, never defaulted (§7.2).
 
   PlanUnitEdge* = object
     ## One unit's edge and what a caller or test needs to see of it.
@@ -131,7 +143,12 @@ type
     outDir*: string
     depInfo*: string
       ## the dep-info file rustc writes, not an output ("" when not emitted)
+    spec*: CreatedActionSpec
+      ## the edge as the `create-action` record of it states it
+      ## (`repro_build_engine.createActionRecord`)
     action*: BuildAction
+      ## `createdAction(spec, cfg.governingLockIdentity)`: the action the
+      ## engine creates from that record, key included
 
 proc planUnitEdgeId*(u: PlanUnit): string =
   ## `cargo.rustc/<package>@<version>-<hash>`, cargo's own hash: the id a
@@ -281,12 +298,14 @@ type
     row: CrateRow
     argv, env, launchEnv, outputs, declared, inputs, deps, scratch: seq[string]
     cwd, outDir, depInfo: string
+    lock: LockIdentity
 
 proc registryUnit(p: Prepared): RegistryCrateUnit =
   RegistryCrateUnit(hash: p.unit.id[p.unit.id.rfind('-') + 1 .. ^1],
     crateName: p.unit.crateName, argv: p.argv, cwd: p.cwd,
     env: p.launchEnv, outDir: p.outDir, outputs: p.outputs, deps: p.deps,
-    inputs: p.inputs, scratchDirs: p.scratch, isolateHostEnvironment: true)
+    inputs: p.inputs, scratchDirs: p.scratch, isolateHostEnvironment: true,
+    governingLockIdentity: p.lock)
 
 proc planUnitEdges*(plan: CargoPlan; cfg: PlanUnitsConfig): seq[PlanUnitEdge] =
   ## One rustc edge per unit of ``plan`` (see the module docstring), sorted
@@ -303,6 +322,9 @@ proc planUnitEdges*(plan: CargoPlan; cfg: PlanUnitsConfig): seq[PlanUnitEdge] =
     if path.len == 0 or not path.isAbsolute:
       raise newException(ValueError, "the plan's units need an absolute " &
         what & ", not " & path.escape())
+  if ($cfg.governingLockIdentity).len == 0:
+    raise newException(ValueError, "the plan's units need the governing " &
+      "lock identity they are built under")
   if cfg.storeRoot.len > 0 and not cfg.storeRoot.isAbsolute:
     raise newException(ValueError, "the store root must be absolute: " &
       cfg.storeRoot)
@@ -331,7 +353,8 @@ proc planUnitEdges*(plan: CargoPlan; cfg: PlanUnitsConfig): seq[PlanUnitEdge] =
     if why.len > 0:
       refused.add (u.id, why)
       continue
-    var p = Prepared(unit: u, registry: u.cwd.startsWith("${store}/"))
+    var p = Prepared(unit: u, registry: u.cwd.startsWith("${store}/"),
+      lock: cfg.governingLockIdentity)
     if p.registry:
       if u.package & "@" & u.version notin rows:
         refused.add (u.id, "compiles the registry crate " & u.package & "@" &
@@ -390,15 +413,17 @@ proc planUnitEdges*(plan: CargoPlan; cfg: PlanUnitsConfig): seq[PlanUnitEdge] =
   # 2. The edges.
   for p in prepared:
     if p.registry:
-      let e = registryCrateUnitEdge(p.row, cfg.storeRoot, registryUnit(p))
+      let e = registryCrateUnitEdge(p.row, cfg.storeRoot, registryUnit(p),
+        createOutDir = not cfg.deferOutputDirs)
       result.add PlanUnitEdge(unit: p.unit, registry: true,
         cargoArgv: p.argv, argvDifference: e.argvDifference, env: p.env,
-        outDir: p.outDir, depInfo: p.depInfo, action: e.action)
+        outDir: p.outDir, depInfo: p.depInfo, spec: e.spec, action: e.action)
     else:
-      createDir(p.outDir)
+      if not cfg.deferOutputDirs: createDir(p.outDir)
+      let spec = rustcUnitSpec(planUnitEdgeId(p.unit), p.argv, cwd = p.cwd,
+        deps = p.deps, inputs = p.inputs, outputs = p.declared,
+        env = p.launchEnv, commandStatsId = MemberUnitStatsId,
+        isolateHostEnvironment = true, scratchDirs = p.scratch)
       result.add PlanUnitEdge(unit: p.unit, cargoArgv: p.argv, env: p.env,
-        outDir: p.outDir, depInfo: p.depInfo,
-        action: rustcUnitAction(planUnitEdgeId(p.unit), p.argv, cwd = p.cwd,
-          deps = p.deps, inputs = p.inputs, outputs = p.declared,
-          env = p.launchEnv, commandStatsId = MemberUnitStatsId,
-          isolateHostEnvironment = true, scratchDirs = p.scratch))
+        outDir: p.outDir, depInfo: p.depInfo, spec: spec,
+        action: rustcUnitAction(spec, cfg.governingLockIdentity))

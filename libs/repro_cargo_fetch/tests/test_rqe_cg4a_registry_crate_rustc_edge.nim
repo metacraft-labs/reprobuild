@@ -133,14 +133,15 @@ proc teardown(s: Setup) =
     cleanup(s.cf)
 
 proc rebuiltWithArgv(a: BuildAction; argv: seq[string]; id = ""): BuildAction =
-  ## ``a`` constructed again by the engine's constructor with every field
-  ## the edge sets, except the argv (and, when given, the id).
-  action(if id.len > 0: id else: a.id, argv, cwd = a.cwd, deps = a.deps,
-    inputs = a.inputs, outputs = a.outputs, pool = a.pool,
-    commandStatsId = a.commandStatsId, cacheable = a.cacheable,
-    actionCachePolicy = a.actionCachePolicy,
-    dependencyPolicy = a.dependencyPolicy, env = a.env,
-    governingLockIdentity = a.governingLockIdentity)
+  ## ``a`` constructed again by the constructor every rustc unit edge is
+  ## built with (`rustcUnitSpec`, then the engine's `createdAction` through
+  ## `rustcUnitAction`), with every field the edge sets, except the argv
+  ## (and, when given, the id).
+  rustcUnitAction(rustcUnitSpec(if id.len > 0: id else: a.id, argv,
+    cwd = a.cwd, deps = a.deps, inputs = a.inputs, outputs = a.outputs,
+    env = a.env, commandStatsId = a.commandStatsId,
+    isolateHostEnvironment = a.isolateHostEnvironment,
+    scratchDirs = a.scratchDirs), a.governingLockIdentity)
 
 proc runOnce(s: Setup; actions: openArray[BuildAction]):
     Table[string, ActionResult] =

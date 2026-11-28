@@ -4,10 +4,10 @@
 ##
 ## THE CONTRACT. Rust.md § Recognition item 6 keeps a workspace with a
 ## registry dependency out of Mode A. The lift of that condition for
-## crates.io crates builds such a workspace from cargo's plan instead: the
-## fetch wave puts each crate in the store, the record run plans the build
-## without compiling, and every library and binary unit, members and
-## registry crates alike, becomes a rustc edge. Until the check of the
+## crates.io crates builds such a workspace from cargo's plan instead: its
+## graph-production edges fetch each crate into the store, plan the build
+## without compiling, and turn every library and binary unit, members and
+## registry crates alike, into a rustc edge while the build runs. Until the check of the
 ## variables a compile reads exists, the lift is behind a switch that is off
 ## by default and that only the exact value `on` turns on. The convention
 ## reads it where it decides the workspace's mode, and records it as an
@@ -18,9 +18,8 @@
 ## feature, build script or proc-macro, depending on the crates.io crates
 ## `regleaf` and `regmid` (`regmid` depends on `regleaf` and has default
 ## features). The crates are made by `cargo package` and fetched from a
-## local mirror directory into a private store root, which the
-## convention's own fetch wave then finds them in; nothing contacts the
-## network.
+## local mirror directory into a private store root, which the workspace's
+## fetch edges then find them in; nothing contacts the network.
 ##
 ## THE CASES, one workspace, in order:
 ##
@@ -31,38 +30,40 @@
 ## 2. Switch `On` (not the exact value). The same: Mode B. Its recorded
 ##    digest differs from case 1's, so the change re-decides the workspace.
 ## 3. Switch `on`. The decision is Mode A from the plan. The fragment holds
-##    one rustc edge per unit (five: `app`, `util`'s library and binary,
-##    `regleaf`, `regmid`), none runs cargo, each is launched from its
-##    declared environment alone, and the switch is recorded with a third
-##    digest. Built through the real engine and monitor, every edge
-##    succeeds, the binaries print `util:5 51` and `util:5`, and no rlib of
-##    the build comes from cargo: every rlib a binary is given, and every
-##    rlib in the workspace, is the output of one of these edges; the
+##    the graph-production edges (a fetch edge per locked crate, the plan
+##    edge, the Mode B record, the units edge and the collector) and no
+##    rustc edge, and the switch is recorded with a third digest. Built with
+##    `repro build`, the units edge creates one rustc edge per unit (five:
+##    `app`, `util`'s library and binary, `regleaf`, `regmid`), none runs
+##    cargo, each is launched from its declared environment alone, every
+##    one succeeds, the binaries print `util:5 51` and `util:5`, and no
+##    rlib of the build comes from cargo: every rlib a binary is given, and
+##    every rlib in the workspace, is the output of one of these edges; the
 ##    record run's scratch holds only empty placeholders; there is no
 ##    `target` directory.
 ##
-## Case 3 runs in a process that exports `RUSTFLAGS`, `CARGO_BUILD_RUSTFLAGS`,
-## `CARGO_ENCODED_RUSTFLAGS`, `CARGO_PROFILE_RELEASE_OPT_LEVEL` and
-## `CARGO_TARGET_DIR`: the record run's environment is closed, so none of
-## them reaches a unit's command line, and the toolchain the plan was made
-## with is keyed (the `PATH` it was resolved on and each tool's content).
+## Case 3's build runs in an environment that exports `RUSTFLAGS`,
+## `CARGO_BUILD_RUSTFLAGS`, `CARGO_ENCODED_RUSTFLAGS`,
+## `CARGO_PROFILE_RELEASE_OPT_LEVEL` and `CARGO_TARGET_DIR`: the plan edge's
+## environment is closed, so none of them reaches a unit's command line,
+## and the toolchain the edges are made with is keyed (the `PATH` it was
+## resolved on and each tool's content).
 ## The fragment's `test` target is Mode B's (`cargo test`), outside the
 ## default target.
 ##
 ## Falsifying mutations (applied, observed to fail, reverted; see the
 ## change's report): accepting any non-empty switch value fails case 2;
-## launching the record run without its closed environment fails case 3's
+## declaring the plan edge without `isolateHostEnvironment` fails case 3's
 ## steering check; leaving the toolchain out of the evaluation inputs fails
 ## case 3's keying check;
 ## dropping the switch from a Mode B fragment's evaluation inputs fails
 ## cases 1 and 2; dropping the registry condition (routing the workspace to
 ## the plan whatever the switch) fails case 1; dropping
-## `isolateHostEnvironment` from the action payload codec fails case 3.
+## `isolateHostEnvironment` from the `create-action` record fails case 3.
 ##
-## MOCKS: none. See `rqe_cg5_mode_a_support` for the one step re-done here
-## (turning an emitted `BuildActionDef` into an engine action).
+## MOCKS: none. The real emitter, CLI, engine and monitor, cargo and rustc.
 
-import std/[os, osproc, sequtils, strutils, tempfiles, unittest]
+import std/[json, os, osproc, sequtils, strutils, tempfiles, unittest]
 
 import repro_build_engine
 import repro_provider_runtime
@@ -72,6 +73,7 @@ import repro_standard_provider/conventions/rust_plan_mode
 
 import ./rqe_cg5_plan_fixture
 import ./rqe_cg5_mode_a_support
+import ./rqe_cg5_repro_build_support
 
 suite "the registry lift's gate":
 
@@ -124,61 +126,74 @@ suite "the registry lift's gate":
     check on.reason.len == 0
     let onFragment = emitWorkspace(ws)
     let allDefs = actionDefs(onFragment)
-    let onDefs = allDefs.filterIt(it.isPlanEdge)
-    var ids = onDefs.mapIt(it.id)
-    checkpoint "actions: " & ids.join(" ")
-    check ids.len == 5
-    check ids.allIt(it.startsWith("cargo.rustc/"))
-    for name in ["app@0.1.0-", "util@0.1.0-", "regleaf@0.1.0-",
-                 "regmid@0.1.0-"]:
-      check ids.anyIt(("cargo.rustc/" & name) in it)
-    check not onDefs.anyIt(it.runsCargo)
+    # Graph production is edges: the fetch edge of each locked crate, the
+    # plan edge, the Mode B record, the units edge and the collector. No
+    # unit edge exists until the build runs.
+    let production = allDefs.filterIt(it.isGraphProductionEdge)
+    var ids = production.mapIt(it.id)
+    checkpoint "graph production: " & ids.join(" ")
+    check ids.filterIt(it.startsWith("cargo.fetch/")).len == 2  # regleaf, regmid: the fixture's regbs is not locked
+    for prefix in ["cargo.plan/", "cargo.mode-b-record/", "cargo.plan-units/",
+                   "cargo.workspace/"]:
+      check ids.filterIt(it.startsWith(prefix)).len == 1
+    check not allDefs.anyIt(it.isPlanEdge)
     # The `test` target stays Mode B's: cargo runs the tests, outside the
     # default target.
-    let others = allDefs.filterIt(not it.isPlanEdge)
+    let others = allDefs.filterIt(not it.isGraphProductionEdge)
     checkpoint "other actions: " & others.mapIt(it.id).join(" ")
     check others.len == 2
     check others.anyIt(it.runsCargo and "test" in inlineArgvOf(it))
-    # Nothing the host exported reached a unit: the record run's environment
-    # is closed.
-    let steered = steeredUnits(onDefs.mapIt(inlineArgvOf(it)))
-    checkpoint "steered: " & steered.join(" | ")
-    check steered.len == 0
-    # The toolchain the plan was made with is keyed: the PATH it was
+    # The toolchain the edges are made with is keyed: the PATH it was
     # resolved on and each tool's content.
     let keyed = onFragment.evaluationInputs.mapIt(it.identity)
     check (EnvironmentHostFactPrefix & "PATH") in keyed
     for tool in ["cargo", "rustc"]:
       checkpoint tool
       check keyed.anyIt(it.isAbsolute and extractFilename(it) == tool)
-    for def in onDefs:
-      checkpoint def.id
-      check def.isolateHostEnvironment
-      check def.envEntries.filterIt(it.startsWith("PATH=")).len == 1
     let onDigest = switchInputDigest(onFragment)
     check onDigest == hostFactDigest(switchId)
     check onDigest notin [offDigest, wrongDigest, "<absent>"]
 
-    let run = buildFragment(env, onFragment, ws, work / "engine-cache")
-    check run.results.len == onDefs.len
-    for r in run.results:
-      checkpoint r.id & ": " & $r.status & " " & r.reason &
-        (if r.stderr.len > 0: "\nstderr: " & r.stderr else: "")
-      check r.status == asSucceeded
+    # Built with `repro build`, from a shell that exports the steering
+    # variables: the plan's unit edges are created and run.
+    var benv = reproBuildEnv(work / "build", reg)
+    benv.vars.add cargoSteering()
+    let built = reproBuild(benv, ws)
+    checkpoint built.describe
+    require built.code == 0
+    let units = unitRecords(ws)
+    let unitIds = units.mapIt(it.id)
+    checkpoint "units: " & unitIds.join(" ")
+    check unitIds.len == 5
+    check unitIds.allIt(it.startsWith("cargo.rustc/"))
+    for name in ["app@0.1.0-", "util@0.1.0-", "regleaf@0.1.0-",
+                 "regmid@0.1.0-"]:
+      check unitIds.anyIt(("cargo.rustc/" & name) in it)
+    for id in unitIds:
+      checkpoint id
+      check built.action(id){"status"}.getStr() == "asSucceeded"
+    # Nothing the host exported reached a unit: the plan edge's environment
+    # is closed.
+    let steered = steeredUnits(units.mapIt(it.argv))
+    checkpoint "steered: " & steered.join(" | ")
+    check steered.len == 0
+    for u in units:
+      checkpoint u.id
+      check u.isolateHostEnvironment
+      check u.env.filterIt(it.startsWith("PATH=")).len == 1
     for (crate, expected) in [("app", "util:5 51"), ("util", "util:5")]:
-      var built = ""
-      for def in onDefs:
-        if "bin" in inlineArgvOf(def) and
-            ("cargo.rustc/" & crate & "@") in def.id:
-          for o in def.outputs:
+      var bin = ""
+      for u in units:
+        if "bin" in u.argv and ("cargo.rustc/" & crate & "@") in u.id:
+          for o in u.outputs:
             if extractFilename(o).startsWith(crate & "-") and
                 not o.endsWith(".rlib"):
-              built = o
-      checkpoint crate & ": " & built
-      require built.len > 0
-      check execProcess(built, options = {}).strip() == expected
+              bin = o
+      checkpoint crate & ": " & bin
+      require bin.len > 0
+      check execProcess(bin, options = {}).strip() == expected
 
-    let p = rlibProvenance(onFragment, ws)
+    let p = rlibProvenance(units, ws)
     checkpoint "linked: " & p.linked.join(" ")
     checkpoint "foreign: " & p.foreign.join(" ")
     check p.cargoEdges.len == 0

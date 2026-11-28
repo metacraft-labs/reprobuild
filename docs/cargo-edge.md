@@ -295,27 +295,36 @@ of the graph it emits, so changing it re-decides the workspace.
 
 With it on, and when the workspace's members have no build script, no
 proc-macro, no feature or optional dependency, and every dependency that is
-not a member comes from crates.io, graph production runs, in order:
+not a member comes from crates.io, evaluating the workspace runs no tool. It
+declares graph-production edges, which run as part of the build:
 
-1. the fetch wave over the lock's crates.io rows (each crate's store prefix;
-   receipts under `.repro/build/cargo-fetch`);
-2. the record run (`--cargo-plan`, planning `cargo build --release
-   --workspace`) under the io monitor, in a directory of its own under
-   `.repro/build/cargo-plan` (so two evaluations at once do not share
-   state), from a closed environment: the toolchain's `PATH` (the
-   directories of `cargo`, `rustc` and `cc`) and a private `TMPDIR`, given
-   with `--env`, so no variable of the caller's environment (`RUSTFLAGS`,
-   `CARGO_PROFILE_*`, `CARGO_BUILD_*`, ...) shapes the plan. What it read,
-   outside its own directory, keys the emitted graph, and so do the `PATH`
-   the toolchain was resolved on and each tool's content;
-3. `planUnitEdges`, with the outputs under `.repro/build/cargo-units` and,
-   as the one toolchain variable, that same `PATH`.
+1. one `cargo.fetch/<name>@<version>` edge per locked crates.io crate, run by
+   `repro build` itself: it finds the crate's prefix in the store, or fetches
+   and verifies it (receipts under `.repro/build/cargo-fetch`). It runs on
+   every build, so a prefix the store has lost is fetched again;
+2. the plan edge `cargo.plan/<workspace>`, the record run (`--cargo-plan`,
+   planning `cargo build --release --workspace`) under the io monitor, whose
+   one output is the plan (`.repro/build/cargo-plan/plan.rbsz`). It is
+   launched from a closed environment, the toolchain's `PATH` (the
+   directories of `cargo`, `rustc` and `cc`), and sets its own private
+   `TMPDIR`, `CARGO_HOME` and `HOME`, so no variable of the caller's
+   environment (`RUSTFLAGS`, `CARGO_PROFILE_*`, `CARGO_BUILD_*`, ...) shapes
+   the plan. It is cached on what it reads;
+3. the units edge `cargo.plan-units/<workspace>`, which reads the plan and
+   writes a dynamic graph fragment with one rustc edge per unit
+   (`planUnitEdges`, outputs under `.repro/build/cargo-units`, that same
+   `PATH` as the one toolchain variable);
+4. the collector `cargo.workspace/<workspace>`, in the default target: the
+   engine creates the fragment's edges when it is about to run.
 
-The graph then holds one rustc edge per unit and nothing that runs cargo;
-each edge is launched from its declared environment alone. The record wrapper
-is found beside the provider, or at `REPRO_RUSTC_WRAPPER_PATH`. If any step
-cannot be taken (a git or alternate-registry source, a crate that cannot be
-fetched, a plan holding a unit these edges do not build), the whole workspace
-is built by cargo. The `test` target stays the delegated one (`cargo
+Each rustc edge is launched from its declared environment alone, and nothing
+runs cargo. The record wrapper is found beside the provider, or at
+`REPRO_RUSTC_WRAPPER_PATH`; without it, or with a git or alternate-registry
+source, the workspace is built by cargo. A crate that cannot be fetched fails
+its fetch edge. When the record run refuses the workspace (a cargo
+configuration above it, `[patch]`, ...) or the plan holds a unit these edges
+do not build (a build script, a proc-macro, ...), the units edge writes the
+delegated cargo edge instead, so the whole workspace is built by cargo.
+The `test` target stays the delegated one (`cargo
 test`), outside the default target: test targets are not taken from the plan
 yet. A fallback to cargo is not reported yet.

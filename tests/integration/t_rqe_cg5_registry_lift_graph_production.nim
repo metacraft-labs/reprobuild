@@ -1,38 +1,35 @@
-## Graph production for a crates.io workspace (the registry lift, switch on):
-## concurrent runs do not share state, and each way it cannot complete sends
-## the whole workspace to Mode B, with its reason.
+## Graph production for a crates.io workspace (the registry lift, switch on)
+## is the declaration of edges: evaluating the workspace runs nothing, and
+## what evaluation alone can tell sends the whole workspace to Mode B, with
+## its reason.
 ##
 ## THE CASES.
 ##
-## 1. Two plans of one workspace at once. Each record run has a directory of
-##    its own (scratch, capture files, temporary directory, plan) under
-##    `.repro/build/cargo-plan`, removed when it is done, so two evaluations
-##    at once (two `repro` processes over one checkout) never empty each
-##    other's state. The case forks: the child and the parent each call
-##    `planWorkspace` at the same moment; both must succeed with the same
-##    edges, and no run directory may be left behind.
+## 1. Evaluation runs nothing. The fragment of a crates.io workspace holds its
+##    graph-production edges (the fetch edges, the plan edge, the Mode B
+##    record, the units edge, the collector) and no unit; nothing is
+##    written under the workspace's `.repro/build/cargo-plan`, and the
+##    fragment is keyed on `Cargo.lock`, from which the fetch edges come.
+##    (A plan the units edge refuses at execution falls back to Mode B
+##    there: `test_rqe_cg5_refused_plan_builds_through_mode_b`.)
 ## 2. A git dependency. A member depends on a git source as well as on a
 ##    crates.io crate: the decision is Mode B before anything runs, naming
 ##    item 6 and the git source class, and the fragment is Mode B's.
 ## 3. No record wrapper. `REPRO_RUSTC_WRAPPER_PATH` names a file that does
-##    not exist: graph production stops before the record run, the fragment
-##    is Mode B's, and it carries an input that is never fresh, naming the
-##    reason, so the next evaluation tries again.
-## 4. A refused plan. A member depends on the crates.io crate `regbs`, which
-##    has a build script: the plan holds a build-script compile and run,
-##    which these edges do not build, so `planWorkspace` refuses it naming
-##    them, and the fragment is Mode B's, keyed on what the record run read.
+##    not exist: no plan edge can be declared, the fragment is Mode B's, and
+##    it carries an input that is never fresh, naming the reason, so the
+##    next evaluation tries again.
 ##
 ## Falsifying mutations (applied, observed to fail, reverted; see the
-## change's report): one fixed record-run directory, emptied before each run
-## as before, fails case 1; taking every dependency source for crates.io
-## fails case 2; raising instead of falling back to Mode B fails cases 3
-## and 4.
+## change's report): running the record run at evaluation (the inline form
+## this replaced) writes under `.repro/build/cargo-plan` and fails case 1;
+## taking every dependency source for crates.io fails case 2; leaving out
+## the never-fresh input fails case 3.
 ##
-## MOCKS: none. Real cargo, rustc, the record wrapper, the io monitor and the
-## fetch wave over a local mirror; nothing contacts the network.
+## MOCKS: none. Real cargo metadata and the real emitter; nothing contacts
+## the network.
 
-import std/[os, posix, sequtils, strutils, tempfiles, unittest]
+import std/[os, sequtils, strutils, tempfiles, unittest]
 
 import repro_provider_runtime
 import repro_project_dsl
@@ -46,54 +43,34 @@ proc tools(): PlanToolchain =
   PlanToolchain(cargo: findExe("cargo"), rustc: findExe("rustc"),
     cc: findExe("cc"))
 
-proc edgeIds(g: PlanGraph): string =
-  ## The edges' ids (a loop: `PlanUnitEdge` has no default value, which
-  ## `mapIt` needs).
-  var ids: seq[string]
-  for e in g.edges: ids.add e.action.id
-  ids.join(" ")
-
 proc isModeB(fragment: GraphFragment): bool =
   let defs = actionDefs(fragment)
-  defs.anyIt(it.runsCargo) and not defs.anyIt(it.isPlanEdge)
+  defs.anyIt(it.runsCargo) and not defs.anyIt(it.isGraphProductionEdge)
 
 suite "the registry lift's graph production":
 
-  test "two plans of one workspace at once keep their own state":
-    let work = createTempDir("cg5-gp-concurrent-", "")
+  test "evaluation declares the graph-production edges and runs nothing":
+    let work = createTempDir("cg5-gp-edges-", "")
     defer: removeTestTree(work)
     let ws = work / "ws"
     writeRegistryWorkspace(ws)
     let reg = setupRegistry(work, smReal, withRegmid = true)
     lockWorkspace(ws, work, reg)
-    discard prepareModeAEnv(work, "cg5-gp-concurrent")
+    discard prepareModeAEnv(work, "cg5-gp-edges")
     putEnv("REPRO_STORE_ROOT", reg.store)
-    # Fetch once first, so the two runs below contend for the record run's
-    # directories, not for the fetch wave's first store write.
-    require planWorkspace(ws, tools()).ok
-    let childReport = work / "child-report"
-    let pid = fork()
-    require pid >= 0
-    if pid == 0:
-      let g = planWorkspace(ws, tools())
-      writeFile(childReport, (if g.ok: "ok\n" else: "failed\n") & g.reason &
-        "\n" & edgeIds(g))
-      exitnow(if g.ok: 0 else: 1)
-    let mine = planWorkspace(ws, tools())
-    var status: cint
-    discard waitpid(pid, status, 0)
-    checkpoint "parent: " & mine.reason
-    checkpoint "child: " & (if fileExists(childReport): readFile(childReport)
-                            else: "<no report>")
-    check mine.ok
-    check WIFEXITED(status) and WEXITSTATUS(status) == 0
-    check readFile(childReport).splitLines()[2] == edgeIds(mine)
-    var left: seq[string]
-    for kind, path in walkDir(ws / PlanDirRel):
-      if extractFilename(path).startsWith("run-"): left.add path
-    checkpoint "left: " & left.join(" ")
-    check left.len == 0
-    check fileExists(ws / PlanFileRel)
+    putEnv(ModeARegistrySwitch, "on")
+    defer: delEnv(ModeARegistrySwitch)
+    let fragment = emitWorkspace(ws)
+    let defs = actionDefs(fragment)
+    checkpoint defs.mapIt(it.id).join(" ")
+    check defs.filterIt(it.id.startsWith("cargo.fetch/")).len == 2  # regleaf, regmid: the fixture's regbs is not locked
+    check defs.filterIt(it.id.startsWith("cargo.plan/")).len == 1
+    check defs.filterIt(it.id.startsWith("cargo.workspace/")).len == 1
+    check not defs.anyIt(it.isPlanEdge)
+    check not dirExists(ws / PlanDirRel)
+    check fragment.evaluationInputs.anyIt(
+      it.identity.endsWith("/Cargo.lock"))
+    check switchInputDigest(fragment) != "<absent>"
 
   test "a git dependency keeps the workspace in Mode B, naming it":
     let work = createTempDir("cg5-gp-git-", "")
@@ -127,7 +104,7 @@ suite "the registry lift's graph production":
     putEnv(ModeARegistrySwitch, "on")
     defer: delEnv(ModeARegistrySwitch)
     check rustModeDecision(ws).kind == rmkPlan
-    let g = planWorkspace(ws, tools())
+    let g = planWorkspace(ws, tools(), getAppFilename())
     checkpoint g.reason
     check not g.ok
     check "record wrapper" in g.reason
@@ -138,30 +115,3 @@ suite "the registry lift's graph production":
     checkpoint unobserved.mapIt(it.identity).join(" | ")
     check unobserved.anyIt("record wrapper" in it.identity)
     check switchInputDigest(fragment) != "<absent>"
-
-  test "a plan holding a registry build script is refused as a whole":
-    let work = createTempDir("cg5-gp-refused-", "")
-    defer: removeTestTree(work)
-    let ws = work / "ws"
-    writeRegistryWorkspace(ws)
-    writeFileIn(ws, "util/Cargo.toml",
-      "[package]\nname = \"util\"\nversion = \"0.1.0\"\nedition = \"2021\"\n" &
-      "\n[dependencies]\nregleaf = \"0.1.0\"\nregbs = \"0.1.0\"\n")
-    let reg = setupRegistry(work, smReal, withRegmid = true)
-    lockWorkspace(ws, work, reg)
-    discard prepareModeAEnv(work, "cg5-gp-refused")
-    putEnv("REPRO_STORE_ROOT", reg.store)
-    putEnv(ModeARegistrySwitch, "on")
-    defer: delEnv(ModeARegistrySwitch)
-    check rustModeDecision(ws).kind == rmkPlan
-    let g = planWorkspace(ws, tools())
-    checkpoint g.reason
-    check not g.ok
-    check g.edges.len == 0
-    check "regbs" in g.reason and "build script" in g.reason
-    check g.observed.files.len > 0
-    let fragment = emitWorkspace(ws)
-    check fragment.isModeB
-    check switchInputDigest(fragment) != "<absent>"
-    check fragment.evaluationInputs.anyIt(
-      it.identity.endsWith("/Cargo.lock"))

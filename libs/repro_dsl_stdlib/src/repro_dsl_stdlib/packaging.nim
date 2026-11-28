@@ -67,6 +67,7 @@ import ./packaging/types
 import ./packaging/runtime_contract
 import ./packaging/services
 import ./packaging/producer
+import ./packaging/powershell_completion
 import ./packaging/reprobuild_dist
 import ./packaging/producers/tarball
 import ./packaging/producers/deb
@@ -77,6 +78,7 @@ import ./packaging/producers/msi
 import ./packaging/producers/scoop
 
 export types, runtime_contract, services, producer, reprobuild_dist
+export powershell_completion
 export tarball, deb, rpm, arch, appimage, msi
 # Scoop is exported but NOT registered with ``registerProducer``, and
 # the asymmetry is the producer's shape rather than an oversight: every
