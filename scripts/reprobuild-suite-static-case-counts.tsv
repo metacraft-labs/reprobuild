@@ -581,6 +581,7 @@ libs/repro_dsl_stdlib/tests/t_installed_prefix.nim	nim	19
 libs/repro_dsl_stdlib/tests/t_isonim_ssg_render_edge.nim	nim	5
 libs/repro_dsl_stdlib/tests/t_link_orders_after_the_libraries_it_links.nim	nim	5
 libs/repro_dsl_stdlib/tests/t_lock_conflict_names_a_cross_repo_producer_and_the_targeted_repin.nim	nim	5
+libs/repro_dsl_stdlib/tests/t_lock_conflict_names_a_producer_checkout_behind_its_pin.nim	nim	9
 libs/repro_dsl_stdlib/tests/t_lock_conflict_names_a_recipe_the_writing_solve_never_saw.nim	nim	3
 libs/repro_dsl_stdlib/tests/t_m68_baseline_catalog.nim	nim	7
 libs/repro_dsl_stdlib/tests/t_module_init_solve_is_deferred_to_first_read.nim	nim	25
@@ -2431,6 +2432,7 @@ tests/integration/t_local_store_prune_keeps_newest_and_head_tree.nim	nim	7
 tests/integration/t_local_store_refuses_foreign_roots_and_protects_head_scopes.nim	nim	1
 tests/integration/t_lock_bytes_do_not_depend_on_remote_tracking_refs.nim	nim	1
 tests/integration/t_lock_coherence_reports_the_diff_advisory_only.nim	nim	3
+tests/integration/t_lock_conflict_from_a_producer_checkout_behind_its_pin_names_the_checkout.nim	nim	1
 tests/integration/t_lock_entry_pins_the_resolved_target.nim	nim	5
 tests/integration/t_lock_failure_remedies_name_a_runnable_command.nim	nim	1
 tests/integration/t_lock_file_only_workspace_fully_described_from_lock_not_head.nim	nim	1

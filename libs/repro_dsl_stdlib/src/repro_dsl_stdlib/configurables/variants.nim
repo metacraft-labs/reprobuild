@@ -165,6 +165,15 @@ type
       ## Which recipe declared this edge (see ``SolverDeclarationSite``).
       ## Diagnostics only: it never reaches the solver inputs, so it moves no
       ## rendered fixture and no inputs digest.
+    declarationFile*: string
+      ## The recipe file that declared this edge, when it is a cross-repo
+      ## producer's (``sdsSiblingRecipe``); empty otherwise. Diagnostics only,
+      ## like ``declarationSite``: it tells a lock conflict WHICH checkout of
+      ## the producer the range was read from, so the conflict can say when
+      ## that checkout is not at the revision the lock pins
+      ## (``lock_pins.staleProducerCheckoutFor``). A producer's package name
+      ## need not be its repository's, so the file, not the name, is what
+      ## finds the checkout.
 
 var pendingSolverPackages {.threadvar.}: seq[SolverPackageInput]
   ## Spec-Implementation M2d: thread-local registry of solver-bound
@@ -386,7 +395,8 @@ proc resetVariantState*() =
 proc registerSolverDependency*(parentPackage, depPackage, rng: string;
                                 gateVariant = ""; gateValue = "";
                                 depKind = "target";
-                                declarationSite = sdsUnknown) =
+                                declarationSite = sdsUnknown;
+                                declarationFile = "") =
   ## Spec-Implementation M2d: append one solver-bound dependency record.
   ## The ``package`` macro emits one of these per ``PackageUseDef``
   ## immediately after ``registerPackageDef``; ``finalizeVariants()``
@@ -403,7 +413,8 @@ proc registerSolverDependency*(parentPackage, depPackage, rng: string;
     gateVariant: gateVariant,
     gateValue: gateValue,
     depKind: depKind,
-    declarationSite: declarationSite)
+    declarationSite: declarationSite,
+    declarationFile: declarationFile)
   # A dependency reached through several imports is still the same constraint.
   if entry notin pendingSolverPackages:
     pendingSolverPackages.add(entry)
@@ -800,11 +811,25 @@ proc assertLockedVersionsSatisfyDeclaredRanges(pins: LockPins) =
       # root-floor-so-the-writer-cannot-produce-a-lock-the-checker-accepts.md
       # and 2026-10-14-declaring-a-sibling-producer-imports-its-toolchain-
       # floor-into-the-consumers-committed-lock-solve.md.
+      #
+      # A cross-repo producer's range comes from whichever checkout of it the
+      # recipe import read, which need not be at the revision the lock pins.
+      # When it is not, the diagnostic names that checkout and leads with
+      # bringing it to the pin, rather than blaming a lock that may be
+      # correct. The CLI's entries are read HERE, on the raising
+      # path only: an environment read keys the monitored action, and a
+      # failed action is never cached (`LockProducerCheckoutsEnvVar`).
+      let crossRepo = entry.declarationSite == sdsSiblingRecipe
+      let stale =
+        if crossRepo:
+          staleProducerCheckoutFor(lockProducerCheckoutsFromEnv(),
+            entry.parentPackage, entry.declarationFile)
+        else: StaleProducerCheckout()
       raise newException(ELockConflict, lockConflictDiagnostic(
         lockSourceDescription(pins), entry.depPackage, locked,
         entry.parentPackage, rangePart,
         declarerRecorded = pins.lockRecordsPackage(entry.parentPackage),
-        crossRepoProducer = entry.declarationSite == sdsSiblingRecipe))
+        crossRepoProducer = crossRepo, staleCheckout = stale))
 
 proc buildPackageDecls(parentPackages: openArray[string]): seq[PackageDecl] =
   ## Build the solver-side ``PackageDecl`` list from the pending

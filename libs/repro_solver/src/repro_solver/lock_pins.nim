@@ -193,9 +193,231 @@ proc repinCommandFor*(depPackage: string): string =
   ## (`Locking-And-Solver.md` §"Targeted re-pin"), as the reader would type it.
   "repro lock refresh --repin=" & depPackage
 
+const LockProducerCheckoutsEnvVar* = "REPRO_LOCK_PRODUCER_CHECKOUTS"
+  ## Names, for the governing committed lock, every lock-pinned cross-repo
+  ## producer whose recipe this build reads from a checkout on disk: the
+  ## producer's name, that checkout's directory and the revision the lock pins
+  ## for it. Written by the CLI's lock-consumption block beside
+  ## ``REPRO_LOCK_PINS``; read by the provider ONLY while it renders an
+  ## ``ELockConflict`` (``lockProducerCheckoutsFromEnv``).
+  ##
+  ## WHY. A cross-repo producer's ``uses:`` ranges reach the consumer's solve
+  ## from whichever checkout of that producer the recipe import found, and that
+  ## checkout need not be at the revision the consumer's lock pins. When it is
+  ## behind (or ahead), the range that contradicts the lock is the CHECKOUT's,
+  ## not the pinned revision's, and the right remedy is to bring the checkout
+  ## to the pin, not to re-pin a correct lock to fit it. The provider cannot
+  ## work that out alone: it sees the recipe it imported, not the lock's
+  ## revision pins, which ``REPRO_LOCK_PINS`` does not carry.
+  ##
+  ## WHY ONLY ON THE FAILURE PATH. Environment reads are evidence for the
+  ## monitored action that makes them, and the value names absolute paths of
+  ## this machine. Read during an ordinary solve it would key every interface
+  ## extraction on the checkout layout; read only while raising, it keys
+  ## nothing, because a failed action is never cached.
+  ##
+  ## Grammar: one entry per line, ``<name>\t<checkout dir>\t<revision>``.
+  ## Tabs and newlines are the separators because a path may contain commas;
+  ## an entry whose fields contain either is not rendered (the diagnostic then
+  ## falls back to the text it had before, which claims nothing false).
+
+type
+  LockProducerCheckout* = object
+    ## One entry of ``LockProducerCheckoutsEnvVar``.
+    name*: string            ## the producer's lock entry name (its repo).
+    checkoutDir*: string     ## absolute directory of the checkout read.
+    pinnedRevision*: string  ## the revision the consumer's lock pins.
+
+  StaleProducerCheckout* = object
+    ## A cross-repo producer whose recipe was read from a checkout that is not
+    ## at the revision the consumer's lock pins. ``checkoutDir`` empty means
+    ## "none known", the ordinary case.
+    name*: string
+    checkoutDir*: string
+    head*: string
+    pinnedRevision*: string
+
+proc isKnown*(stale: StaleProducerCheckout): bool =
+  stale.checkoutDir.len > 0
+
+proc renderLockProducerCheckouts*(
+    entries: openArray[LockProducerCheckout]): string =
+  ## The canonical ``LockProducerCheckoutsEnvVar`` value: sorted by name, so
+  ## one lock and one checkout layout always render the same string.
+  var kept: seq[LockProducerCheckout] = @[]
+  for e in entries:
+    var clean = e.name.len > 0 and e.checkoutDir.len > 0 and
+      e.pinnedRevision.len > 0
+    for field in [e.name, e.checkoutDir, e.pinnedRevision]:
+      if '\t' in field or '\n' in field or '\r' in field: clean = false
+    if clean: kept.add(e)
+  kept.sort(proc (a, b: LockProducerCheckout): int = cmp(a.name, b.name))
+  var lines: seq[string] = @[]
+  for e in kept:
+    lines.add(e.name & "\t" & e.checkoutDir & "\t" & e.pinnedRevision)
+  lines.join("\n")
+
+proc parseLockProducerCheckouts*(raw: string): seq[LockProducerCheckout] =
+  ## Parse a ``LockProducerCheckoutsEnvVar`` value. A line that is not three
+  ## non-empty fields is skipped rather than raised on: the value only refines
+  ## a diagnostic that is already being raised, and failing that diagnostic
+  ## over its own annotation would hide the conflict it reports.
+  for line in raw.split('\n'):
+    let fields = line.strip(chars = {'\r'}).split('\t')
+    if fields.len != 3: continue
+    if fields[0].len == 0 or fields[1].len == 0 or fields[2].len == 0:
+      continue
+    result.add(LockProducerCheckout(name: fields[0], checkoutDir: fields[1],
+      pinnedRevision: fields[2]))
+
+proc lockProducerCheckoutsFromEnv*(): seq[LockProducerCheckout] =
+  ## This process's entries. Call it only while rendering a conflict (see
+  ## ``LockProducerCheckoutsEnvVar`` for why).
+  parseLockProducerCheckouts(getEnv(LockProducerCheckoutsEnvVar))
+
+proc samePackageName(a, b: string): bool =
+  ## A producer's lock entry is its REPO's name (``codetracer-ruby-recorder``)
+  ## while the registry holds its PACKAGE's (``codetracer_ruby_recorder``);
+  ## the two spellings name one producer (see ``lockRecordsPackage``).
+  a.replace('_', '-').toLowerAscii == b.replace('_', '-').toLowerAscii
+
+proc checkoutGitDir(checkoutDir: string): string =
+  ## The git directory of ``checkoutDir``: ``.git`` itself, or the directory a
+  ## ``.git`` FILE names (``gitdir: <path>``, a linked worktree or a submodule).
+  let dotGit = checkoutDir / ".git"
+  if dirExists(dotGit): return dotGit
+  if not fileExists(dotGit): return ""
+  var text = ""
+  try: text = readFile(dotGit)
+  except CatchableError: return ""
+  for line in text.splitLines():
+    if line.startsWith("gitdir:"):
+      let target = line["gitdir:".len .. ^1].strip()
+      if target.len == 0: return ""
+      return if target.isAbsolute: target else: checkoutDir / target
+  ""
+
+proc lookUpRef(gitDir, commonDir, refName: string): string =
+  ## The object id ``refName`` names: its loose file (per-worktree first, then
+  ## shared), else its ``packed-refs`` line. Empty when it cannot be read.
+  for dir in [gitDir, commonDir]:
+    let loose = dir / refName
+    if fileExists(loose):
+      try:
+        let value = readFile(loose).strip()
+        if value.startsWith("ref:"):
+          return ""  # a ref to a ref: not followed, nothing claimed
+        return value
+      except CatchableError:
+        return ""
+  let packed = commonDir / "packed-refs"
+  if fileExists(packed):
+    try:
+      for line in readFile(packed).splitLines():
+        if line.len == 0 or line[0] in {'#', '^'}: continue
+        let space = line.find(' ')
+        if space > 0 and line[space + 1 .. ^1].strip() == refName:
+          return line[0 ..< space]
+    except CatchableError:
+      discard
+  ""
+
+proc checkoutHeadRevision*(checkoutDir: string): string =
+  ## The commit ``checkoutDir``'s HEAD names, read from the repository files
+  ## (`gitrepository-layout(5)`,
+  ## https://git-scm.com/docs/gitrepository-layout): ``HEAD`` is either an
+  ## object id (detached) or ``ref: <name>``, resolved through the loose ref
+  ## file or ``packed-refs``; a linked worktree's shared refs live under the
+  ## directory its ``commondir`` file names. Empty when any step cannot be
+  ## read, so a caller never claims a revision it did not observe.
+  ##
+  ## Read from files rather than by running ``git`` because the caller is the
+  ## provider, raising inside a monitored action whose ``PATH`` need not
+  ## carry ``git``, and this answers the one question asked without a process.
+  let gitDir = checkoutGitDir(checkoutDir)
+  if gitDir.len == 0: return ""
+  var commonDir = gitDir
+  let commonFile = gitDir / "commondir"
+  if fileExists(commonFile):
+    try:
+      let target = readFile(commonFile).strip()
+      if target.len > 0:
+        commonDir = if target.isAbsolute: target else: gitDir / target
+    except CatchableError:
+      return ""
+  var head = ""
+  try: head = readFile(gitDir / "HEAD").strip()
+  except CatchableError: return ""
+  if head.startsWith("ref:"):
+    head = lookUpRef(gitDir, commonDir, head["ref:".len .. ^1].strip())
+  if head.len < 7: return ""
+  for ch in head:
+    if ch notin HexDigits: return ""
+  head.toLowerAscii
+
+proc canonicalPath(path: string): string =
+  ## ``path`` with symlinks resolved when it exists (macOS spells a temporary
+  ## directory both ``/var/…`` and ``/private/var/…``), normalized either way.
+  result = path
+  try:
+    if fileExists(path) or dirExists(path): result = expandFilename(path)
+  except CatchableError:
+    discard
+  result = normalizedPath(result).replace('\\', '/')
+
+proc isUnder(file, dir: string): bool =
+  let f = canonicalPath(file)
+  let d = canonicalPath(dir).strip(leading = false, chars = {'/'})
+  d.len > 0 and f.startsWith(d & "/")
+
+proc staleProducerCheckoutFor*(entries: openArray[LockProducerCheckout];
+                               parentPackage: string;
+                               declarationFile = ""): StaleProducerCheckout =
+  ## The entry for the producer that declared a range, when its checkout's
+  ## HEAD is NOT the revision the lock pins; otherwise an unknown value.
+  ##
+  ## The entry is the one whose checkout holds ``declarationFile`` (the
+  ## declaring recipe, when the caller knows it), else, only when no file is
+  ## known, the one named like ``parentPackage`` under either spelling. The file comes first because a
+  ## producer's package name need not be its repository's. A checkout whose
+  ## HEAD cannot be read is not called stale: the diagnostic then says what it
+  ## said before rather than something it did not observe.
+  ##
+  ## A KNOWN recipe file that lies under none of the checkouts was read from
+  ## somewhere else (a develop override's tree, a nested sibling, the store),
+  ## so the name is not consulted then: a checkout of the same name is not the
+  ## tree the range came from, and its HEAD says nothing about it. Likewise a
+  ## pinned revision that is not an object id (at least seven hex digits) is
+  ## not compared, since a HEAD can never equal a ref name.
+  var found = -1
+  if declarationFile.len > 0 and declarationFile.isAbsolute:
+    for i, e in entries:
+      if declarationFile.isUnder(e.checkoutDir):
+        found = i
+        break
+    if found < 0: return
+  else:
+    for i, e in entries:
+      if samePackageName(e.name, parentPackage):
+        found = i
+        break
+  if found < 0: return
+  let e = entries[found]
+  let head = checkoutHeadRevision(e.checkoutDir)
+  if head.len == 0: return
+  let pinned = e.pinnedRevision.toLowerAscii
+  if pinned.len < 7: return
+  for ch in pinned:
+    if ch notin HexDigits: return
+  if head == pinned or (pinned.len >= 7 and head.startsWith(pinned)):
+    return
+  StaleProducerCheckout(name: e.name, checkoutDir: e.checkoutDir,
+    head: head, pinnedRevision: e.pinnedRevision)
+
 proc lockConflictDiagnostic*(lockDescription, depPackage, locked,
                              parentPackage, rangePart: string;
-                             declarerRecorded, crossRepoProducer: bool):
+                             declarerRecorded, crossRepoProducer: bool;
+                             staleCheckout = StaleProducerCheckout()):
                              string =
   ## The text of an ``ELockConflict``: a committed lock pins ``depPackage`` to
   ## ``locked`` and ``parentPackage`` declares ``uses: <depPackage>
@@ -222,11 +444,35 @@ proc lockConflictDiagnostic*(lockDescription, depPackage, locked,
   ##     reaching it) was declared AFTER the lock was written, or the lock was
   ##     regenerated where the recipe was unreachable. The message used to
   ##     claim only the second, which is the wrong story for the ordinary case
-  ##     of adding a dependency.
+  ##     of adding a dependency;
+  ##   * when ``staleCheckout`` is known, the declaring producer's recipe was
+  ##     read from a checkout whose HEAD is not the revision the lock pins for
+  ##     it. The constraint is then the checkout's, the lock is not shown to be
+  ##     wrong, and the text says so: it names the checkout and both
+  ##     revisions, and its FIRST remedy is to bring the checkout to the pin.
+  ##     The re-pin is named after it, for the case where the pinned revision
+  ##     declares the range too. Re-pinning first would change a correct lock
+  ##     to fit a stale checkout.
   result = "the " & lockDescription & " pins '" & depPackage & "' to " &
     locked & ", but package '" & parentPackage & "' declares `uses: " &
     depPackage & " " & rangePart & "`, which " & locked &
     " does not satisfy. "
+  if staleCheckout.isKnown:
+    result.add("'" & parentPackage & "' is a cross-repo producer, and its " &
+      "recipe was read from the checkout at " & staleCheckout.checkoutDir &
+      ", whose HEAD is " & staleCheckout.head & ", while the lock pins '" &
+      staleCheckout.name & "' at " & staleCheckout.pinnedRevision &
+      ". The constraint is that checkout's, and the pinned revision need " &
+      "not declare it, so this does not show the lock is wrong. First bring " &
+      "the checkout to the pin with `git -C " &
+      quoteShell(staleCheckout.checkoutDir) & " checkout --detach " &
+      quoteShell(staleCheckout.pinnedRevision) & "` (or place a checkout " &
+      "of '" & staleCheckout.name & "' at that revision beside the " &
+      "consumer) and build again. Re-pin '" & depPackage & "' with `" &
+      repinCommandFor(depPackage) & "` only if the conflict remains with " &
+      "the checkout at the pin: re-pinning now would change a correct lock " &
+      "to fit a checkout the lock does not name.")
+    return
   if crossRepoProducer:
     result.add("'" & parentPackage & "' is a cross-repo producer this " &
       "project consumes through `uses:`, not one of its own packages, so " &
