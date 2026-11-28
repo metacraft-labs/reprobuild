@@ -70612,7 +70612,7 @@
     {
       "binary": "",
       "class": "unclassified",
-      "classificationReason": "imports ``nix log``, which this scan does not recognize; refusing to call it pure rather than assuming it is",
+      "classificationReason": "imports `__future__`, which this scan does not recognize; refusing to call it pure rather than assuming it is",
       "defines": [],
       "language": "python",
       "localDependencyShape": [],
@@ -71235,7 +71235,7 @@
       "requiresReproBinary": false,
       "source": "tests/unit/test_reprobuild_suite_inventory.py",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 117,
+      "staticCaseCount": 122,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -71287,7 +71287,7 @@
     {
       "binary": "",
       "class": "unclassified",
-      "classificationReason": "imports `this repository per case (CPU-hours on the shared host)`, which this scan does not recognize; refusing to call it pure rather than assuming it is",
+      "classificationReason": "imports `__future__`, which this scan does not recognize; refusing to call it pure rather than assuming it is",
       "defines": [],
       "language": "python",
       "localDependencyShape": [],
