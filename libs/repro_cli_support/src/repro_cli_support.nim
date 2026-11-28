@@ -31372,6 +31372,56 @@ proc packageRefProducerSelectors*(selectors: openArray[string];
     if binding.declaresProducerEdge:
       result.incl(selector)
 
+proc lockProducerCheckouts*(projectRoot: string;
+                            lock: LockedDependencies):
+    seq[LockProducerCheckout] =
+  ## Every LOCK-PINNED cross-repo producer of ``lock`` whose recipe a build of
+  ## ``projectRoot`` reads from a checkout on disk, with that checkout's
+  ## directory and the revision the lock pins: the value of
+  ## ``LockProducerCheckoutsEnvVar``, which lets the provider's
+  ## ``ELockConflict`` say when a producer's range comes from a checkout that
+  ## is not at its pin, rather than blame a lock that may be correct.
+  ##
+  ## The checkout is the one ``findSiblingProjectFile`` finds from the
+  ## consumer, the rule the recipe import uses, so it is the tree whose ranges
+  ## the solve saw. No git process runs and no HEAD is read here: the entry
+  ## costs a directory probe per producer, and the HEAD comparison is made by
+  ## the provider only when a conflict is being raised.
+  ##
+  ## A producer a develop override binds is left out (its checkout is not
+  ## meant to be at the pin), as is a non-VCS entry and the lock's own row.
+  ## Overrides are read once; a selector an override names goes through the
+  ## two-argument resolver, which applies the bulk-override rule as producer
+  ## admission does (see ``packageRefProducerSelectors``).
+  if projectRoot.len == 0:
+    return
+  let overrides = readDevelopOverridesFile(projectRoot)
+  let legacyOverrides =
+    fileExists(extendedPath(developOverridesMetadataPath(projectRoot)))
+  for dep in lock.deps:
+    if isSelfLockedDep(dep) or dep.coordinates.kind != ckVcs or
+        dep.coordinates.revision.len == 0:
+      continue
+    let sibling = findSiblingProjectFile(dep.name, projectRoot)
+    if sibling.len == 0:
+      continue
+    let binding =
+      try:
+        if legacyOverrides or (overrides.isSome and
+            findOverride(overrides.get(), dep.name).isSome):
+          resolveProducerBinding(dep.name, projectRoot)
+        else:
+          resolveProducerBinding(dep.name, projectRoot, lock, overrides)
+      except CatchableError:
+        # A broken override is reported by the build's own resolution; this
+        # annotation must not raise it first, or raise it differently.
+        continue
+    if binding.kind != pbkLockPinned:
+      continue
+    result.add(LockProducerCheckout(name: dep.name,
+      checkoutDir: absolutePath(parentDir(sibling)),
+      pinnedRevision: dep.coordinates.revision))
+
 proc packageRefProducerSignature*(artifact: ProjectInterfaceArtifact;
                                   projectRoot: string): string =
   ## ``withPackageToolIdentityRefs`` drops exactly the producer selectors
@@ -34494,6 +34544,9 @@ proc runBuildCommandBody(args: openArray[string]; publicCliPath: string;
   # reaches the pinning path with no separate wiring.
   # ----------------------------------------------------------------
   block lockConsumption:
+    # Set below only for a build that a committed lock governs; a previous
+    # build in this process (a daemon) must not leave its entries behind.
+    delEnv(LockProducerCheckoutsEnvVar)
     # A build whose lock pins no Nimble package, or that never reaches the
     # preparation below, hands its compiles no catalog root: nothing a
     # previous build in this process (a daemon) registered carries over.
@@ -34541,6 +34594,23 @@ proc runBuildCommandBody(args: openArray[string]; publicCliPath: string;
       putEnv(LockPinsEnvVar,
              renderLockPins(graph.solution.packages, graph.solution.variants))
       putEnv(LockPathEnvVar, graph.lockPath)
+      # Which checkout each lock-pinned producer's recipe is read from, and
+      # the revision the lock pins for it, so a conflict raised over a range
+      # such a checkout declares can say the checkout is not at its pin
+      # rather than blame the lock (`LockProducerCheckoutsEnvVar`). Not under
+      # `--locked`: that build reads the locked revision's tree, so no
+      # checkout's HEAD describes what it saw.
+      let producerCheckouts =
+        if lockedBuild: ""
+        else:
+          try:
+            renderLockProducerCheckouts(lockProducerCheckouts(projDir,
+              parseWorkspaceLockedDeps(readFile(extendedPath(graph.lockPath)),
+                graph.lockPath)))
+          except CatchableError:
+            ""
+      if producerCheckouts.len > 0:
+        putEnv(LockProducerCheckoutsEnvVar, producerCheckouts)
       # NPC-M6 — a lock that pins Nimble packages: its `nimble-index` pin
       # is verified, every `nimble:` row is checked against a record of the
       # pinned index, and every tree is made present in the source store

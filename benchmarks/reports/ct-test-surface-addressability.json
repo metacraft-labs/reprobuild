@@ -50,16 +50,16 @@
   "counts": {
     "catalogs": 5,
     "itemsByKind": {
-      "case": 21997,
-      "suite": 5179
+      "case": 22007,
+      "suite": 5181
     },
     "itemsByProvider": {
       "assembly-fallback": 3,
-      "nim-unittest": 26182,
+      "nim-unittest": 26194,
       "python-pytest": 7,
       "python-unittest": 984
     },
-    "itemsTotal": 27176,
+    "itemsTotal": 27188,
     "responseDiagnostics": {
       "info": 1,
       "warning": 33
@@ -349,21 +349,21 @@
   ],
   "reconciliation": {
     "caseCoveragePercent": 98.04,
-    "caseItemsInCatalog": 21997,
-    "casesAddressableThroughTheSurface": 20710,
+    "caseItemsInCatalog": 22007,
+    "casesAddressableThroughTheSurface": 20720,
     "collidingIdentities": 18,
-    "distinctCaseIdentities": 21977,
+    "distinctCaseIdentities": 21987,
     "groundTruth": "benchmarks/reports/reprobuild-suite-m0-inventory-sources.json",
     "perSourceCaseCountAgreement": {
-      "agree": 3327,
-      "compared": 3336,
+      "agree": 3329,
+      "compared": 3338,
       "disagree": 9
     },
     "sourceCoveragePercent": 99.76,
-    "sourcesAddressableThroughTheSurface": 3336,
+    "sourcesAddressableThroughTheSurface": 3338,
     "sourcesNotAddressable": 8,
-    "trackedNimSuiteSources": 3344,
-    "trackedStaticCaseCount": 21125
+    "trackedNimSuiteSources": 3346,
+    "trackedStaticCaseCount": 21135
   },
   "schemaVersion": 2,
   "surface": {
@@ -940,6 +940,7 @@
     "libs/repro_dsl_stdlib/tests/t_isonim_ssg_render_edge.nim",
     "libs/repro_dsl_stdlib/tests/t_link_orders_after_the_libraries_it_links.nim",
     "libs/repro_dsl_stdlib/tests/t_lock_conflict_names_a_cross_repo_producer_and_the_targeted_repin.nim",
+    "libs/repro_dsl_stdlib/tests/t_lock_conflict_names_a_producer_checkout_behind_its_pin.nim",
     "libs/repro_dsl_stdlib/tests/t_lock_conflict_names_a_recipe_the_writing_solve_never_saw.nim",
     "libs/repro_dsl_stdlib/tests/t_m68_baseline_catalog.nim",
     "libs/repro_dsl_stdlib/tests/t_module_init_solve_is_deferred_to_first_read.nim",
@@ -2791,6 +2792,7 @@
     "tests/integration/t_local_store_refuses_foreign_roots_and_protects_head_scopes.nim",
     "tests/integration/t_lock_bytes_do_not_depend_on_remote_tracking_refs.nim",
     "tests/integration/t_lock_coherence_reports_the_diff_advisory_only.nim",
+    "tests/integration/t_lock_conflict_from_a_producer_checkout_behind_its_pin_names_the_checkout.nim",
     "tests/integration/t_lock_entry_pins_the_resolved_target.nim",
     "tests/integration/t_lock_failure_remedies_name_a_runnable_command.nim",
     "tests/integration/t_lock_file_only_workspace_fully_described_from_lock_not_head.nim",
